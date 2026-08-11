@@ -1,0 +1,59 @@
+name: Deploy PROD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-prod:
+    name: Migrate + Deploy to PRODUCTION
+    runs-on: ubuntu-latest
+    # GitHub Environment protection rule — requires manual approval
+    environment: di-prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + deps
+        working-directory: backend
+        run: |
+          pip install uv
+          uv pip install --system -e .
+
+      - name: Run Alembic migration → Neon PROD (main branch)
+        working-directory: backend
+        env:
+          DI_DATABASE_URL: ${{ secrets.DI_DATABASE_URL_PROD }}
+        run: alembic upgrade head
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway PROD
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
+        run: railway up --service di-api --environment production
+
+      - name: Smoke test — /health
+        run: |
+          sleep 15
+          curl --fail https://di-api.verigence.app/health
+
+      - name: Smoke test — /ready
+        run: curl --fail https://di-api.verigence.app/ready
+
+      - name: Notify Sentry of release
+        if: ${{ secrets.DI_SENTRY_DSN != '' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: verigence
+          SENTRY_PROJECT: verigence-di
+        run: |
+          npm install -g @sentry/cli
+          sentry-cli releases new ${{ github.sha }}
+          sentry-cli releases set-commits ${{ github.sha }} --auto
+          sentry-cli releases finalize ${{ github.sha }}

@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env.local
+.env.*.local
+
+# uv
+.uv/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# ruff
+.ruff_cache/
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node / frontend
+node_modules/
+.vite/
+ops-ui/dist/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets — NEVER commit real env files
+infra/.env.local
+infra/.env.dev
+infra/.env.prod
+.env
+
+# Logs
+*.log
+
+# Google service account key — never commit
+*-service-account.json
+service-account*.json

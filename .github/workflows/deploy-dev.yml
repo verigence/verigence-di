@@ -1,0 +1,46 @@
+name: Deploy DEV
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  deploy-dev:
+    name: Migrate + Deploy to DEV
+    runs-on: ubuntu-latest
+    environment: di-dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + deps
+        working-directory: backend
+        run: |
+          pip install uv
+          uv pip install --system -e .
+
+      - name: Run Alembic migration → Neon DEV branch
+        working-directory: backend
+        env:
+          DI_DATABASE_URL: ${{ secrets.DI_DATABASE_URL_DEV }}
+        run: alembic upgrade head
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy API + Worker + Scheduler to Railway DEV
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_DEV }}
+        run: railway up --service di-api --environment dev
+
+      - name: Smoke test — /health
+        run: |
+          sleep 10
+          curl --fail https://di-api-dev.verigence.app/health
+
+      - name: Smoke test — /ready
+        run: curl --fail https://di-api-dev.verigence.app/ready

@@ -1,0 +1,82 @@
+"""database.py — async SQLAlchemy engine, session factory and RLS helper.
+
+Every request/worker transaction must call set_tenant_context() before
+any query so that PostgreSQL RLS policies (app.tenant_id) are enforced.
+"""
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy import event, text
+
+from verigence.di.settings import get_settings
+
+# ── Engine (module singleton) ─────────────────────────────────────────────────
+def _make_engine():  # type: ignore[no-untyped-def]
+    settings = get_settings()
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+        echo=not settings.is_production,
+    )
+
+
+_engine = _make_engine()
+
+AsyncSessionFactory = async_sessionmaker(
+    _engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
+# ── RLS tenant context ────────────────────────────────────────────────────────
+async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
+    """Set transaction-local tenant_id for PostgreSQL RLS.
+
+    Must be called at the start of every tenant-scoped transaction.
+    Uses SET LOCAL so the value is cleared automatically at transaction end.
+    """
+    await session.execute(
+        text("SET LOCAL app.tenant_id = :tid"),
+        {"tid": tenant_id},
+    )
+
+
+# ── FastAPI dependency ────────────────────────────────────────────────────────
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an AsyncSession; rolls back on exception, closes on exit."""
+    async with AsyncSessionFactory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+# ── Context manager for worker/scheduler use ─────────────────────────────────
+@asynccontextmanager
+async def tenant_session(tenant_id: str) -> AsyncGenerator[AsyncSession, None]:
+    """Open a session, set RLS context and yield — for use outside FastAPI."""
+    async with AsyncSessionFactory() as session:
+        try:
+            await set_tenant_context(session, tenant_id)
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
