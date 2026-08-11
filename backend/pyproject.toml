@@ -73,7 +73,14 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
-ignore = ["E501"]
+ignore = [
+    "E501",    # line too long — handled by formatter
+    "B008",    # Depends() in function defaults — idiomatic FastAPI pattern
+    "TC001",   # move app import into TYPE_CHECKING — breaks Pydantic runtime validation
+    "TC002",   # move third-party import into TYPE_CHECKING — breaks FastAPI/SQLAlchemy runtime use
+    "TC003",   # move stdlib import into TYPE_CHECKING — breaks Pydantic/FastAPI runtime annotation
+    "F841",    # local variable assigned but never used — we clean these up manually
+]
 
 [tool.mypy]
 python_version = "3.12"

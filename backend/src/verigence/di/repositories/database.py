@@ -8,14 +8,15 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy import event, text
 
 from verigence.di.settings import get_settings
+
 
 # ── Engine (module singleton) ─────────────────────────────────────────────────
 def _make_engine():  # type: ignore[no-untyped-def]

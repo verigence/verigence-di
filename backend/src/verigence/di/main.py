@@ -85,11 +85,12 @@ def create_app() -> FastAPI:
     # ── Routers ─────────────────────────────────────────────────────────────
     # Import here to avoid circular imports; routers are added incrementally
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
-    app.include_router(health_router)
+    from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
+    from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
 
-    # Remaining routers are wired in as each module is implemented:
-    # from verigence.di.api.v1 import subjects, documents, ...
-    # app.include_router(subjects.router, prefix="/v1")
+    app.include_router(health_router)
+    app.include_router(subjects_router)
+    app.include_router(documents_router)
 
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:

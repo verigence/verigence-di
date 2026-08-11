@@ -13,7 +13,7 @@ from __future__ import annotations
 import abc
 import io
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import IO, Any, AsyncIterator, Union
 from uuid import UUID
 
 
@@ -32,8 +32,9 @@ class StorageAdapter(abc.ABC):
     async def put_stream(
         self,
         logical_key: str,
-        stream: AsyncIterator[bytes],
+        stream: Union[IO[bytes], AsyncIterator[bytes]],
         content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> StorageMetadata:
         """Write a stream to object storage and return metadata."""
 
@@ -111,22 +112,29 @@ class S3StorageAdapter(StorageAdapter):
     async def put_stream(
         self,
         logical_key: str,
-        stream: AsyncIterator[bytes],
+        stream: Union[IO[bytes], AsyncIterator[bytes]],
         content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> StorageMetadata:
         import uuid
         import aioboto3  # type: ignore[import]
 
-        # Collect stream into buffer (multipart for large files can be added later)
-        buffer = io.BytesIO()
-        async for chunk in stream:
-            buffer.write(chunk)
+        # Normalise: accept both sync IO (BytesIO) and async iterators
+        if hasattr(stream, "read"):
+            # Sync IO object — wrap in BytesIO if not already, then read
+            buffer: io.BytesIO = stream if isinstance(stream, io.BytesIO) else io.BytesIO(stream.read())  # type: ignore[assignment]
+        else:
+            buffer = io.BytesIO()
+            async for chunk in stream:  # type: ignore[union-attr]
+                buffer.write(chunk)
         size = buffer.tell()
         buffer.seek(0)
 
-        extra: dict = {}  # type: ignore[type-arg]
+        extra: dict[str, Any] = {}
         if content_type:
             extra["ContentType"] = content_type
+        if metadata:
+            extra["Metadata"] = metadata
 
         session = aioboto3.Session()
         async with session.client("s3", **self._client_kwargs()) as s3:

@@ -1,9 +1,15 @@
-"""tests/test_scoring.py — Unit tests for the confidence scoring formula."""
+"""tests/test_scoring.py — Pure unit tests for the confidence scoring formula.
+
+These tests have NO external dependencies (no DB, no Docker, no network).
+Mark the module so pytest does not trigger the pg_container session fixture.
+"""
 from __future__ import annotations
 
 from decimal import Decimal
 
 import pytest
+
+pytestmark = pytest.mark.no_docker  # prevents session-scoped pg_container from running
 
 from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
