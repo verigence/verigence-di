@@ -1,7 +1,8 @@
-"""api/v1/schemas.py — Pydantic request/response schemas matching DI_OPENAPI_v2.1.
+"""api/v1/schemas.py — Pydantic request/response schemas (Baseline 2.2).
 
-All schemas use camelCase aliases to match the OAS contract, while internally
-the application uses snake_case Python field names.
+All schemas use camelCase to match the OAS contract.
+
+v2.2 Problem schema adds: code (stable), retryable, category, correlationId.
 """
 from __future__ import annotations
 
@@ -34,14 +35,19 @@ class _CamelModel(BaseModel):
     )
 
 
-# ── Problem (RFC 7807) ────────────────────────────────────────────────────────
+# ── Problem (RFC 7807 + DI v2.2 extensions) ──────────────────────────────────
 
 class Problem(BaseModel):
+    """v2.2 Problem body. Clients MUST branch on `code`, never on `title`."""
     type: str = "about:blank"
+    code: str                           # stable DI error code (e.g. FILE_TOO_LARGE)
     title: str
     status: int
+    retryable: bool = False             # from DI_ERROR_CATALOG_v2.2.yaml
+    category: str | None = None         # error category group
     detail: str | None = None
     instance: str | None = None
+    correlationId: str | None = None    # echoed X-Correlation-ID
     extensions: dict[str, Any] | None = None
 
     model_config = ConfigDict(extra="allow")

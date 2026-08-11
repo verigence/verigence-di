@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import abc
 import io
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import IO, Any, AsyncIterator, Union
+from typing import IO, Any
 from uuid import UUID
 
 
@@ -32,7 +33,7 @@ class StorageAdapter(abc.ABC):
     async def put_stream(
         self,
         logical_key: str,
-        stream: Union[IO[bytes], AsyncIterator[bytes]],
+        stream: IO[bytes] | AsyncIterator[bytes],
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> StorageMetadata:
@@ -112,11 +113,12 @@ class S3StorageAdapter(StorageAdapter):
     async def put_stream(
         self,
         logical_key: str,
-        stream: Union[IO[bytes], AsyncIterator[bytes]],
+        stream: IO[bytes] | AsyncIterator[bytes],
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> StorageMetadata:
         import uuid
+
         import aioboto3  # type: ignore[import]
 
         # Normalise: accept both sync IO (BytesIO) and async iterators
@@ -178,6 +180,7 @@ class S3StorageAdapter(StorageAdapter):
 
     async def get_metadata(self, logical_key: str) -> StorageMetadata:
         import uuid
+
         import aioboto3
 
         session = aioboto3.Session()

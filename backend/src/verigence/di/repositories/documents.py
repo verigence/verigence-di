@@ -68,6 +68,7 @@ async def create_document_receiving(
     source_device_id: str | None = None,
     captured_at: datetime | None = None,
     replaces_document_id: uuid.UUID | None = None,
+    document_type_hint_key: str | None = None,  # v2.2: persisted non-authoritative hint
 ) -> dict:  # type: ignore[type-arg]
     """Insert a RECEIVING Document row and return its data dict."""
     from datetime import timedelta
@@ -83,6 +84,7 @@ async def create_document_receiving(
         text("""
             INSERT INTO docintel.documents (
                 tenant_id, document_id, subject_id,
+                document_type_hint_key,
                 active_retention_policy_id, retention_until_utc, retention_disposition,
                 source_channel, uploaded_by_actor_id, uploaded_by_actor_type,
                 source_device_id, captured_at,
@@ -94,6 +96,7 @@ async def create_document_receiving(
                 created_at_utc, updated_at_utc
             ) VALUES (
                 :tenant_id, :document_id, :subject_id,
+                :hint_key,
                 :retention_policy_id, :retention_until, :retention_disposition,
                 :source_channel, :actor_id, :actor_type,
                 :device_id, :captured_at,
@@ -109,6 +112,7 @@ async def create_document_receiving(
             "tenant_id": tenant_id,
             "document_id": document_id,
             "subject_id": subject_id,
+            "hint_key": document_type_hint_key,
             "retention_policy_id": retention_policy_id,
             "retention_until": retention_until,
             "retention_disposition": retention_disposition.value,

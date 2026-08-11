@@ -80,6 +80,9 @@ ignore = [
     "TC002",   # move third-party import into TYPE_CHECKING — breaks FastAPI/SQLAlchemy runtime use
     "TC003",   # move stdlib import into TYPE_CHECKING — breaks Pydantic/FastAPI runtime annotation
     "F841",    # local variable assigned but never used — we clean these up manually
+    "UP042",   # prefer StrEnum — str+Enum is required for Pydantic v2 serialization compat
+    "UP007",   # use X|Y union — keep Union for clarity in complex storage type hints
+    "UP035",   # AsyncIterator from collections.abc — keep typing import for now
 ]
 
 [tool.mypy]

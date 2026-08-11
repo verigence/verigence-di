@@ -1,14 +1,15 @@
-"""audit/chain.py — SHA-256 hash-chained append-only audit log.
+"""audit/chain.py — Entity-scoped SHA-256 hash-chain audit log (Baseline 2.2).
 
-Implements the Tenant audit chain serialisation described in
-DI_LLD_v2.1.md §3 (Audit Writer) and DI_ARCHITECTURE_v2.1.md §15.
+v2.2 change (DI_AUDIT_MODEL_v2.2.md §2):
+  audit_chain_heads PK = (tenant_id, entity_type, entity_id)
 
-Key invariants:
-- Chain-head row is locked with SELECT … FOR UPDATE before every append.
-- The previous event's hash becomes the new event's previous_event_hash.
-- Audit event rows are immutable (enforced by DB trigger reject_update_delete).
-- Pre-Tenant WhatsApp quarantine uses the singleton system audit chain.
-- Sensitive document contents are never included in audit payloads.
+Each audited entity has its own chain head row. Concurrent writes to
+DIFFERENT entities in the same Tenant proceed without serialising on
+one row lock. Concurrent writes to the SAME entity still serialize
+(correct — tamper evidence is per-entity).
+
+Entity type examples (DI_AUDIT_MODEL_v2.2.md §2):
+  DOCUMENT, SUBJECT, EXTRACTION_PROFILE, REQUIREMENT_PROFILE, TENANT
 """
 from __future__ import annotations
 
@@ -22,11 +23,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _canonical_payload(event_type: str, entity_type: str, entity_id: str,
-                       actor_type: str, actor_id: str, tenant_id: str | None,
-                       correlation_id: str | None, before_state: dict | None,
-                       after_state: dict | None, metadata: dict | None,
-                       occurred_at: datetime, previous_hash: str | None) -> str:
+def _canonical_payload(
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    actor_type: str,
+    actor_id: str,
+    tenant_id: str | None,
+    correlation_id: str | None,
+    before_state: dict | None,
+    after_state: dict | None,
+    metadata: dict | None,
+    occurred_at: datetime,
+    previous_hash: str | None,
+) -> str:
     """Produce a deterministic canonical JSON string for hashing."""
     payload = {
         "tenant_id": tenant_id,
@@ -63,32 +73,43 @@ async def append_tenant_audit_event(
     after_state: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Append one event to the Tenant audit chain. Returns event_hash.
+    """Append one event to the entity-scoped Tenant audit chain.
 
-    Serialises concurrent appends by locking the chain-head row FOR UPDATE.
+    Returns event_hash.
+
+    Serialises concurrent writes to the same (tenant_id, entity_type, entity_id)
+    via SELECT FOR UPDATE. Writes to different entities proceed concurrently.
     Must be called within an open transaction that also holds RLS tenant context.
     """
-    # 1. Lock chain head for this Tenant
+    # 1. Upsert entity chain head (no-op if row already exists), then lock it
+    await session.execute(
+        text("""
+            INSERT INTO docintel.audit_chain_heads
+                (tenant_id, entity_type, entity_id, last_event_hash, updated_at_utc)
+            VALUES (:tid, :etype, :eid, NULL, :now)
+            ON CONFLICT (tenant_id, entity_type, entity_id) DO NOTHING
+        """),
+        {
+            "tid": tenant_id,
+            "etype": entity_type,
+            "eid": entity_id,
+            "now": datetime.now(UTC),
+        },
+    )
+
     head_row = await session.execute(
-        text(
-            "SELECT last_event_hash FROM docintel.audit_chain_heads "
-            "WHERE tenant_id = :tid FOR UPDATE"
-        ),
-        {"tid": tenant_id},
+        text("""
+            SELECT last_event_hash
+            FROM docintel.audit_chain_heads
+            WHERE tenant_id = :tid
+              AND entity_type = :etype
+              AND entity_id   = :eid
+            FOR UPDATE
+        """),
+        {"tid": tenant_id, "etype": entity_type, "eid": entity_id},
     )
     head = head_row.fetchone()
-    if head is None:
-        # First event for this Tenant — insert a head row
-        await session.execute(
-            text(
-                "INSERT INTO docintel.audit_chain_heads (tenant_id, last_event_hash, last_event_at_utc) "
-                "VALUES (:tid, NULL, NULL) ON CONFLICT DO NOTHING"
-            ),
-            {"tid": tenant_id},
-        )
-        previous_hash = None
-    else:
-        previous_hash = head[0]
+    previous_hash: str | None = head[0] if head else None
 
     occurred_at = datetime.now(UTC)
     event_id = uuid.uuid4()
@@ -109,7 +130,7 @@ async def append_tenant_audit_event(
     )
     event_hash = _sha256(canonical)
 
-    # 2. Insert immutable audit event
+    # 2. Insert immutable audit event (with entity columns added in migration 0002)
     await session.execute(
         text("""
             INSERT INTO docintel.audit_events (
@@ -144,14 +165,23 @@ async def append_tenant_audit_event(
         },
     )
 
-    # 3. Advance chain head
+    # 3. Advance entity chain head
     await session.execute(
-        text(
-            "UPDATE docintel.audit_chain_heads "
-            "SET last_event_hash = :h, last_event_at_utc = :t "
-            "WHERE tenant_id = :tid"
-        ),
-        {"h": event_hash, "t": occurred_at, "tid": tenant_id},
+        text("""
+            UPDATE docintel.audit_chain_heads
+            SET last_event_hash = :h,
+                updated_at_utc  = :t
+            WHERE tenant_id  = :tid
+              AND entity_type = :etype
+              AND entity_id   = :eid
+        """),
+        {
+            "h": event_hash,
+            "t": occurred_at,
+            "tid": tenant_id,
+            "etype": entity_type,
+            "eid": entity_id,
+        },
     )
 
     return event_hash

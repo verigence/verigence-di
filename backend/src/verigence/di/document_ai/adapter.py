@@ -13,7 +13,6 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from decimal import Decimal
-from uuid import UUID
 
 from verigence.di.domain.enums import AICapability, FoundStatus
 

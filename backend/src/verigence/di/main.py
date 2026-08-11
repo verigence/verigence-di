@@ -5,7 +5,6 @@ and exposes /health and /ready endpoints.
 """
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 
@@ -85,8 +84,8 @@ def create_app() -> FastAPI:
     # ── Routers ─────────────────────────────────────────────────────────────
     # Import here to avoid circular imports; routers are added incrementally
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
-    from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
+    from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
 
     app.include_router(health_router)
     app.include_router(subjects_router)

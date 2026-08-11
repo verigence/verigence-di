@@ -85,7 +85,7 @@ async def intake_document(
     uploaded_by_actor_type: str,
     correlation_id: str,
     upload: UploadFile,
-    document_type_key: str | None = None,
+    document_type_key: str | None = None,  # v2.2: persisted as document_type_hint_key
     captured_at: datetime | None = None,
     source_reference: str | None = None,
     replaces_document_id: uuid.UUID | None = None,
@@ -118,6 +118,7 @@ async def intake_document(
         source_device_id=source_device_id,
         captured_at=captured_at,
         replaces_document_id=replaces_document_id,
+        document_type_hint_key=document_type_key,  # v2.2: persist caller hint
     )
     document_id: uuid.UUID = doc["document_id"]
 
@@ -144,7 +145,7 @@ async def intake_document(
     try:
         raw_bytes, byte_count, sha256_hex = await _stream_and_hash(upload, max_bytes)
     except ValueError as exc:
-        # Exceeds size limit → UPLOAD_FAILED
+        # Exceeds size limit → UPLOAD_FAILED (canonical code: FILE_TOO_LARGE)
         await update_document_upload_complete(
             session,
             tenant_id=tenant_id,
@@ -153,12 +154,12 @@ async def intake_document(
             content_hash_sha256="",
             detected_mime_type=upload.content_type or "",
             upload_status=UploadStatus.UPLOAD_FAILED,
-            upload_issue_code="SIZE_EXCEEDED",
+            upload_issue_code="FILE_TOO_LARGE",
             upload_issue_detail=str(exc),
         )
         await session.commit()
         doc["upload_status"] = UploadStatus.UPLOAD_FAILED
-        doc["upload_issue_code"] = "SIZE_EXCEEDED"
+        doc["upload_issue_code"] = "FILE_TOO_LARGE"
         return doc
 
     # Detect MIME from bytes
@@ -174,12 +175,12 @@ async def intake_document(
             content_hash_sha256=sha256_hex,
             detected_mime_type=detected_mime,
             upload_status=UploadStatus.CORRUPT,
-            upload_issue_code="UNSUPPORTED_MIME",
+            upload_issue_code="MIME_TYPE_NOT_ALLOWED",  # v2.2 canonical code
             upload_issue_detail=f"Detected MIME type {detected_mime!r} is not allowed",
         )
         await session.commit()
         doc["upload_status"] = UploadStatus.CORRUPT
-        doc["upload_issue_code"] = "UNSUPPORTED_MIME"
+        doc["upload_issue_code"] = "MIME_TYPE_NOT_ALLOWED"
         return doc
 
     # ── Step 7: Persist to storage ────────────────────────────────────────────
