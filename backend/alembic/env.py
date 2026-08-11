@@ -1,78 +1,71 @@
-"""Alembic environment configuration for Verigence DI.
+"""Alembic environment — sync psycopg2 connection for DDL migrations.
 
-Uses async SQLAlchemy engine (asyncpg) for all migrations.
-The DI_DATABASE_URL env var is read at migration time so that
-the same alembic.ini works across local, dev and production.
+We use a synchronous psycopg2 engine for migrations only.
+The application runtime uses asyncpg (async), but Alembic DDL
+does not benefit from async and psycopg2 handles multi-statement
+SQL blocks without the asyncpg prepared-statement restriction.
 """
 from __future__ import annotations
 
-import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy import create_engine, pool, text
 
-# Alembic Config object — gives access to alembic.ini values
+# Alembic Config object
 config = context.config
 
-# Override sqlalchemy.url from environment variable
-database_url = os.environ.get("DI_DATABASE_URL")
-if database_url:
-    # asyncpg driver required; normalise prefix
-    config.set_main_option(
-        "sqlalchemy.url",
-        database_url.replace("postgresql://", "postgresql+asyncpg://")
-        .replace("postgres://", "postgresql+asyncpg://"),
-    )
+# Read DB URL from environment and convert to psycopg2 (sync) driver
+database_url = os.environ.get("DI_DATABASE_URL", "")
+sync_url = (
+    database_url
+    .replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    .replace("postgresql://", "postgresql+psycopg2://")
+    .replace("postgres://", "postgresql+psycopg2://")
+    .replace("?ssl=require", "?sslmode=require")
+    .replace("&ssl=require", "&sslmode=require")
+)
+if sync_url:
+    config.set_main_option("sqlalchemy.url", sync_url)
 
-# Logging setup from alembic.ini
+# Logging
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# We use plain SQL migrations (not ORM metadata autogenerate)
 target_metadata = None
 
 
 def run_migrations_offline() -> None:
-    """Run migrations without a live DB connection (useful for SQL script generation)."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-    )
-    with context.begin_transaction():
-        context.run_migrations()
-
-
-def do_run_migrations(connection: Connection) -> None:
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        # Use docintel schema for alembic_version table
         version_table_schema="docintel",
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
-async def run_async_migrations() -> None:
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+def run_migrations_online() -> None:
+    connectable = create_engine(
+        config.get_main_option("sqlalchemy.url"),  # type: ignore[arg-type]
         poolclass=pool.NullPool,
     )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    with connectable.connect() as connection:
+        # Ensure docintel schema exists before Alembic creates its version table
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS docintel"))
+        connection.commit()
 
-
-def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema="docintel",
+        )
+        with context.begin_transaction():
+            context.run_migrations()
 
 
 if context.is_offline_mode():
