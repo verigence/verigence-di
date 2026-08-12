@@ -3,6 +3,6 @@ builder = "nixpacks"
 buildCommand = "curl -LsSf https://astral.sh/uv/install.sh | sh && cd backend && ~/.local/bin/uv sync --no-dev"
 
 [deploy]
-startCommand = "cd backend && ~/.local/bin/uv run uvicorn verigence.di.main:create_app --factory --host 0.0.0.0 --port $PORT"
+startCommand = "cd /app/backend && /root/.local/bin/uv run uvicorn verigence.di.main:create_app --factory --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
