@@ -10,11 +10,11 @@ Update this file at the end of every session.
 
 ## Current active step
 
-**Step 13 — Railway deployment — ⚠️ PARTIAL (di-api ✅ deployed, di-worker ❌ pending)**
+**Step 13 — Railway deployment — ✅ DONE**
 
-di-api is live on Railway production environment. di-worker service needs same GitHub integration setup.
+Both di-api and di-worker are live on Railway production environment via GitHub integration.
 
-**Next: Set up di-worker service on Railway, then Step 12 — React PWA ops-ui**
+**Next: Step 12 — React PWA ops-ui**
 
 ---
 
@@ -35,7 +35,7 @@ di-api is live on Railway production environment. di-worker service needs same G
 | 10b | EOD Retry Scheduler | ✅ | ✅ | ✅ DONE |
 | 11 | All remaining 48 REST API operations | ✅ | ✅ | ✅ DONE |
 | 12 | React PWA ops-ui | ❌ README only | — | ❌ NOT STARTED |
-| 13 | Railway + Cloudflare Pages + CI/CD | ✅ | ✅ | ⚠️ PARTIAL — di-api deployed ✅, di-worker pending |
+| 13 | Railway + Cloudflare Pages + CI/CD | ✅ | ✅ | ✅ DONE — both di-api and di-worker deployed via Railway GitHub integration |
 | 14 | WhatsApp adapter (Phase 2) | ❌ empty | — | ❌ NOT STARTED |
 | 15 | Registered device enforcement (Phase 2) | ❌ | — | ❌ NOT STARTED |
 | 16 | Idempotency records (Phase 2) | ❌ | — | ❌ NOT STARTED |
@@ -473,4 +473,47 @@ After extensive troubleshooting with the Railway CLI token approach, switched to
 - [ ] Run Alembic migrations against Neon DB: `DI_DATABASE_URL=<neon-url> alembic upgrade head`
 - [ ] Smoke test: `curl https://<railway-domain>/health`
 - [ ] Set `DI_SECURITY_JWKS_URL` once Security module is deployed
+
+
+---
+
+## Session record — 2026-08-13 (di-worker deployment completion)
+
+### Step 13 — Railway deployment ✅ DONE
+
+#### di-worker service — ✅ DEPLOYED AND RUNNING
+
+**Root cause of `/app does not exist` error:** di-worker had no GitHub repo source connected — Railway was trying to start an empty service with a start command but no built image.
+
+**Fix:**
+1. Railway dashboard → di-worker → Settings → Source → Connect Repo
+2. Selected `verigence/verigence-di`, branch `dev`, root directory blank
+3. Railway triggered a build — same nixpacks build as di-api
+4. After build succeeded, set start command:
+   ```
+   cd /app/backend && DI_WORKER_ENABLED=true /root/.local/bin/uv run python -m verigence.di.workers
+   ```
+
+**Additional fix committed to repo:**
+- `railway.toml` and `backend/Procfile` updated to use absolute paths (`/app/backend`, `/root/.local/bin/uv`) instead of relative paths and `~/.local/bin/uv`
+
+#### Final di-worker service configuration
+
+| Setting | Value |
+|---|---|
+| Source | GitHub repo `verigence/verigence-di`, branch `dev`, root directory blank |
+| Build command | *(from railway.toml)* `curl -LsSf https://astral.sh/uv/install.sh \| sh && cd backend && /root/.local/bin/uv sync --no-dev` |
+| Start command | `cd /app/backend && DI_WORKER_ENABLED=true /root/.local/bin/uv run python -m verigence.di.workers` |
+
+#### Step 13 completion checklist
+
+- [x] CI pipeline green (lint + test) on every push to `dev`
+- [x] di-api deployed and running on Railway production
+- [x] di-worker deployed and running on Railway production
+- [x] `railway.toml` and `Procfile` using absolute paths
+- [x] All environment variables set on both services
+- [ ] Cloudflare R2 bucket — document upload will fail until configured
+- [ ] Alembic migrations run against Neon DB
+- [ ] Smoke test `GET /health` and `GET /ready`
+- [ ] `DI_SECURITY_JWKS_URL` — set once Security module deployed
 

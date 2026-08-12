@@ -144,7 +144,7 @@ The original list had **4 gaps** discovered during validation against the design
 | **10b** | EOD Retry Scheduler | LLD §EOD Retry Scheduler | ✅ DONE |
 | **11** | All remaining 48 REST API operations (see breakdown below) | `DI_OPENAPI_v2.2.yaml` — 54 total, 54 done | ✅ DONE |
 | **12** | React PWA ops-ui | Architecture §Components / Access/API | ❌ NOT STARTED |
-| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ⚠️ PARTIAL — di-api deployed via Railway GitHub integration ✅; di-worker pending; R2 storage pending |
+| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ✅ DONE — both services live on Railway via GitHub integration |
 | **14** | WhatsApp adapter — webhook, media download, intake, quarantine | LLD §WhatsApp Adapter + §11 WhatsApp flow | ❌ NOT STARTED (Phase 2) |
 | **15** | Registered device enforcement for USER actors | LLD §3 JWT/RBAC — `device_id` check | ❌ NOT STARTED (Phase 2) |
 | **16** | Idempotency records (`idempotency_records` table) | LLD §13 Idempotency | ❌ NOT STARTED (Phase 2) |
@@ -268,14 +268,12 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current:** Step 13 — Railway deployment (⚠️ PARTIAL)
-- ✅ di-api deployed and running
-- ❌ di-worker — set up GitHub integration on Railway (same steps as di-api)
-- ❌ Cloudflare R2 — create bucket, update `DI_STORAGE_*` env vars
-- ❌ Alembic migrations — run `alembic upgrade head` against Neon DB
-- ❌ `DI_SECURITY_JWKS_URL` — set once Security module is deployed
+**Current:** Step 12 — React PWA ops-ui
 
-**After Step 13 complete:** Step 12 — React PWA ops-ui
+**Step 13 status:** ✅ DONE
+- Both di-api and di-worker deployed on Railway via GitHub integration
+- Auto-deploys on every push to `dev`
+- Remaining (non-blocking): R2 storage, Alembic migrations, smoke test, Security JWKS URL
 
 **Railway deployment method (no CLI token needed):**
 Railway dashboard → service → Settings → Source → Connect Repo → select repo/branch `dev` → root directory blank.
