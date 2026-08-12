@@ -48,7 +48,7 @@ async def get_tenant_document_exceptions(
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
-                text(f"""
+                text("""
                     SELECT d.document_id, d.subject_id, d.upload_status,
                            d.processing_status, d.confirmation_status,
                            d.upload_issue_code, d.processing_failure_code,

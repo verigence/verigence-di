@@ -10,9 +10,12 @@ v2.2: authorization uses require_tenant_permission() (permissions[], not role na
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+import structlog
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from sqlalchemy import text
 
 from verigence.di.api.v1.schemas import (
     DocumentResponse,
@@ -22,7 +25,8 @@ from verigence.di.application.intake import intake_document
 from verigence.di.auth.dependencies import require_tenant_actor, require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
-from verigence.di.domain.enums import SourceChannel
+from verigence.di.domain.enums import ProcessingStatus, SourceChannel, UploadStatus
+from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 from verigence.di.repositories.documents import (
     delete_document,
@@ -112,7 +116,6 @@ async def upload_subject_document(
                 detail={"type": "VALIDATION_ERROR", "title": "Invalid replacesDocumentId UUID"},
             ) from exc
 
-    from datetime import datetime
     captured_at_dt: datetime | None = None
     if capturedAt:
         try:
@@ -124,7 +127,6 @@ async def upload_subject_document(
             ) from exc
 
     # Get correlation_id from request state (set by middleware)
-    import structlog
     ctx = structlog.contextvars.get_contextvars()
     correlation_id: str = ctx.get("correlation_id", str(uuid.uuid4()))
 
@@ -245,10 +247,6 @@ async def delete_subject_document(
     audit_events are preserved. All other child rows + object storage bytes
     are permanently removed.
     """
-    from verigence.di.domain.enums import ProcessingStatus, UploadStatus
-    from verigence.di.errors import ErrorCode, problem
-    from verigence.di.storage.adapter import get_storage_adapter
-
     storage = get_storage_adapter()
 
     async with tenant_session(actor.tenant_id) as session:
@@ -298,10 +296,6 @@ async def delete_subject_document(
 
 # ── Extensions: getSubjectDocumentContent, getSubjectDocumentFields,
 #                getSubjectDocumentExceptions, getSubjectDocumentQuality ────────
-import json as _json
-from fastapi import Response as _Response
-from sqlalchemy import text as _text
-from verigence.di.errors import ErrorCode as _EC, problem as _problem
 
 
 @router.get(
@@ -314,12 +308,12 @@ async def get_subject_document_content(
     subjectId: uuid.UUID,
     documentId: uuid.UUID,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.DOCUMENT_CONTENT_READ)),
-) -> _Response:
+) -> Response:
     """Return original document bytes (OAS: getSubjectDocumentContent)."""
     async with tenant_session(actor.tenant_id) as session:
         art_row = (
             await session.execute(
-                _text("""
+                text("""
                     SELECT da.logical_object_key, da.mime_type, d.content_hash_sha256,
                            d.content_state
                     FROM docintel.document_artifacts da
@@ -334,9 +328,9 @@ async def get_subject_document_content(
             )
         ).one_or_none()
     if not art_row:
-        raise _problem(404, "Document not found", _EC.DOCUMENT_NOT_FOUND)
+        raise problem(404, "Document not found", ErrorCode.DOCUMENT_NOT_FOUND)
     if art_row[3] == "PURGED":
-        raise _problem(410, "Document content purged", _EC.DOCUMENT_CONTENT_PURGED)
+        raise problem(410, "Document content purged", ErrorCode.DOCUMENT_CONTENT_PURGED)
 
     storage = get_storage_adapter()
     chunks = []
@@ -346,7 +340,7 @@ async def get_subject_document_content(
     headers = {}
     if art_row[2]:
         headers["X-Content-SHA256"] = art_row[2]
-    return _Response(content=data, media_type=art_row[1] or "application/octet-stream", headers=headers)
+    return Response(content=data, media_type=art_row[1] or "application/octet-stream", headers=headers)
 
 
 @router.get(
@@ -369,18 +363,18 @@ async def _load_document_fields(tenant_id: str, document_id: uuid.UUID) -> dict:
     async with tenant_session(tenant_id) as session:
         doc_row = (
             await session.execute(
-                _text("SELECT confirmation_status FROM docintel.documents WHERE tenant_id=:tid AND document_id=:doc_id"),
+                text("SELECT confirmation_status FROM docintel.documents WHERE tenant_id=:tid AND document_id=:doc_id"),
                 {"tid": tenant_id, "doc_id": document_id},
             )
         ).one_or_none()
         if not doc_row:
-            raise _problem(404, "Document not found", _EC.DOCUMENT_NOT_FOUND)
+            raise problem(404, "Document not found", ErrorCode.DOCUMENT_NOT_FOUND)
         if doc_row[0] != "CONFIRMED":
-            raise _problem(409, "Document is not yet CONFIRMED", _EC.INVALID_DOCUMENT_STATE)
+            raise problem(409, "Document is not yet CONFIRMED", ErrorCode.INVALID_DOCUMENT_STATE)
 
         rows = (
             await session.execute(
-                _text("""
+                text("""
                     SELECT dfv.canonical_field_id, cf.field_key,
                            dfv.current_value, dfv.value_source,
                            dfv.confidence_score, dfv.version_no, dfv.accepted_at_utc
@@ -424,7 +418,7 @@ async def get_subject_document_exceptions(
     async with tenant_session(actor.tenant_id) as session:
         rows = (
             await session.execute(
-                _text("""
+                text("""
                     SELECT document_id, upload_status, processing_status,
                            upload_issue_code, processing_failure_code, registered_at_utc
                     FROM docintel.documents
@@ -466,7 +460,7 @@ async def get_subject_document_quality(
     async with tenant_session(actor.tenant_id) as session:
         rows = (
             await session.execute(
-                _text("""
+                text("""
                     SELECT rule_key, outcome, parameters_applied, measurement, message, evaluated_at_utc
                     FROM docintel.document_quality_results
                     WHERE tenant_id=:tid AND document_id=:doc_id

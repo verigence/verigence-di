@@ -336,9 +336,6 @@ def _run_normalizers(
             return result
 
         # Feed the normalized value into the next step, always as a string
-        if result.normalized_value is None:
-            current_value = None
-        else:
-            current_value = str(result.normalized_value)
+        current_value = None if result.normalized_value is None else str(result.normalized_value)
 
     return NormalizerResult(ok=True, normalized_value=current_value)

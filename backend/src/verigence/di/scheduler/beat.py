@@ -25,7 +25,8 @@ Lifecycle:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, time as dtime
+from datetime import UTC, datetime
+from datetime import time as dtime
 from typing import Any
 
 import structlog
@@ -92,9 +93,8 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
             continue
 
         log.info("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
-        async with session_factory() as session:
-            async with session.begin():
-                count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
+        async with session_factory() as session, session.begin():
+            count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
         if count:
             log.info("eod_retry_jobs_inserted",
                      tenant_id=tenant_id,

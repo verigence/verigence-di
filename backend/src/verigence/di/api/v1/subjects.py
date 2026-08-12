@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from verigence.di.api.v1.schemas import (
     CreateSubjectRequest,

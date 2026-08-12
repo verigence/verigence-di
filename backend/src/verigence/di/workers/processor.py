@@ -19,6 +19,7 @@ Configuration:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
 import uuid
@@ -34,7 +35,7 @@ from verigence.di.repositories.processing_jobs import (
     retry_job,
 )
 from verigence.di.settings import get_settings
-from verigence.di.workers.job_runner import ProcessingError, run_processing_job
+from verigence.di.workers.job_runner import run_processing_job
 
 logger = structlog.get_logger(__name__)
 
@@ -66,7 +67,7 @@ class ProcessingWorker:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=30.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
         logger.info("processing_worker_stopped")
 
@@ -97,13 +98,11 @@ class ProcessingWorker:
 
                 if not did_work:
                     # No jobs available — sleep before next poll
-                    try:
+                    with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(
                             self._stop_event.wait(),
                             timeout=poll_interval,
                         )
-                    except asyncio.TimeoutError:
-                        pass
         finally:
             await engine.dispose()
 
@@ -156,14 +155,13 @@ class ProcessingWorker:
                 if result.success:
                     # Commit already happened via session.begin() context manager
                     # Complete the job
-                    async with session_factory() as s2:
-                        async with s2.begin():
-                            await complete_job(
-                                s2,
-                                tenant_id=tenant_id,
-                                processing_job_id=job_id,
-                                success=True,
-                            )
+                    async with session_factory() as s2, s2.begin():
+                        await complete_job(
+                            s2,
+                            tenant_id=tenant_id,
+                            processing_job_id=job_id,
+                            success=True,
+                        )
                     job_log.info("job_completed",
                                  confidence_score=str(result.confidence_score),
                                  human_verification_status=result.human_verification_status)
@@ -211,47 +209,47 @@ async def _handle_failure(
     job_log,
 ) -> None:
     """Write job + document failure state outside the failed transaction."""
-    async with session_factory() as session:
-        async with session.begin():
-            if retryable:
-                await retry_job(
-                    session,
-                    tenant_id=tenant_id,
-                    processing_job_id=job_id,
-                    error_code=error_code,
-                    error_detail=error_detail,
-                )
-                # Set document to RETRY_PENDING
-                from sqlalchemy import text
-                from datetime import UTC, datetime
-                await session.execute(
-                    text("""
+    async with session_factory() as session, session.begin():
+        if retryable:
+            await retry_job(
+                session,
+                tenant_id=tenant_id,
+                processing_job_id=job_id,
+                error_code=error_code,
+                error_detail=error_detail,
+            )
+            # Set document to RETRY_PENDING
+            from datetime import UTC, datetime
+
+            from sqlalchemy import text
+            await session.execute(
+                text("""
                         UPDATE docintel.documents
                         SET processing_status = 'RETRY_PENDING',
                             updated_at_utc = :now
                         WHERE tenant_id = :tid AND document_id = :doc_id
                     """),
-                    {
-                        "tid": tenant_id,
-                        "doc_id": document_id,
-                        "now": datetime.now(UTC),
-                    },
-                )
-                job_log.warning("job_failed_retryable",
-                                error_code=error_code,
-                                error_detail=error_detail)
-            else:
-                await fail_job(
-                    session,
-                    tenant_id=tenant_id,
-                    processing_job_id=job_id,
-                    document_id=document_id,
-                    error_code=error_code,
-                    error_detail=error_detail,
-                )
-                job_log.warning("job_failed_non_retryable",
-                                error_code=error_code,
-                                error_detail=error_detail)
+                {
+                    "tid": tenant_id,
+                    "doc_id": document_id,
+                    "now": datetime.now(UTC),
+                },
+            )
+            job_log.warning("job_failed_retryable",
+                            error_code=error_code,
+                            error_detail=error_detail)
+        else:
+            await fail_job(
+                session,
+                tenant_id=tenant_id,
+                processing_job_id=job_id,
+                document_id=document_id,
+                error_code=error_code,
+                error_detail=error_detail,
+            )
+            job_log.warning("job_failed_non_retryable",
+                            error_code=error_code,
+                            error_detail=error_detail)
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

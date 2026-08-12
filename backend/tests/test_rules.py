@@ -14,16 +14,13 @@ import pytest
 
 from verigence.di.rules.normalizers import (
     NORMALIZER_REGISTRY,
-    NormalizerResult,
     get_normalizer,
 )
+from verigence.di.rules.runner import _run_normalizers
 from verigence.di.rules.validators import (
     VALIDATOR_REGISTRY,
-    ValidatorRuleResult,
     get_validator,
 )
-from verigence.di.rules.runner import _run_normalizers
-
 
 # ── Normalizer tests ──────────────────────────────────────────────────────────
 

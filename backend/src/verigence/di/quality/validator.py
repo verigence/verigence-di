@@ -29,7 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.domain.enums import UploadStatus
-from verigence.di.quality.rules import QualityRuleResult, get_rule, _detect_mime
+from verigence.di.quality.rules import QualityRuleResult, _detect_mime, get_rule
 
 logger = structlog.get_logger(__name__)
 

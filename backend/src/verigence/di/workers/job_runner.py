@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -44,7 +44,6 @@ from verigence.di.document_ai.adapter import (
 )
 from verigence.di.domain.enums import (
     FoundStatus,
-    HumanVerificationStatus,
 )
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
 from verigence.di.rules.runner import ExtractedFieldInput, normalize_and_validate
@@ -282,7 +281,7 @@ async def _execute_steps(
     except Exception as exc:
         await _update_invocation(session, tenant_id, classify_invocation_id,
                                  "FAILED", error_detail=str(exc))
-        raise RetryableError("CLASSIFICATION_PROVIDER_ERROR", str(exc))
+        raise RetryableError("CLASSIFICATION_PROVIDER_ERROR", str(exc)) from exc
 
     await _update_invocation(
         session, tenant_id, classify_invocation_id, "SUCCESS",
@@ -365,7 +364,7 @@ async def _execute_steps(
     except Exception as exc:
         await _update_invocation(session, tenant_id, extract_invocation_id,
                                  "FAILED", error_detail=str(exc))
-        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc))
+        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc
 
     await _update_invocation(
         session, tenant_id, extract_invocation_id, "SUCCESS",
@@ -442,7 +441,7 @@ async def _execute_steps(
 
     # ── Step 13: Persist MACHINE document_field_values ────────────────────────
     # Build a system actor row if not present (worker writes as system actor)
-    system_actor_id = f"worker.system"
+    system_actor_id = "worker.system"
     await _ensure_system_actor(session, tenant_id, system_actor_id)
 
     norm_map = {n.extracted_fact_id: n for n in runner_output.normalized}
@@ -488,6 +487,7 @@ async def _execute_steps(
 
     # Resolve effective threshold: tenant DB value → system-wide default
     from decimal import Decimal as _Decimal
+
     from verigence.di.repositories.documents import get_verification_threshold
     from verigence.di.settings import get_settings
     tenant_threshold = await get_verification_threshold(session, tenant_id=tenant_id)
@@ -499,7 +499,7 @@ async def _execute_steps(
     try:
         conf_result = calculate_confidence_score(scored_fields, threshold=effective_threshold)
     except ValueError as exc:
-        raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc))
+        raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc)) from exc
 
     confidence_score = conf_result.confidence_score
     hvs = conf_result.human_verification_status
@@ -795,14 +795,13 @@ async def _load_original_artifact(
     mime_type = mime_type or "application/octet-stream"
 
     # Load bytes from storage
-    from verigence.di.document_ai.adapter import get_document_ai_adapter
     from verigence.di.storage.adapter import get_storage_adapter
     storage = get_storage_adapter()
     try:
         stream = await storage.get_stream(logical_key)
         data = b"".join([chunk async for chunk in stream])
     except Exception as exc:
-        raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}")
+        raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}") from exc
 
     return data, mime_type
 

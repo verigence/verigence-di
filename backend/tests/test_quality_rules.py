@@ -5,12 +5,9 @@ Each test exercises the rule function directly via the REGISTRY.
 """
 from __future__ import annotations
 
-import io
 import struct
 
 import pytest
-
-pytestmark = pytest.mark.no_docker
 
 from verigence.di.quality.rules import (
     REGISTRY,
@@ -18,6 +15,8 @@ from verigence.di.quality.rules import (
     _detect_mime,
     get_rule,
 )
+
+pytestmark = pytest.mark.no_docker
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

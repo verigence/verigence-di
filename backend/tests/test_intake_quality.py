@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import io
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-pytestmark = pytest.mark.no_docker
+from fastapi import UploadFile
 
 from verigence.di.application.intake import intake_document
 from verigence.di.domain.enums import UploadStatus
-from fastapi import UploadFile
 
+pytestmark = pytest.mark.no_docker
 
 # ── Fixture helpers ────────────────────────────────────────────────────────────
 
@@ -151,8 +150,8 @@ async def test_intake_calls_validate_upload() -> None:
 @pytest.mark.asyncio
 async def test_intake_fit_result_creates_processing_job() -> None:
     """A FIT validator result must trigger create_initial_job."""
-    from verigence.di.quality.validator import ValidatorResult
     from verigence.di.domain.enums import SourceChannel
+    from verigence.di.quality.validator import ValidatorResult
 
     session = _make_session_mock()
     storage = _make_storage_mock()
@@ -183,8 +182,8 @@ async def test_intake_fit_result_creates_processing_job() -> None:
 @pytest.mark.asyncio
 async def test_intake_not_fit_skips_processing_job() -> None:
     """A NOT_FIT validator result must NOT create a processing job."""
-    from verigence.di.quality.validator import ValidatorResult
     from verigence.di.domain.enums import SourceChannel
+    from verigence.di.quality.validator import ValidatorResult
 
     session = _make_session_mock()
     storage = _make_storage_mock()
@@ -221,8 +220,8 @@ async def test_intake_not_fit_skips_processing_job() -> None:
 @pytest.mark.asyncio
 async def test_intake_corrupt_result_skips_processing_job() -> None:
     """A CORRUPT validator result must NOT create a processing job."""
-    from verigence.di.quality.validator import ValidatorResult
     from verigence.di.domain.enums import SourceChannel
+    from verigence.di.quality.validator import ValidatorResult
 
     session = _make_session_mock()
     storage = _make_storage_mock()

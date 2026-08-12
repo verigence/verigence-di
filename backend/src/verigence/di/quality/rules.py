@@ -15,7 +15,7 @@ Architecture contract (DI_CONFIGURATION_MODEL_v2.0.md §8):
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 

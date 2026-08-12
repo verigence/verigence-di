@@ -118,7 +118,7 @@ def apply_migrations(request: pytest.FixtureRequest) -> None:
     import subprocess
 
     # Resolve db_url via the fixture system
-    url = cast(str, request.getfixturevalue("db_url"))
+    url = cast("str", request.getfixturevalue("db_url"))
     env = os.environ.copy()
     env["DI_DATABASE_URL"] = url
     subprocess.run(

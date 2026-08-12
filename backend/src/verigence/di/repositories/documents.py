@@ -1,8 +1,10 @@
 """repositories/documents.py — Document repository (async SQLAlchemy)."""
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +18,7 @@ from verigence.di.domain.enums import (
     UploadStatus,
     VerificationState,
 )
+from verigence.di.storage.adapter import StorageAdapter
 
 
 def _row_to_dict(row) -> dict:  # type: ignore[type-arg]
@@ -271,9 +274,8 @@ async def get_verification_threshold(
     session: AsyncSession,
     *,
     tenant_id: str,
-) -> "Decimal | None":
+) -> Decimal | None:
     """Return the tenant-specific verification threshold, or None if not set."""
-    from decimal import Decimal
     row = (
         await session.execute(
             text("""
@@ -295,7 +297,7 @@ async def delete_document(
     tenant_id: str,
     document_id: uuid.UUID,
     subject_id: uuid.UUID,
-    storage: "StorageAdapter",
+    storage: StorageAdapter,
 ) -> None:
     """Hard-delete a document and all child rows except audit_events.
 
@@ -307,7 +309,6 @@ async def delete_document(
       documents
     audit_events are intentionally preserved.
     """
-    from verigence.di.storage.adapter import StorageAdapter  # local import avoids circular
 
     # Load artifact keys before deleting rows
     artifact_rows = (
@@ -343,10 +344,8 @@ async def delete_document(
 
     # Delete object storage bytes for each artifact
     for key in logical_keys:
-        try:
+        with contextlib.suppress(Exception):
             await storage.delete(key)
-        except Exception:
-            pass  # storage delete is best-effort; DB rows are already gone
 
 
 async def get_active_retention_policy(

@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.no_docker
-
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.auth.verifier import verify_token
 from verigence.di.domain.enums import ActorType
 
+pytestmark = pytest.mark.no_docker
 
 # ── verify_token mock-mode tests ─────────────────────────────────────────────
 
@@ -76,7 +75,7 @@ def test_non_mock_prefixed_token_fails_jwks_in_mock_mode() -> None:
 def test_can_returns_true_for_held_permission() -> None:
     p = ActorPrincipal(
         actor_id="a", tenant_id="t",
-        permissions=frozenset({"subject:create", "document:upload"}),
+        permissions=frozenset({"di.subject.create", "di.document.upload"}),
     )
     assert p.can(Permission.SUBJECT_CREATE) is True
     assert p.can(Permission.VERIFICATION_WRITE) is False
@@ -92,7 +91,7 @@ def test_is_system_actor() -> None:
     p = ActorPrincipal(
         actor_id="sys", tenant_id="",
         actor_type=ActorType.SYSTEM,
-        permissions=frozenset({"platform:whatsapp:admin"}),
+        permissions=frozenset({"di.platform.whatsapp.admin"}),
     )
     assert p.is_system is True
     assert p.can(Permission.PLATFORM_WHATSAPP_ADMIN) is True

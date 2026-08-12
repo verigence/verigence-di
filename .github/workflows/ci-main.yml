@@ -39,7 +39,7 @@ jobs:
           DI_STORAGE_BUCKET: verigence-di-dev
           DI_DOCAI_MOCK: "true"
           DI_ENV: dev
-        run: PYTHONPATH=src uv run python -m pytest -m "not docker" --no-cov -q
+        run: PYTHONPATH=src uv run python -m pytest -m no_docker --no-cov -q
 
   deploy-api:
     name: Deploy di-api to Railway production

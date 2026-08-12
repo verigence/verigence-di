@@ -24,10 +24,9 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import text
 
 from verigence.di.auth.dependencies import require_system_actor
-from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.auth.permissions import Permission
+from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.errors import ErrorCode, problem
-from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(tags=["WhatsApp"])
 
@@ -60,14 +59,14 @@ async def put_whatsapp_route(
     route_id = uuid.uuid4()
 
     # Use a raw non-tenant session (system scope has no app.tenant_id)
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            await session.execute(
-                text("""
+    async with factory() as session, session.begin():
+        await session.execute(
+            text("""
                     INSERT INTO docintel.whatsapp_routes
                         (route_id, destination_id, tenant_id, system_actor_id,
                          status, created_at_utc, updated_at_utc)
@@ -78,12 +77,12 @@ async def put_whatsapp_route(
                         status = 'ACTIVE',
                         updated_at_utc = EXCLUDED.updated_at_utc
                 """),
-                {
-                    "rid": route_id, "dest": destination_id,
-                    "tid": tenant_id, "said": system_actor_id or None,
-                    "now": now,
-                },
-            )
+            {
+                "rid": route_id, "dest": destination_id,
+                "tid": tenant_id, "said": system_actor_id or None,
+                "now": now,
+            },
+        )
 
     return {
         "routeId": str(route_id),
@@ -123,8 +122,9 @@ async def get_whatsapp_quarantine(
     offset = (max(1, page) - 1) * min(200, page_size)
     limit = min(200, page_size)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
@@ -185,36 +185,36 @@ async def replay_whatsapp_quarantine(
     from datetime import UTC, datetime
     now = datetime.now(UTC)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text("""
+    async with factory() as session, session.begin():
+        row = (
+            await session.execute(
+                text("""
                         SELECT status FROM docintel.whatsapp_quarantine
                         WHERE quarantine_id = :qid
                     """),
-                    {"qid": quarantine_id},
-                )
-            ).one_or_none()
-            if row is None:
-                raise problem(404, "Quarantine item not found",
-                              ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
-            if row[0] != "PENDING":
-                raise problem(409, f"Quarantine item is {row[0]}, not PENDING",
-                              ErrorCode.INVALID_DOCUMENT_STATE)
+                {"qid": quarantine_id},
+            )
+        ).one_or_none()
+        if row is None:
+            raise problem(404, "Quarantine item not found",
+                          ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
+        if row[0] != "PENDING":
+            raise problem(409, f"Quarantine item is {row[0]}, not PENDING",
+                          ErrorCode.INVALID_DOCUMENT_STATE)
 
-            await session.execute(
-                text("""
+        await session.execute(
+            text("""
                     UPDATE docintel.whatsapp_quarantine
                     SET status = 'REPLAYING', updated_at_utc = :now
                     WHERE quarantine_id = :qid
                 """),
-                {"qid": quarantine_id, "now": now},
-            )
+            {"qid": quarantine_id, "now": now},
+        )
 
     return Response(status_code=202)
 
@@ -234,35 +234,35 @@ async def discard_whatsapp_quarantine(
     from datetime import UTC, datetime
     now = datetime.now(UTC)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text("""
+    async with factory() as session, session.begin():
+        row = (
+            await session.execute(
+                text("""
                         SELECT status FROM docintel.whatsapp_quarantine
                         WHERE quarantine_id = :qid
                     """),
-                    {"qid": quarantine_id},
-                )
-            ).one_or_none()
-            if row is None:
-                raise problem(404, "Quarantine item not found",
-                              ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
-            if row[0] not in ("PENDING", "REPLAYING"):
-                raise problem(409, f"Cannot discard item in state {row[0]}",
-                              ErrorCode.INVALID_DOCUMENT_STATE)
+                {"qid": quarantine_id},
+            )
+        ).one_or_none()
+        if row is None:
+            raise problem(404, "Quarantine item not found",
+                          ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
+        if row[0] not in ("PENDING", "REPLAYING"):
+            raise problem(409, f"Cannot discard item in state {row[0]}",
+                          ErrorCode.INVALID_DOCUMENT_STATE)
 
-            await session.execute(
-                text("""
+        await session.execute(
+            text("""
                     UPDATE docintel.whatsapp_quarantine
                     SET status = 'DISCARDED', updated_at_utc = :now
                     WHERE quarantine_id = :qid
                 """),
-                {"qid": quarantine_id, "now": now},
-            )
+            {"qid": quarantine_id, "now": now},
+        )
 
     return {"quarantineId": str(quarantine_id), "status": "DISCARDED"}
