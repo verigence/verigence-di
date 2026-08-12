@@ -61,6 +61,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           railway up \
+            --project ${{ secrets.RAILWAY_PROJECT_ID }} \
             --service ${{ secrets.RAILWAY_SERVICE_API_ID }} \
             --environment ${{ secrets.RAILWAY_ENVIRONMENT_ID }} \
             --detach
@@ -82,6 +83,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           railway up \
+            --project ${{ secrets.RAILWAY_PROJECT_ID }} \
             --service ${{ secrets.RAILWAY_SERVICE_WORKER_ID }} \
             --environment ${{ secrets.RAILWAY_ENVIRONMENT_ID }} \
             --detach
