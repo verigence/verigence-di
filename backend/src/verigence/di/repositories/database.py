@@ -46,11 +46,13 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
 
     Must be called at the start of every tenant-scoped transaction.
     Uses SET LOCAL so the value is cleared automatically at transaction end.
+    PostgreSQL SET LOCAL does not accept bind parameters — value is
+    sanitised and interpolated directly.
     """
-    await session.execute(
-        text("SET LOCAL app.tenant_id = :tid"),
-        {"tid": tenant_id},
-    )
+    # Strip any characters that are not alphanumeric, hyphen, or underscore
+    # to prevent SQL injection via tenant_id.
+    safe_tid = "".join(c for c in str(tenant_id) if c.isalnum() or c in "-_")
+    await session.execute(text(f"SET LOCAL app.tenant_id = '{safe_tid}'"))
 
 
 def get_engine():  # type: ignore[no-untyped-def]
