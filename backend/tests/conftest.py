@@ -33,9 +33,7 @@ os.environ.setdefault("DI_STORAGE_ENDPOINT", "http://localhost:9000")
 os.environ.setdefault("DI_STORAGE_ACCESS_KEY_ID", "minioadmin")
 os.environ.setdefault("DI_STORAGE_SECRET_ACCESS_KEY", "minioadmin123")
 os.environ.setdefault("DI_STORAGE_BUCKET", "verigence-di-test")
-os.environ.setdefault("DI_CLERK_PUBLISHABLE_KEY", "pk_test_mock")
-os.environ.setdefault("DI_CLERK_SECRET_KEY", "sk_test_mock")
-os.environ.setdefault("DI_CLERK_JWKS_URL", "http://localhost/mock-jwks")
+os.environ.setdefault("DI_SECURITY_JWKS_URL", "http://localhost/mock-jwks")
 # Provide a dummy DB URL so Settings validation doesn't fail for unit tests
 os.environ.setdefault("DI_DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
