@@ -76,11 +76,15 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def normalise_db_url(cls, v: str) -> str:
-        """Ensure asyncpg driver prefix."""
-        return (
+        """Ensure asyncpg driver prefix and fix sslmode param for asyncpg."""
+        v = (
             v.replace("postgresql://", "postgresql+asyncpg://")
             .replace("postgres://", "postgresql+asyncpg://")
         )
+        # asyncpg does not accept ?sslmode=require — replace with ?ssl=require
+        v = v.replace("?sslmode=require", "?ssl=require")
+        v = v.replace("&sslmode=require", "&ssl=require")
+        return v
 
 
 @lru_cache
