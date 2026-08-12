@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run tests (no-docker tests only)
+      - name: Run tests
         env:
           DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
           DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
@@ -41,8 +41,8 @@ jobs:
           DI_ENV: dev
         run: PYTHONPATH=src uv run python -m pytest -m "not docker" --no-cov -q
 
-  deploy:
-    name: Deploy to Railway production
+  deploy-api:
+    name: Deploy di-api to Railway production
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -50,15 +50,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
       - name: Deploy di-api
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service di-api --project ${{ secrets.RAILWAY_PROJECT_ID }} --detach
+        uses: railwayapp/railway-deploy@v1
+        with:
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          project-id: ${{ secrets.RAILWAY_PROJECT_ID }}
+          service-id: ${{ secrets.RAILWAY_SERVICE_API_ID }}
+          environment-id: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+
+  deploy-worker:
+    name: Deploy di-worker to Railway production
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Deploy di-worker
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service di-worker --project ${{ secrets.RAILWAY_PROJECT_ID }} --detach
+        uses: railwayapp/railway-deploy@v1
+        with:
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          project-id: ${{ secrets.RAILWAY_PROJECT_ID }}
+          service-id: ${{ secrets.RAILWAY_SERVICE_WORKER_ID }}
+          environment-id: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
