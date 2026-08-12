@@ -535,7 +535,7 @@ Three Alembic migrations exist. All three must be at `head` on Neon.
 |---|---|---|
 | `0001` | `backend/alembic/versions/0001_initial_schema.py` | ✅ Applied (v2.1 baseline — 39 tables) |
 | `0002` | `backend/alembic/versions/0002_schema_v2_2.py` | ✅ Applied (v2.2 delta — 4 changes) |
-| `0003` | `backend/alembic/versions/0003_verification_threshold.py` | ⚠️ WRITTEN — needs to be run on Neon |
+| `0003` | `backend/alembic/versions/0003_verification_threshold.py` | ✅ Applied — `verification_threshold` column confirmed on Neon |
 
 #### What migration 0002 changed (v2.2 delta)
 
@@ -552,8 +552,8 @@ Three Alembic migrations exist. All three must be at `head` on Neon.
 |---|---|---|
 | `docintel.tenant_settings` | Added nullable column `verification_threshold NUMERIC(5,2)` | Configurable per-tenant verification threshold. NULL = use system default (`DI_VERIFICATION_THRESHOLD` env var, default 90.00) |
 
-> ⚠️ **Action required:** Run `alembic upgrade head` against Neon DB to apply migration 0003.
-> Command: `cd verigence-di/backend && DI_DATABASE_URL=<neon-url> DI_SECRET_KEY=<any> uv run alembic upgrade head`
+> ✅ **Migration 0003 confirmed at head on Neon** — verified 2026-08-14.
+> All columns confirmed: `verification_threshold` nullable NUMERIC(5,2) on `docintel.tenant_settings`.
 
 ---
 
@@ -664,12 +664,8 @@ New: `DELETE /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}`
 
 ### Immediate next actions for this session
 
-1. **Run migration 0003 on Neon** — adds `tenant_settings.verification_threshold` column
-   ```bash
-   cd verigence-di/backend
-   DI_DATABASE_URL="postgresql://..." DI_SECRET_KEY="any32chars" uv run alembic upgrade head
-   ```
-2. **Step 12 — React PWA ops-ui** — `ops-ui/` has only a README, no code
+1. ✅ ~~Run migration 0003 on Neon~~ — **DONE** — all 3 migrations at head, all columns verified
+2. **Step 12 — React PWA ops-ui** — `ops-ui/` has only a README, no code ← **CURRENT**
 3. **Configure Cloudflare R2** — without this, all document uploads fail at storage step
 4. **Set `DI_SECURITY_JWKS_URL`** — once Security module is deployed
 

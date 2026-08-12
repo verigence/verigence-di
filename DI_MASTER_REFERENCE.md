@@ -278,7 +278,7 @@ If a design decision needs to change, the human must agree, a new baseline versi
 |---|---|
 | di-api (Railway) | ✅ Running — `https://verigence-di-production.up.railway.app` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ✅ Migrations 0001 + 0002 applied. **Migration 0003 written but NOT YET RUN on Neon** |
+| Neon PostgreSQL | ✅ All 3 migrations at head (0001 + 0002 + 0003) — verified 2026-08-14 |
 | Cloudflare R2 | ❌ Not configured — document upload fails at storage step |
 | Security module JWKS | ❌ Not deployed — mock tokens work in `dev` mode |
 | CI pipeline | ✅ Green — `107 passed, 1 xfailed` |
