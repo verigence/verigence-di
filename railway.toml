@@ -1,0 +1,13 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd backend && pip install uv && uv sync"
+
+[[services]]
+name = "di-api"
+startCommand = "cd backend && uv run uvicorn verigence.di.main:create_app --factory --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
+[[services]]
+name = "di-worker"
+startCommand = "cd backend && DI_WORKER_ENABLED=true uv run python -m verigence.di.workers"
