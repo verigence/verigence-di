@@ -144,7 +144,7 @@ The original list had **4 gaps** discovered during validation against the design
 | **10b** | EOD Retry Scheduler | LLD §EOD Retry Scheduler | ✅ DONE |
 | **11** | All remaining 48 REST API operations (see breakdown below) | `DI_OPENAPI_v2.2.yaml` — 54 total, 54 done | ✅ DONE |
 | **12** | React PWA ops-ui | Architecture §Components / Access/API | ❌ NOT STARTED |
-| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ❌ NOT STARTED |
+| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ⚠️ PARTIAL — CI pipeline created + lint fixed; Railway env vars + start commands still needed |
 | **14** | WhatsApp adapter — webhook, media download, intake, quarantine | LLD §WhatsApp Adapter + §11 WhatsApp flow | ❌ NOT STARTED (Phase 2) |
 | **15** | Registered device enforcement for USER actors | LLD §3 JWT/RBAC — `device_id` check | ❌ NOT STARTED (Phase 2) |
 | **16** | Idempotency records (`idempotency_records` table) | LLD §13 Idempotency | ❌ NOT STARTED (Phase 2) |
