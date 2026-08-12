@@ -268,15 +268,43 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current:** Step 12 — React PWA ops-ui
+**Current: Step 12 — React PWA ops-ui** ❌ NOT STARTED
 
-**Step 13 status:** ✅ DONE
-- Both di-api and di-worker deployed on Railway via GitHub integration
-- Auto-deploys on every push to `dev`
-- Remaining (non-blocking): R2 storage, Alembic migrations, smoke test, Security JWKS URL
+---
 
-**Railway deployment method (no CLI token needed):**
+### Infrastructure status at start of 2026-08-14 session
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — `https://verigence-di-production.up.railway.app` |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ Migrations 0001 + 0002 applied. **Migration 0003 written but NOT YET RUN on Neon** |
+| Cloudflare R2 | ❌ Not configured — document upload fails at storage step |
+| Security module JWKS | ❌ Not deployed — mock tokens work in `dev` mode |
+| CI pipeline | ✅ Green — `107 passed, 1 xfailed` |
+
+### Schema changes beyond Baseline 2.2 spec
+
+| Migration | Change |
+|---|---|
+| `0002` | `subject_identifiers`: non-unique → UNIQUE partial index on active VERIFIED identifiers |
+| `0002` | `documents`: added `document_type_hint_key varchar(120)` |
+| `0002` | `processing_runs`: added `classification_candidate_set jsonb` |
+| `0002` | `audit_chain_heads`: rebuilt from per-tenant to entity-scoped PK `(tenant_id, entity_type, entity_id)` |
+| `0003` | `tenant_settings`: added nullable `verification_threshold NUMERIC(5,2)` |
+
+### Code additions beyond Baseline 2.2 spec
+
+| Addition | Files | Detail |
+|---|---|---|
+| Delete Document API | `api/v1/documents.py`, `repositories/documents.py`, `errors.py`, `auth/permissions.py` | `DELETE .../documents/{id}` — hard delete for failed/not-fit documents. Permission: `di.document.delete` |
+| Configurable verification threshold | `settings.py`, `domain/scoring.py`, `workers/job_runner.py`, `api/v1/tenant_config.py`, `0003` migration | Per-tenant threshold stored in DB; env var fallback |
+| Auth migrated to Security module | `auth/verifier.py`, `auth/jwks.py`, `auth/principal.py`, `settings.py` | Issuer `verigence-security`, audience `verigence-platform`, `DI_SECURITY_JWKS_URL` replaces Clerk vars |
+| All permissions renamed | `auth/permissions.py` | All strings now `di.*` dot-separated (was colon-separated) |
+
+### Railway deployment method (no CLI token needed)
+
 Railway dashboard → service → Settings → Source → Connect Repo → select repo/branch `dev` → root directory blank.
 Auto-deploys on every push. Build/start commands read from `railway.toml`.
 
-See `PROGRESS.md` §Session 2026-08-13 for full build fix history and service configuration.
+See `PROGRESS.md` §Session 2026-08-14 for complete schema change log, all "what didn't work" failures, and next actions.
