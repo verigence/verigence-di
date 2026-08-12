@@ -59,7 +59,11 @@ jobs:
       - name: Deploy di-api
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service ${{ secrets.RAILWAY_SERVICE_API_ID }} --environment production --detach
+        run: |
+          railway up \
+            --service ${{ secrets.RAILWAY_SERVICE_API_ID }} \
+            --environment ${{ secrets.RAILWAY_ENVIRONMENT_ID }} \
+            --detach
 
   deploy-worker:
     name: Deploy di-worker to Railway (production)
@@ -76,4 +80,8 @@ jobs:
       - name: Deploy di-worker
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service ${{ secrets.RAILWAY_SERVICE_WORKER_ID }} --environment production --detach
+        run: |
+          railway up \
+            --service ${{ secrets.RAILWAY_SERVICE_WORKER_ID }} \
+            --environment ${{ secrets.RAILWAY_ENVIRONMENT_ID }} \
+            --detach
