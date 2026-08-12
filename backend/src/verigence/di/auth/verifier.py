@@ -1,17 +1,21 @@
-"""auth/verifier.py — JWT verification against OIDC JWKS (Baseline 2.2).
+"""auth/verifier.py — JWT verification against Security module JWKS.
 
-v2.2 JWT canonical claims (DI_SECURITY_RBAC_v2.2.md):
-  Tenant JWT audience : verigence-document-intelligence
-  Required claims     : iss, sub, aud, exp, iat,
-                        tenant_id, actor_id, actor_type, roles[], permissions[]
-  USER conditional    : device_id
+Security module JWT canonical claims:
+  iss                 : verigence-security
+  aud                 : verigence-platform
+  sub                 : Verigence user UUID
+  tenant_id           : Tenant UUID
+  actor_type          : USER | SERVICE | SYSTEM
+  roles[]             : Tenant-scoped role names (informational)
+  permissions[]       : Effective permissions (authoritative)
+  device_id           : Registered device UUID (USER actors)
+  access_session_id   : Security access session UUID
+  location_id         : Matched location UUID
 
-System JWT audience   : verigence-document-intelligence-system
-  tenant_id must be ABSENT.
-
-Mock token protocol (DI_DOCAI_MOCK=true, local dev/CI):
+Mock token protocol (local + dev only — not available in production):
   "mock.<tenant_id>.<actor_id>.<ROLE_NAME>[.<ROLE_NAME>...]"
   Permissions are resolved from the default role bundles.
+  Mock tokens are rejected when DI_ENV=production.
 """
 from __future__ import annotations
 
@@ -27,16 +31,17 @@ from verigence.di.domain.enums import ActorType
 
 logger = logging.getLogger(__name__)
 
-# ── v2.2 JWT contract constants ───────────────────────────────────────────────
-_AUDIENCE_TENANT  = "verigence-document-intelligence"
-_AUDIENCE_SYSTEM  = "verigence-document-intelligence-system"
+# ── Security JWT contract constants ───────────────────────────────────────────
+_ISSUER    = "verigence-security"
+_AUDIENCE  = "verigence-platform"
 
-_CLAIM_TENANT_ID  = "tenant_id"
-_CLAIM_ACTOR_ID   = "actor_id"
-_CLAIM_ACTOR_TYPE = "actor_type"
-_CLAIM_ROLES      = "roles"
-_CLAIM_PERMISSIONS = "permissions"
-_CLAIM_DEVICE_ID  = "device_id"
+_CLAIM_TENANT_ID        = "tenant_id"
+_CLAIM_ACTOR_TYPE       = "actor_type"
+_CLAIM_ROLES            = "roles"
+_CLAIM_PERMISSIONS      = "permissions"
+_CLAIM_DEVICE_ID        = "device_id"
+_CLAIM_ACCESS_SESSION_ID = "access_session_id"
+_CLAIM_LOCATION_ID      = "location_id"
 
 # Mock defaults
 _MOCK_TENANT = "mock-tenant-id"
@@ -66,44 +71,39 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
     from verigence.di.settings import get_settings
     settings = get_settings()
 
-    # ── Mock mode ─────────────────────────────────────────────────────────────
-    if settings.docai_mock:
-        if not token:
+    # ── Mock token — local and dev only, never production ─────────────────────
+    if token.startswith("mock."):
+        if settings.is_production:
+            logger.warning("mock_token_rejected_in_production")
             return None
-        if token.startswith("mock."):
-            # "mock.<tenant>.<actor>.<ROLE1>[.<ROLE2>...]"
-            parts = token.split(".", maxsplit=3)
-            tenant  = parts[1] if len(parts) > 1 else _MOCK_TENANT
-            actor   = parts[2] if len(parts) > 2 else _MOCK_ACTOR
-            # Everything after the third dot is roles (comma-separated for multi-role)
-            raw_roles_str = parts[3] if len(parts) > 3 else _MOCK_ROLE
-            roles = [r.strip().upper() for r in raw_roles_str.replace(",", ".").split(".") if r.strip()]
-            if not roles:
-                roles = [_MOCK_ROLE]
-
-            perms = _permissions_for_roles(roles)
-
-            # System mock token
-            if system:
-                return ActorPrincipal(
-                    actor_id=actor,
-                    tenant_id="",
-                    actor_type=ActorType.SYSTEM,
-                    roles=frozenset(roles),
-                    permissions=perms,
-                    raw_claims={},
-                )
+        # "mock.<tenant>.<actor>.<ROLE1>[.<ROLE2>...]"
+        parts = token.split(".", maxsplit=3)
+        tenant        = parts[1] if len(parts) > 1 else _MOCK_TENANT
+        actor         = parts[2] if len(parts) > 2 else _MOCK_ACTOR
+        raw_roles_str = parts[3] if len(parts) > 3 else _MOCK_ROLE
+        roles = [r.strip().upper() for r in raw_roles_str.replace(",", ".").split(".") if r.strip()]
+        if not roles:
+            roles = [_MOCK_ROLE]
+        perms = _permissions_for_roles(roles)
+        if system:
             return ActorPrincipal(
                 actor_id=actor,
-                tenant_id=tenant,
-                actor_type=ActorType.USER,
+                tenant_id="",
+                actor_type=ActorType.SYSTEM,
                 roles=frozenset(roles),
                 permissions=perms,
                 raw_claims={},
             )
-        # Non-mock-prefix → fall through to real JWKS verification below
+        return ActorPrincipal(
+            actor_id=actor,
+            tenant_id=tenant,
+            actor_type=ActorType.USER,
+            roles=frozenset(roles),
+            permissions=perms,
+            raw_claims={},
+        )
 
-    # ── Real JWKS verification ─────────────────────────────────────────────────
+    # ── Real Security JWKS verification ───────────────────────────────────────
     try:
         unverified_header = jwt.get_unverified_header(token)
     except JWTError as exc:
@@ -117,28 +117,30 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
         logger.warning("jwks_key_not_found", extra={"kid": kid})
         return None
 
-    expected_audience = _AUDIENCE_SYSTEM if system else _AUDIENCE_TENANT
     try:
         claims: dict[str, Any] = jwt.decode(
             token,
             key,
             algorithms=["RS256"],
-            audience=expected_audience,
+            audience=_AUDIENCE,
+            issuer=_ISSUER,
         )
     except JWTError as exc:
         logger.debug("jwt_decode_failed", extra={"error": str(exc)})
         return None
 
     # ── Extract canonical claims ───────────────────────────────────────────────
-    actor_id: str  = claims.get(_CLAIM_ACTOR_ID, "") or claims.get("sub", "")
+    actor_id: str  = claims.get("sub", "")
     tenant_id: str = claims.get(_CLAIM_TENANT_ID, "")
     raw_actor_type = claims.get(_CLAIM_ACTOR_TYPE, "USER")
     raw_roles: list[str] = claims.get(_CLAIM_ROLES, [])
     raw_perms: list[str] = claims.get(_CLAIM_PERMISSIONS, [])
-    device_id: str | None = claims.get(_CLAIM_DEVICE_ID)
+    device_id: str | None        = claims.get(_CLAIM_DEVICE_ID)
+    access_session_id: str | None = claims.get(_CLAIM_ACCESS_SESSION_ID)
+    location_id: str | None      = claims.get(_CLAIM_LOCATION_ID)
 
     if not actor_id:
-        logger.warning("jwt_missing_actor_id")
+        logger.warning("jwt_missing_sub")
         return None
 
     # System tokens must NOT carry tenant_id
@@ -163,5 +165,7 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
         roles=frozenset(r for r in raw_roles if isinstance(r, str)),
         permissions=frozenset(p for p in raw_perms if isinstance(p, str)),
         device_id=device_id,
+        access_session_id=access_session_id,
+        location_id=location_id,
         raw_claims=claims,
     )

@@ -53,6 +53,11 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     )
 
 
+def get_engine():  # type: ignore[no-untyped-def]
+    """Return the module-level engine (for non-FastAPI use in workers/schedulers)."""
+    return _engine
+
+
 # ── FastAPI dependency ────────────────────────────────────────────────────────
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield an AsyncSession; rolls back on exception, closes on exit."""

@@ -1,6 +1,6 @@
-"""auth/jwks.py — JWKS key cache for Clerk JWT verification.
+"""auth/jwks.py — JWKS key cache for Security module JWT verification.
 
-Fetches the Clerk JWKS endpoint once and caches keys by `kid`.
+Fetches the Security module JWKS endpoint once and caches keys by `kid`.
 Thread-safe lazy refresh on cache miss or TTL expiry.
 """
 from __future__ import annotations
@@ -78,5 +78,5 @@ def get_jwks_cache() -> JWKSCache:
             if _cache is None:
                 from verigence.di.settings import get_settings
                 settings = get_settings()
-                _cache = JWKSCache(jwks_url=settings.clerk_jwks_url)
+                _cache = JWKSCache(jwks_url=settings.security_jwks_url)
     return _cache

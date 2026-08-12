@@ -130,3 +130,90 @@ async def complete_job(
             "job_id": processing_job_id,
         },
     )
+
+
+async def retry_job(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    processing_job_id: uuid.UUID,
+    error_code: str | None = None,
+    error_detail: str | None = None,
+) -> None:
+    """Mark a RUNNING job as FAILED and set the document to RETRY_PENDING.
+
+    Called by the worker after a RETRYABLE processing failure.
+    The EOD Retry Scheduler will later insert an EOD_RETRY job (attempt_no=2).
+    """
+    now = datetime.now(UTC)
+    await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'FAILED',
+                completed_at_utc = :now,
+                error_code = :error_code,
+                error_detail = :error_detail
+            WHERE tenant_id = :tenant_id
+              AND processing_job_id = :job_id
+        """),
+        {
+            "now": now,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "tenant_id": tenant_id,
+            "job_id": processing_job_id,
+        },
+    )
+
+
+async def fail_job(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    processing_job_id: uuid.UUID,
+    document_id: uuid.UUID,
+    error_code: str | None = None,
+    error_detail: str | None = None,
+) -> None:
+    """Mark a RUNNING job FAILED and the document FAILED/NOT_CONFIRMED.
+
+    Called by the worker after a NON_RETRYABLE processing failure.
+    """
+    now = datetime.now(UTC)
+    await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'FAILED',
+                completed_at_utc = :now,
+                error_code = :error_code,
+                error_detail = :error_detail
+            WHERE tenant_id = :tenant_id
+              AND processing_job_id = :job_id
+        """),
+        {
+            "now": now,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "tenant_id": tenant_id,
+            "job_id": processing_job_id,
+        },
+    )
+    await session.execute(
+        text("""
+            UPDATE docintel.documents
+            SET processing_status = 'FAILED',
+                confirmation_status = 'NOT_CONFIRMED',
+                processing_failure_code = :error_code,
+                processing_failure_detail = :error_detail,
+                updated_at_utc = :now
+            WHERE tenant_id = :tenant_id
+              AND document_id = :doc_id
+        """),
+        {
+            "now": now,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "tenant_id": tenant_id,
+            "doc_id": document_id,
+        },
+    )

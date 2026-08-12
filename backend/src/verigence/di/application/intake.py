@@ -6,10 +6,12 @@ Implements the LLD §Document Intake Service contract:
 3.  Stream bytes to StorageAdapter while computing SHA-256 + byte count
 4.  Finalize storage metadata → artifact row
 5.  Move Document → VALIDATING
-6.  Integrity + quality gate (MIME check, size check)
-7.  Update Document to final upload status
-8.  For FIT evidence: create INITIAL processing job
-9.  Return Document data dict
+6.  Integrity check (size limit, MIME detection)
+7.  Persist to storage + artifact row
+8.  Quality gate (validate_upload) — structural + tenant quality-policy rules
+9.  Update Document to final upload status (FIT | NOT_FIT | CORRUPT)
+10. For FIT: create INITIAL processing job
+11. Return Document data dict
 
 The caller (router) is responsible for:
 - Auth / RBAC
@@ -30,6 +32,7 @@ from verigence.di.domain.enums import (
     SourceChannel,
     UploadStatus,
 )
+from verigence.di.quality.validator import validate_upload
 from verigence.di.repositories.documents import (
     create_document_receiving,
     get_active_retention_policy,
@@ -241,32 +244,48 @@ async def intake_document(
         },
     )
 
-    # ── Step 9: Mark FIT + create processing job ─────────────────────────────
+    # ── Step 8: Quality gate ──────────────────────────────────────────────────
+    validator_result = await validate_upload(
+        session=session,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        data=raw_bytes,
+        declared_mime=upload.content_type,
+        filename=upload.filename,
+    )
+
+    # ── Step 9: Persist final upload status ───────────────────────────────────
     await update_document_upload_complete(
         session,
         tenant_id=tenant_id,
         document_id=document_id,
         file_size_bytes=byte_count,
         content_hash_sha256=sha256_hex,
-        detected_mime_type=detected_mime,
-        upload_status=UploadStatus.FIT,
+        detected_mime_type=validator_result.detected_mime or detected_mime,
+        upload_status=validator_result.upload_status,
+        upload_issue_code=validator_result.upload_issue_code,
+        upload_issue_detail=validator_result.upload_issue_detail,
     )
 
-    await create_initial_job(
-        session,
-        tenant_id=tenant_id,
-        document_id=document_id,
-        correlation_id=correlation_id,
-    )
+    # ── Step 10: For FIT documents only — create processing job ───────────────
+    if validator_result.upload_status == UploadStatus.FIT:
+        await create_initial_job(
+            session,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            correlation_id=correlation_id,
+        )
 
     await session.commit()
 
-    # Update the return dict
+    # Update the return dict with final state
     doc.update({
-        "upload_status": UploadStatus.FIT,
+        "upload_status": validator_result.upload_status,
         "file_size_bytes": byte_count,
         "content_hash_sha256": sha256_hex,
-        "detected_mime_type": detected_mime,
+        "detected_mime_type": validator_result.detected_mime or detected_mime,
+        "upload_issue_code": validator_result.upload_issue_code,
+        "upload_issue_detail": validator_result.upload_issue_detail,
     })
 
     logger.info(
@@ -275,7 +294,8 @@ async def intake_document(
         tenant_id=tenant_id,
         subject_id=str(subject_id),
         bytes=byte_count,
-        upload_status="FIT",
+        upload_status=validator_result.upload_status.value,
+        quality_results=len(validator_result.quality_results),
     )
     return doc
 

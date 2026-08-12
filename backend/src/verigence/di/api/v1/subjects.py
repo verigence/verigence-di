@@ -4,20 +4,23 @@ Implements:
   POST   /v1/tenants/{tenantId}/subjects            createSubject
   GET    /v1/tenants/{tenantId}/subjects             listSubjects
   GET    /v1/tenants/{tenantId}/subjects/{subjectId} getSubject
+
+v2.2: authorization uses require_permission() (permissions[], not role names).
 """
 from __future__ import annotations
 
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
 from verigence.di.api.v1.schemas import (
     CreateSubjectRequest,
     SubjectListResponse,
     SubjectResponse,
 )
-from verigence.di.auth.dependencies import require_tenant_actor
+from verigence.di.auth.dependencies import require_tenant_actor, require_tenant_permission
+from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.domain.enums import SubjectStatus
 from verigence.di.repositories.database import tenant_session
@@ -40,14 +43,8 @@ router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Subjects"])
 async def create_subject_endpoint(
     tenantId: str,
     body: CreateSubjectRequest,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.SUBJECT_CREATE))],
 ) -> SubjectResponse:
-    if not actor.is_operator:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"type": "FORBIDDEN", "title": "Operator role required to create subjects"},
-        )
-
     async with tenant_session(actor.tenant_id) as session:
         subject = await create_subject(
             session,

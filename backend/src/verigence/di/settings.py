@@ -48,10 +48,8 @@ class Settings(BaseSettings):
     storage_bucket: str = "verigence-di-dev"
     storage_region: str = "us-east-1"
 
-    # Auth — Clerk
-    clerk_publishable_key: str = ""
-    clerk_secret_key: str = ""
-    clerk_jwks_url: str = ""
+    # Auth — Security module
+    security_jwks_url: str = ""  # https://<security-host>/.well-known/jwks.json
 
     # Google Document AI
     docai_mock: bool = True  # True = use mock adapter (local/CI)
@@ -61,6 +59,14 @@ class Settings(BaseSettings):
 
     # Sentry
     sentry_dsn: str = ""
+
+    # Processing Worker
+    worker_poll_interval_seconds: int = 5
+    worker_enabled: bool = True
+    worker_id: str = ""   # auto-generated from hostname+PID when empty
+
+    # Verification threshold — system-wide default; per-tenant value in DB overrides this
+    verification_threshold: float = 90.00
 
     # Derived helpers
     @property

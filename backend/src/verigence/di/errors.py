@@ -27,7 +27,9 @@ class _ErrorDef:
 
 
 class ErrorCode:
-    """All 38 canonical DI error codes from DI_ERROR_CATALOG_v2.2.yaml."""
+    """All 38 canonical DI error codes from DI_ERROR_CATALOG_v2.2.yaml.
+    Additional convenience aliases added for common HTTP patterns.
+    """
 
     INVALID_REQUEST                  = _ErrorDef("INVALID_REQUEST",                  400, False, "REQUEST",          "Request syntax/parameters/body are invalid.")
     UNAUTHORIZED                     = _ErrorDef("UNAUTHORIZED",                     401, False, "AUTHENTICATION",   "JWT is absent, invalid, expired, or required claims are missing.")
@@ -67,6 +69,17 @@ class ErrorCode:
     SUBJECT_MATCH_AMBIGUOUS          = _ErrorDef("SUBJECT_MATCH_AMBIGUOUS",          409, False, "SUBJECT_MATCHING", "Identity evidence maps to more than one candidate Subject.")
     SUBJECT_IDENTIFIER_CONFLICT      = _ErrorDef("SUBJECT_IDENTIFIER_CONFLICT",      409, False, "SUBJECT_MATCHING", "Active VERIFIED identifier already belongs to another Subject.")
     INTERNAL_ERROR                   = _ErrorDef("INTERNAL_ERROR",                   500, True,  "INTERNAL",         "Unexpected server error.")
+
+    # ── Convenience aliases / additional codes for API layer ─────────────────
+    SUBJECT_NOT_FOUND                = _ErrorDef("SUBJECT_NOT_FOUND",                404, False, "RESOURCE",         "Subject does not exist or is not visible to the caller.")
+    VALIDATION_ERROR                 = _ErrorDef("VALIDATION_ERROR",                 422, False, "REQUEST",          "Request body failed validation.")
+    CONFLICT                         = _ErrorDef("CONFLICT",                          409, False, "STATE",            "Request conflicts with existing resource state.")
+    INVALID_PROFILE_STATE            = _ErrorDef("INVALID_PROFILE_STATE",            409, False, "CONFIGURATION",    "Profile mutation requires DRAFT state.")
+    REQUIREMENT_PROFILE_NOT_FOUND    = _ErrorDef("REQUIREMENT_PROFILE_NOT_FOUND",    404, False, "CONFIGURATION",    "Requirement Profile does not exist.")
+    RETENTION_POLICY_NOT_FOUND       = _ErrorDef("RETENTION_POLICY_NOT_FOUND",       404, False, "RESOURCE",         "Retention Policy does not exist.")
+    INVALID_DOCUMENT_TYPE_STATE      = _ErrorDef("INVALID_DOCUMENT_TYPE_STATE",      409, False, "CONFIGURATION",    "Document Type state does not allow this operation.")
+    STORAGE_READ_ERROR               = _ErrorDef("STORAGE_READ_ERROR",               503, True,  "DEPENDENCY",       "Object-storage read failed transiently.")
+    DOCUMENT_NOT_ELIGIBLE_FOR_DELETE = _ErrorDef("DOCUMENT_NOT_ELIGIBLE_FOR_DELETE",  409, False, "STATE",            "Document does not meet the eligibility criteria for deletion.")
 
 
 def problem_response(
@@ -110,6 +123,25 @@ def http_exception(
 
     Usage::
         raise http_exception(ErrorCode.FILE_TOO_LARGE, detail="max 30 MB")
+    """
+    from fastapi import HTTPException
+    return HTTPException(
+        status_code=error.http_status,
+        detail=problem_response(error, detail=detail, correlation_id=correlation_id),
+    )
+
+
+def problem(
+    http_status: int,
+    detail: str,
+    error: _ErrorDef,
+    *,
+    correlation_id: str | None = None,
+) -> Exception:
+    """Convenience shorthand — build and return (not raise) an HTTPException.
+
+    Usage::
+        raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
     """
     from fastapi import HTTPException
     return HTTPException(

@@ -1,12 +1,9 @@
-"""auth/permissions.py — Canonical RBAC permission catalogue (Baseline 2.2).
+"""auth/permissions.py — Canonical RBAC permission catalogue.
 
-Source of truth: DI_RBAC_v2.2.yaml / DI_SECURITY_RBAC_v2.2.md
-
-Rules (v2.2):
-- JWT carries tenant_id, actor_id, actor_type, roles[], permissions[].
-- Endpoint authorization checks permissions[], NOT role-name strings.
-- Role bundles are convenience groupings; the permissions[] list is authoritative.
-- The helper `has_permission(actor, perm)` is the single check point.
+Permission strings use canonical dot-separated, module-prefixed format.
+Security module owns the permission catalogue and issues these strings in
+the Verigence Access Token permissions[] claim.
+DI checks permissions[] — never role-name strings.
 """
 from __future__ import annotations
 
@@ -14,58 +11,59 @@ from enum import Enum
 
 
 class Permission(str, Enum):
-    """All 27 canonical DI permissions from DI_RBAC_v2.2.yaml."""
+    """All 28 canonical DI permissions — module-prefixed dot-separated format."""
 
     # Subject
-    SUBJECT_CREATE          = "subject:create"
-    SUBJECT_READ            = "subject:read"
+    SUBJECT_CREATE          = "di.subject.create"
+    SUBJECT_READ            = "di.subject.read"
 
     # Document
-    DOCUMENT_UPLOAD         = "document:upload"
-    DOCUMENT_READ           = "document:read"
-    DOCUMENT_CONTENT_READ   = "document:content:read"
-    DOCUMENT_FIELDS_READ    = "document:fields:read"
-    DOCUMENT_QUALITY_READ   = "document:quality:read"
+    DOCUMENT_UPLOAD         = "di.document.upload"
+    DOCUMENT_READ           = "di.document.read"
+    DOCUMENT_CONTENT_READ   = "di.document.content.read"
+    DOCUMENT_FIELDS_READ    = "di.document.fields.read"
+    DOCUMENT_QUALITY_READ   = "di.document.quality.read"
+    DOCUMENT_DELETE         = "di.document.delete"
 
     # Verification
-    VERIFICATION_READ       = "verification:read"
-    VERIFICATION_WRITE      = "verification:write"
+    VERIFICATION_READ       = "di.verification.read"
+    VERIFICATION_WRITE      = "di.verification.write"
 
     # Entity links
-    ENTITY_LINK_READ        = "entity_link:read"
-    ENTITY_LINK_WRITE       = "entity_link:write"
+    ENTITY_LINK_READ        = "di.entity_link.read"
+    ENTITY_LINK_WRITE       = "di.entity_link.write"
 
     # Operations
-    OPERATIONS_READ         = "operations:read"
+    OPERATIONS_READ         = "di.operations.read"
 
     # Unassigned (WhatsApp)
-    UNASSIGNED_DOCUMENT_READ   = "unassigned_document:read"
-    UNASSIGNED_DOCUMENT_ASSIGN = "unassigned_document:assign"
+    UNASSIGNED_DOCUMENT_READ   = "di.unassigned_document.read"
+    UNASSIGNED_DOCUMENT_ASSIGN = "di.unassigned_document.assign"
 
     # Requirement profiles
-    REQUIREMENT_PROFILE_READ    = "requirement_profile:read"
-    REQUIREMENT_PROFILE_WRITE   = "requirement_profile:write"
-    REQUIREMENT_PROFILE_PUBLISH = "requirement_profile:publish"
-    REQUIREMENT_PROFILE_ASSIGN  = "requirement_profile:assign"
+    REQUIREMENT_PROFILE_READ    = "di.requirement_profile.read"
+    REQUIREMENT_PROFILE_WRITE   = "di.requirement_profile.write"
+    REQUIREMENT_PROFILE_PUBLISH = "di.requirement_profile.publish"
+    REQUIREMENT_PROFILE_ASSIGN  = "di.requirement_profile.assign"
 
     # Extraction config
-    EXTRACTION_CONFIG_READ    = "extraction_config:read"
-    EXTRACTION_CONFIG_WRITE   = "extraction_config:write"
-    EXTRACTION_CONFIG_PUBLISH = "extraction_config:publish"
+    EXTRACTION_CONFIG_READ    = "di.extraction_config.read"
+    EXTRACTION_CONFIG_WRITE   = "di.extraction_config.write"
+    EXTRACTION_CONFIG_PUBLISH = "di.extraction_config.publish"
 
     # Quality config
-    QUALITY_CONFIG_READ  = "quality_config:read"
-    QUALITY_CONFIG_WRITE = "quality_config:write"
+    QUALITY_CONFIG_READ  = "di.quality_config.read"
+    QUALITY_CONFIG_WRITE = "di.quality_config.write"
 
     # Tenant config
-    TENANT_CONFIG_READ  = "tenant_config:read"
-    TENANT_CONFIG_WRITE = "tenant_config:write"
+    TENANT_CONFIG_READ  = "di.tenant_config.read"
+    TENANT_CONFIG_WRITE = "di.tenant_config.write"
 
     # Subject matching
-    SUBJECT_MATCHING_WRITE = "subject_matching:write"
+    SUBJECT_MATCHING_WRITE = "di.subject_matching.write"
 
     # Platform
-    PLATFORM_WHATSAPP_ADMIN = "platform:whatsapp:admin"
+    PLATFORM_WHATSAPP_ADMIN = "di.platform.whatsapp.admin"
 
 
 # ── Role-to-permissions bundles (v2.2) ────────────────────────────────────────
@@ -121,6 +119,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     }),
     "TENANT_ADMIN": frozenset({
         Permission.DOCUMENT_CONTENT_READ,
+        Permission.DOCUMENT_DELETE,
         Permission.DOCUMENT_FIELDS_READ,
         Permission.DOCUMENT_QUALITY_READ,
         Permission.DOCUMENT_READ,

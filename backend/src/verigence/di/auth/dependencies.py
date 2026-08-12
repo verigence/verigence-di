@@ -76,12 +76,12 @@ require_tenant_actor = _RequireTenantActor()
 async def require_system_actor(
     creds: HTTPAuthorizationCredentials = Depends(_system_bearer),
 ) -> ActorPrincipal:
-    """Require a SYSTEM actor with platform:whatsapp:admin permission."""
+    """Require a SYSTEM actor with di.platform.whatsapp.admin permission."""
     principal = verify_token(creds.credentials, system=True)
     if principal is None:
         raise _unauthorized("Invalid or expired system token")
     if not principal.can(Permission.PLATFORM_WHATSAPP_ADMIN):
-        raise _forbidden("platform:whatsapp:admin permission required")
+        raise _forbidden("di.platform.whatsapp.admin permission required")
     return principal
 
 
@@ -90,6 +90,9 @@ async def require_system_actor(
 def require_permission(*perms: Permission):  # type: ignore[no-untyped-def]
     """Return a FastAPI dependency that enforces ALL listed permissions.
 
+    Does NOT enforce tenantId path match — use require_tenant_permission() for
+    routes that carry a {tenantId} path parameter.
+
     Usage::
 
         @router.post("/subjects")
@@ -97,6 +100,29 @@ def require_permission(*perms: Permission):  # type: ignore[no-untyped-def]
             ...
     """
     async def _check(actor: ActorPrincipal = Depends(require_actor)) -> ActorPrincipal:
+        missing = [p.value for p in perms if not actor.can(p)]
+        if missing:
+            raise _forbidden(f"Missing permission(s): {', '.join(missing)}")
+        return actor
+    return _check
+
+
+def require_tenant_permission(*perms: Permission):  # type: ignore[no-untyped-def]
+    """Return a FastAPI dependency that validates tenantId path match AND permissions.
+
+    Combines require_tenant_actor (tenant_id path check) with permission enforcement.
+
+    Usage::
+
+        @router.post("/v1/tenants/{tenantId}/subjects")
+        async def create(
+            actor = Depends(require_tenant_permission(Permission.SUBJECT_CREATE)),
+        ):
+            ...
+    """
+    async def _check(
+        actor: ActorPrincipal = Depends(require_tenant_actor),
+    ) -> ActorPrincipal:
         missing = [p.value for p in perms if not actor.can(p)]
         if missing:
             raise _forbidden(f"Missing permission(s): {', '.join(missing)}")

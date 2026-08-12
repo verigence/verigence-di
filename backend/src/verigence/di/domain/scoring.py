@@ -10,7 +10,8 @@ Rules:
 - Expected missing scored field contributes confidence=0 with its weight.
 - Non-expected missing scored field is excluded from numerator AND denominator.
 - Result is rounded to 2 decimal places.
-- Fixed Phase-1 threshold: confidence > 90.00 => OPTIONAL, <= 90.00 => MANDATORY.
+- Default threshold: confidence > 90.00 => OPTIONAL, <= 90.00 => MANDATORY.
+- Threshold is configurable: per-tenant DB value overrides system-wide default.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 
-VERIFICATION_THRESHOLD = Decimal("90.00")
+DEFAULT_VERIFICATION_THRESHOLD = Decimal("90.00")
 
 
 @dataclass(frozen=True)
@@ -42,13 +43,22 @@ class ConfidenceResult:
     total_weight: Decimal
 
 
-def calculate_confidence_score(fields: list[ScoredField]) -> ConfidenceResult:
+def calculate_confidence_score(
+    fields: list[ScoredField],
+    threshold: Decimal | None = None,
+) -> ConfidenceResult:
     """Calculate document-level confidence score from scored field results.
+
+    Args:
+        fields: Scored field inputs.
+        threshold: Verification threshold to apply. If None, uses
+                   DEFAULT_VERIFICATION_THRESHOLD (90.00).
 
     Raises ValueError if no fields produce a positive total weight
     (indicates a misconfigured published profile — should be caught at
     profile publication time, not here).
     """
+    effective_threshold = threshold if threshold is not None else DEFAULT_VERIFICATION_THRESHOLD
     numerator = Decimal("0")
     denominator = Decimal("0")
     participating = 0
@@ -78,14 +88,14 @@ def calculate_confidence_score(fields: list[ScoredField]) -> ConfidenceResult:
 
     hvs = (
         HumanVerificationStatus.OPTIONAL
-        if score > VERIFICATION_THRESHOLD
+        if score > effective_threshold
         else HumanVerificationStatus.MANDATORY
     )
 
     return ConfidenceResult(
         confidence_score=score,
         human_verification_status=hvs,
-        verification_threshold_applied=VERIFICATION_THRESHOLD,
+        verification_threshold_applied=effective_threshold,
         participating_field_count=participating,
         total_weight=denominator,
     )

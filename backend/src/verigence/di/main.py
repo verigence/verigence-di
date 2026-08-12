@@ -2,11 +2,14 @@
 
 Creates the FastAPI app, registers middleware, includes routers,
 and exposes /health and /ready endpoints.
+
+Lifespan: starts/stops the ProcessingWorker background task.
 """
 from __future__ import annotations
 
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request, Response
@@ -28,9 +31,24 @@ def _is_valid_correlation_id(value: str) -> bool:
 def create_app() -> FastAPI:
     settings = get_settings()
 
+    @asynccontextmanager
+    async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
+        """Start background worker + EOD scheduler on startup; stop on shutdown."""
+        from verigence.di.workers.processor import get_worker  # noqa: PLC0415
+        from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
+        worker = get_worker()
+        scheduler = get_eod_scheduler()
+        if settings.worker_enabled:
+            worker.start()
+            scheduler.start()
+        yield
+        if settings.worker_enabled:
+            await worker.stop()
+            scheduler.stop()
+
     app = FastAPI(
         title="Verigence Document Intelligence API",
-        version="2.1.0",
+        version="2.2.0",
         description=(
             "Standalone Document Intelligence. "
             "Primary lookup: tenantId + subjectId. "
@@ -39,6 +57,7 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     # ── CORS ────────────────────────────────────────────────────────────────
@@ -82,14 +101,32 @@ def create_app() -> FastAPI:
         return response
 
     # ── Routers ─────────────────────────────────────────────────────────────
-    # Import here to avoid circular imports; routers are added incrementally
+    # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
     from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
+    from verigence.di.api.v1.verification import router as verification_router  # noqa: PLC0415
+    from verigence.di.api.v1.operations import router as operations_router  # noqa: PLC0415
+    from verigence.di.api.v1.entity_links import router as entity_links_router  # noqa: PLC0415
+    from verigence.di.api.v1.requirement_profiles import router as requirement_profiles_router  # noqa: PLC0415
+    from verigence.di.api.v1.extraction_profiles import router as extraction_profiles_router  # noqa: PLC0415
+    from verigence.di.api.v1.tenant_config import router as tenant_config_router  # noqa: PLC0415
+    from verigence.di.api.v1.subject_matching import router as subject_matching_router  # noqa: PLC0415
+    from verigence.di.api.v1.unassigned import router as unassigned_router  # noqa: PLC0415
+    from verigence.di.api.v1.whatsapp_system import router as whatsapp_system_router  # noqa: PLC0415
 
     app.include_router(health_router)
     app.include_router(subjects_router)
     app.include_router(documents_router)
+    app.include_router(verification_router)
+    app.include_router(operations_router)
+    app.include_router(entity_links_router)
+    app.include_router(requirement_profiles_router)
+    app.include_router(extraction_profiles_router)
+    app.include_router(tenant_config_router)
+    app.include_router(subject_matching_router)
+    app.include_router(unassigned_router)
+    app.include_router(whatsapp_system_router)
 
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:

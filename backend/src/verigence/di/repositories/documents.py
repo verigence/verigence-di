@@ -267,6 +267,88 @@ async def list_subject_documents(
     return [_row_to_dict(r) for r in rows]
 
 
+async def get_verification_threshold(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+) -> "Decimal | None":
+    """Return the tenant-specific verification threshold, or None if not set."""
+    from decimal import Decimal
+    row = (
+        await session.execute(
+            text("""
+                SELECT verification_threshold
+                FROM docintel.tenant_settings
+                WHERE tenant_id = :tenant_id
+            """),
+            {"tenant_id": tenant_id},
+        )
+    ).one_or_none()
+    if row is None or row[0] is None:
+        return None
+    return Decimal(str(row[0]))
+
+
+async def delete_document(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    document_id: uuid.UUID,
+    subject_id: uuid.UUID,
+    storage: "StorageAdapter",
+) -> None:
+    """Hard-delete a document and all child rows except audit_events.
+
+    Eligibility must be checked by the caller before invoking this function.
+    Deletes in dependency order:
+      document_field_values → validation_results → extracted_facts →
+      processor_invocations → processing_runs → processing_jobs →
+      document_quality_results → document_artifacts (+ object storage bytes) →
+      documents
+    audit_events are intentionally preserved.
+    """
+    from verigence.di.storage.adapter import StorageAdapter  # local import avoids circular
+
+    # Load artifact keys before deleting rows
+    artifact_rows = (
+        await session.execute(
+            text("""
+                SELECT logical_object_key
+                FROM docintel.document_artifacts
+                WHERE tenant_id = :tid AND document_id = :doc_id
+            """),
+            {"tid": tenant_id, "doc_id": document_id},
+        )
+    ).all()
+    logical_keys = [r[0] for r in artifact_rows]
+
+    # Delete child rows in dependency order
+    for stmt in [
+        "DELETE FROM docintel.document_field_values  WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.validation_results     WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.extracted_facts        WHERE tenant_id=:tid AND document_id=:doc_id",
+        """DELETE FROM docintel.processor_invocations
+               WHERE tenant_id=:tid
+                 AND processing_run_id IN (
+                     SELECT processing_run_id FROM docintel.processing_runs
+                     WHERE tenant_id=:tid AND document_id=:doc_id
+                 )""",
+        "DELETE FROM docintel.processing_runs        WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.processing_jobs        WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_quality_results WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_artifacts     WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.documents              WHERE tenant_id=:tid AND document_id=:doc_id AND subject_id=:sid",
+    ]:
+        await session.execute(text(stmt), {"tid": tenant_id, "doc_id": document_id, "sid": subject_id})
+
+    # Delete object storage bytes for each artifact
+    for key in logical_keys:
+        try:
+            await storage.delete(key)
+        except Exception:
+            pass  # storage delete is best-effort; DB rows are already gone
+
+
 async def get_active_retention_policy(
     session: AsyncSession,
     *,

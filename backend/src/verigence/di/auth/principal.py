@@ -1,11 +1,14 @@
-"""auth/principal.py — Actor identity resolved from a verified JWT (Baseline 2.2).
+"""auth/principal.py — Actor identity resolved from a verified Security JWT.
 
-v2.2 changes (DI_SECURITY_RBAC_v2.2.md):
-- JWT canonical claims: tenant_id, actor_id, actor_type, roles[], permissions[]
-- Authorization checks permissions[] (authoritative), not role-name strings.
-- device_id required for actor_type=USER (enforced in dependency layer).
-- Old helpers (is_admin, is_operator etc.) are kept as convenience shims
-  but internally delegate to the permissions set.
+Security JWT canonical claims consumed by DI:
+  sub                → actor_id  (Verigence user UUID)
+  tenant_id          → tenant_id
+  actor_type         → actor_type (USER | SERVICE | SYSTEM) — issued by Security
+  roles[]            → roles  (informational)
+  permissions[]      → permissions (authoritative for authz checks)
+  device_id          → device_id (USER actors)
+  access_session_id  → access_session_id
+  location_id        → location_id
 """
 from __future__ import annotations
 
@@ -20,13 +23,8 @@ from verigence.di.domain.enums import ActorType
 class ActorPrincipal:
     """Resolved, validated identity for the calling actor.
 
-    Fields sourced from verified JWT canonical claims (v2.2):
-        sub / actor_id  → actor_id
-        tenant_id       → tenant_id
-        actor_type      → actor_type (USER | SERVICE | SYSTEM)
-        roles[]         → roles  (role bundle names — informational)
-        permissions[]   → permissions (authoritative for authz checks)
-        device_id       → device_id (required for USER actors)
+    All fields are sourced directly from the verified Security JWT claims.
+    No inference — actor_type is issued by Security, not derived by DI.
     """
     actor_id: str
     tenant_id: str
@@ -34,6 +32,8 @@ class ActorPrincipal:
     roles: frozenset[str] = field(default_factory=frozenset, compare=False, hash=False)
     permissions: frozenset[str] = field(default_factory=frozenset, compare=False, hash=False)
     device_id: str | None = field(default=None, compare=False, hash=False)
+    access_session_id: str | None = field(default=None, compare=False, hash=False)
+    location_id: str | None = field(default=None, compare=False, hash=False)
     raw_claims: dict[str, Any] = field(default_factory=dict, compare=False, hash=False)
 
     # ── Permission checks (v2.2 — use these in route handlers) ───────────────
