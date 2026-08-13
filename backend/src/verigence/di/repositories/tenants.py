@@ -103,7 +103,7 @@ async def provision_retention_policy(
             VALUES
                 (:tenant_id, :policy_id, 'default', 'Default 1-Year Retention',
                  365, 'PURGE_CONTENT', 'ACTIVE', :now, :now)
-            ON CONFLICT (tenant_id, retention_policy_id) DO NOTHING
+            ON CONFLICT (tenant_id, policy_key) DO NOTHING
         """),
         {"tenant_id": tenant_id, "policy_id": policy_id, "now": now},
     )
