@@ -836,3 +836,116 @@ ls -l scripts/railway-*.sh
 ```
 
 }
+
+## Session record — 2026-08-16 (Two-Tier Integration Test Suite) {
+
+### Integration test infrastructure ✅ DONE {
+
+#### What was accomplished
+
+Built the complete two-tier integration test suite as described in `plans/integration-test-plan.md`.
+All 10 sub-tasks completed in a single session.
+
+#### RSA Key Pair + JWKS Infrastructure (Sub-Task 1)
+
+- Generated 2048-bit RSA key pair using `cryptography` library
+- Public key committed to repo as `backend/tests/fixtures/test_jwks.json` (kid: `verigence-di-test-key-1`)
+- **Private key NOT committed** — must be added to GitHub Actions as secret `TEST_JWT_PRIVATE_KEY` (base64-encoded PEM)
+- Created `backend/tests/jwt_helper.py` with:
+  - `mint_jwt(tenant_id, actor_id, roles, permissions, exp_seconds)` — real RS256-signed JWT
+  - `mint_expired_jwt()` — JWT with exp in the past
+  - `mint_jwt_wrong_audience()` — JWT with wrong `aud` claim
+  - `mint_jwt_wrong_issuer()` — JWT with wrong `iss` claim
+- JWKS cache patched in `conftest.py` via `_patch_jwks_cache` fixture — no HTTP fetch needed
+
+#### conftest.py Extension (Sub-Tasks 2 + 3)
+
+New fixtures added:
+- `_patch_jwks_cache` — session-scoped, patches `JWKSCache.get_key` to serve from `test_jwks.json`
+- `test_tenant_id` — function-scoped, returns unique `test-<8hex>` string per test
+- `api_client` — function-scoped, `AsyncClient` over `ASGITransport(create_app())` with:
+  - Neon DB (skips if `DI_DATABASE_URL` is localhost)
+  - `DI_WORKER_ENABLED=false` for synchronous test execution
+  - Clears `get_settings` lru_cache and resets DB engine singleton per test
+- `tenant_cleanup` — deletes all `docintel.*` rows for `test_tenant_id` after each test (6 tables, FK-safe order)
+- `storage_cleanup` — deletes all R2 objects with `{test_tenant_id}/` prefix after each test
+- Three new pytest markers registered: `smoke`, `extended`, `post_deploy_smoke`
+
+#### Test files created
+
+```
+backend/tests/
+├── fixtures/
+│   ├── __init__.py
+│   └── test_jwks.json          ← RSA public key JWKS (committed)
+├── jwt_helper.py               ← mint_jwt() + helpers
+├── test_smoke.py               ← Tier 1 — 11 tests, @pytest.mark.smoke
+├── test_extended_auth.py       ← Tier 2 — 7 tests, @pytest.mark.extended
+├── test_extended_documents.py  ← Tier 2 — 11 tests, @pytest.mark.extended
+├── test_extended_e2e.py        ← Tier 2 — 2 tests, @pytest.mark.extended (worker)
+├── test_extended_tenant_config.py ← Tier 2 — 5 tests, @pytest.mark.extended
+└── post_deploy/
+    ├── __init__.py
+    └── test_post_deploy_smoke.py ← 8 tests, @pytest.mark.post_deploy_smoke
+```
+
+#### CI pipeline updated
+
+**`.github/workflows/ci.yml`** — added two new jobs:
+- `smoke` job: `needs: quality`, always runs on push to dev, blocks deploy if it fails
+  - env: Neon DB + R2 test bucket + real JWTs via `TEST_JWT_PRIVATE_KEY`
+  - run: `pytest -m smoke --no-cov -q`
+- `extended` job: `workflow_dispatch` only with `run_extended=true` input
+  - Same env as smoke; run: `pytest -m extended --no-cov -q`
+
+**`.github/workflows/railway-dev-deploy.yml`** — added `post-deploy-smoke` job:
+- `needs: gate` (runs after CI passes and Railway deploys)
+- Waits 120s for Railway to finish deploying
+- Hits live Railway URL with real HTTP + real signed JWTs
+- run: `pytest -m post_deploy_smoke --no-cov -q`
+- Gracefully skips if `RAILWAY_API_URL` secret not set
+
+#### Complete CI pipeline shape (after this session)
+
+```
+push to dev
+    │
+    ├── job: quality    (lint + 107 unit tests, no_docker, always runs)
+    │
+    ├── job: smoke      (NEW — Tier 1, ~11 tests, needs: quality, blocks deploy)
+    │       markers: pytest -m smoke
+    │       infra: ASGITransport + Neon DB + real R2 (verigence-di-test) + real JWTs
+    │
+    └── (Railway GitHub integration deploys automatically when both pass)
+
+manual trigger (workflow_dispatch, run_extended=true):
+    └── job: extended   (NEW — Tier 2, ~25 tests, on demand)
+            markers: pytest -m extended
+
+post-deploy (in railway-dev-deploy.yml, after gate):
+    └── job: post-deploy-smoke (NEW — hits live Railway URL, real HTTP)
+            markers: pytest -m post_deploy_smoke
+```
+
+#### Validation
+
+- `ruff check tests/` → all clean (6 auto-fixed, 0 remaining)
+- `pytest -m no_docker --no-cov -q` → 107 passed, 1 xfailed (unchanged)
+
+#### Required manual actions (smoke tests will fail without these)
+
+1. **GitHub Actions secret `TEST_JWT_PRIVATE_KEY`** — add base64-encoded private PEM (from this session's key generation output)
+2. **GitHub Actions secret `RAILWAY_API_URL`** — add: `https://verigence-di-production.up.railway.app`
+3. **Railway dashboard `DI_SECURITY_JWKS_URL`** — update to: `https://raw.githubusercontent.com/verigence/verigence-di/dev/backend/tests/fixtures/test_jwks.json`
+4. **Cloudflare R2 bucket `verigence-di-test`** — create and generate API token (Object Read & Write)
+5. **GitHub Actions secrets** `TEST_R2_ENDPOINT`, `TEST_R2_ACCESS_KEY_ID`, `TEST_R2_SECRET_ACCESS_KEY` — from R2 bucket step
+
+#### What's next
+
+- Step 12 — React PWA ops-ui (still not started; `ops-ui/` has README only)
+- Google Document AI real adapter (Step 9 — not started)
+- Cloudflare R2 prod bucket creation + Railway env var update (storage ⚠️ placeholder)
+
+}
+
+}

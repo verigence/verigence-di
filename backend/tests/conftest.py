@@ -3,22 +3,32 @@
 Docker / PostgreSQL fixtures are gated behind a `needs_docker` marker so that
 pure unit tests (marked `no_docker`) can run in CI without Docker Desktop.
 
-Fixture dependency chain:
+Smoke / Extended tests use ASGITransport + Neon DB + real R2 + real RSA JWTs.
+The JWKS HTTP fetch is patched to load from the committed test_jwks.json so
+tests never make real network calls to fetch keys.
+
+Fixture dependency chain (unit tests):
     pg_container  ← needs_docker
     db_url        ← pg_container
     apply_migrations (autouse, session) ← db_url
     db_session    ← db_url
     client        ← db_url
 
-When every collected test is marked `no_docker`, the `pg_container` fixture
-(and everything that depends on it) is never instantiated.
+Fixture dependency chain (smoke / extended):
+    api_client    ← env overrides + JWKS patch
+    test_tenant_id
+    tenant_cleanup ← test_tenant_id + api_client
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -37,6 +47,10 @@ os.environ.setdefault("DI_SECURITY_JWKS_URL", "http://localhost/mock-jwks")
 # Provide a dummy DB URL so Settings validation doesn't fail for unit tests
 os.environ.setdefault("DI_DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
+# ── JWKS fixture path ─────────────────────────────────────────────────────────
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+_TEST_JWKS_PATH = _FIXTURES_DIR / "test_jwks.json"
+
 
 # ── Marker registration ───────────────────────────────────────────────────────
 
@@ -45,17 +59,25 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "no_docker: mark test as not requiring Docker/PostgreSQL container",
     )
+    config.addinivalue_line(
+        "markers",
+        "smoke: Tier 1 — fast integration tests, mandatory on every build, blocks deploy",
+    )
+    config.addinivalue_line(
+        "markers",
+        "extended: Tier 2 — comprehensive integration tests, triggered on demand",
+    )
+    config.addinivalue_line(
+        "markers",
+        "post_deploy_smoke: hits live Railway URL with real HTTP after deploy",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _needs_docker(config: pytest.Config) -> bool:
     """Return True when at least one collected test needs Docker (is NOT no_docker)."""
-    # During collection, config.option may expose selected items via -k etc.
-    # We use the lightest possible check: if *all* items in the current run
-    # carry the no_docker marker then we can skip Docker entirely.
-    # This check is evaluated lazily inside each fixture via request.config.
-    return True  # Conservative default — override in _session_needs_docker below.
+    return True  # Conservative default
 
 
 # ── Event loop (session-scoped for pytest-asyncio) ────────────────────────────
@@ -67,6 +89,42 @@ def event_loop():  # type: ignore[override]
     loop.close()
 
 
+# ── JWKS patch — session-scoped, used by smoke + extended tests ───────────────
+
+def _load_test_jwks() -> dict:  # type: ignore[type-arg]
+    """Load the committed test JWKS file."""
+    with _TEST_JWKS_PATH.open() as f:
+        return json.load(f)
+
+
+def _make_jwks_get_key(jwks_data: dict):  # type: ignore[type-arg]
+    """Return a get_key function that serves keys from the committed test JWKS."""
+    from jose import jwk  # type: ignore[import]
+
+    key_map = {}
+    for key_data in jwks_data.get("keys", []):
+        kid = key_data.get("kid", "")
+        key_map[kid] = jwk.construct(key_data)
+
+    def get_key(kid: str):  # type: ignore[return]
+        return key_map.get(kid)
+
+    return get_key
+
+
+@pytest.fixture(scope="session", autouse=False)
+def _patch_jwks_cache():
+    """Session-scoped: patch JWKSCache.get_key to load from test_jwks.json.
+
+    Applied automatically for smoke / extended test sessions via api_client.
+    """
+    jwks_data = _load_test_jwks()
+    get_key_fn = _make_jwks_get_key(jwks_data)
+
+    with patch("verigence.di.auth.jwks.JWKSCache.get_key", side_effect=get_key_fn):
+        yield
+
+
 # ── Docker-gated PostgreSQL fixtures ─────────────────────────────────────────
 
 @pytest.fixture(scope="session")
@@ -75,7 +133,6 @@ def pg_container(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def
 
     Skipped automatically when only `no_docker` tests are collected.
     """
-    # If every test in this session carries no_docker, skip the container.
     items = request.session.items
     all_no_docker = all(
         item.get_closest_marker("no_docker") is not None for item in items
@@ -95,7 +152,6 @@ def pg_container(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def
 @pytest.fixture(scope="session")
 def db_url(pg_container) -> str:  # type: ignore[no-untyped-def]
     url = pg_container.get_connection_url()
-    # Convert to asyncpg driver for the app; psycopg2 URL comes from testcontainers
     return (
         url.replace("psycopg2", "asyncpg")
         .replace("postgresql://", "postgresql+asyncpg://")
@@ -113,11 +169,10 @@ def apply_migrations(request: pytest.FixtureRequest) -> None:
         item.get_closest_marker("no_docker") is not None for item in items
     )
     if all_no_docker:
-        return  # Nothing to migrate — no DB available.
+        return
 
     import subprocess
 
-    # Resolve db_url via the fixture system
     url = cast("str", request.getfixturevalue("db_url"))
     env = os.environ.copy()
     env["DI_DATABASE_URL"] = url
@@ -142,13 +197,12 @@ async def db_session(db_url: str) -> AsyncGenerator[AsyncSession, None]:
     await engine.dispose()
 
 
-# ── HTTP test client ───────────────────────────────────────────────────────────
+# ── HTTP test client (unit tests) ─────────────────────────────────────────────
 
 @pytest_asyncio.fixture
 async def client(db_url: str) -> AsyncGenerator[AsyncClient, None]:
-    """Async HTTP test client wired to the FastAPI app."""
+    """Async HTTP test client wired to the FastAPI app (unit/docker tests)."""
     os.environ["DI_DATABASE_URL"] = db_url
-    # Clear settings cache so the new DB URL is picked up
     from verigence.di.settings import get_settings
     get_settings.cache_clear()
 
@@ -158,3 +212,142 @@ async def client(db_url: str) -> AsyncGenerator[AsyncClient, None]:
         transport=ASGITransport(app=app), base_url="http://test"
     ) as c:
         yield c
+
+
+# ── Integration test fixtures (smoke + extended) ─────────────────────────────
+
+@pytest.fixture
+def test_tenant_id() -> str:
+    """Return a unique tenant ID for each test (format: test-<8 hex chars>)."""
+    return f"test-{uuid.uuid4().hex[:8]}"
+
+
+@pytest_asyncio.fixture
+async def api_client(_patch_jwks_cache) -> AsyncGenerator[AsyncClient, None]:  # type: ignore[no-untyped-def]
+    """AsyncClient over ASGITransport wired to Neon DB + real R2 + real JWTs.
+
+    Reads connection config from environment (set by CI or developer .env.local).
+    Worker is disabled (DI_WORKER_ENABLED=false) to keep tests synchronous.
+    """
+    neon_url = os.environ.get("DI_DATABASE_URL", "")
+    if not neon_url or "localhost" in neon_url:
+        pytest.skip("Neon DI_DATABASE_URL not set — skipping integration test")
+
+    # Override env for integration test
+    env_overrides = {
+        "DI_DATABASE_URL": neon_url,
+        "DI_ENV": "dev",
+        "DI_DOCAI_MOCK": "true",
+        "DI_WORKER_ENABLED": "false",
+        # Storage — use test R2 bucket if configured, else skip
+        "DI_STORAGE_PROVIDER": os.environ.get("DI_STORAGE_PROVIDER", "minio"),
+        "DI_STORAGE_BUCKET": os.environ.get("DI_STORAGE_BUCKET", "verigence-di-test"),
+        "DI_STORAGE_ENDPOINT": os.environ.get("DI_STORAGE_ENDPOINT", "http://localhost:9000"),
+        "DI_STORAGE_ACCESS_KEY_ID": os.environ.get("DI_STORAGE_ACCESS_KEY_ID", "minioadmin"),
+        "DI_STORAGE_SECRET_ACCESS_KEY": os.environ.get("DI_STORAGE_SECRET_ACCESS_KEY", "minioadmin123"),
+        "DI_STORAGE_REGION": os.environ.get("DI_STORAGE_REGION", "us-east-1"),
+    }
+
+    original = {k: os.environ.get(k) for k in env_overrides}
+    os.environ.update(env_overrides)
+
+    from verigence.di.settings import get_settings
+    get_settings.cache_clear()
+
+    # Reset DB engine singleton so it picks up the new URL
+    import verigence.di.repositories.database as _db_mod
+    if hasattr(_db_mod, "_engine") and _db_mod._engine is not None:
+        await _db_mod._engine.dispose()
+        _db_mod._engine = None
+
+    from verigence.di.main import create_app
+    app = create_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        yield c
+
+    # Restore env
+    for k, v in original.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    get_settings.cache_clear()
+
+
+@pytest_asyncio.fixture
+async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
+    """Delete all DB rows for test_tenant_id after each integration test.
+
+    Uses a direct asyncpg connection to Neon so cleanup works even if the
+    app's connection pool is closed.
+    """
+    yield
+
+    neon_url = os.environ.get("DI_DATABASE_URL", "")
+    if not neon_url or "localhost" in neon_url:
+        return
+
+    engine = create_async_engine(neon_url, echo=False)
+    try:
+        async with engine.begin() as conn:
+            # Delete in FK-safe order (children first)
+            for table in [
+                "docintel.processing_jobs",
+                "docintel.document_artifacts",
+                "docintel.documents",
+                "docintel.subjects",
+                "docintel.tenant_settings",
+                "docintel.actors",
+            ]:
+                await conn.execute(
+                    # sqlalchemy text not imported here — use raw execute
+                    __import__("sqlalchemy", fromlist=["text"]).text(
+                        f"DELETE FROM {table} WHERE tenant_id = :tid"  # noqa: S608
+                    ),
+                    {"tid": test_tenant_id},
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def storage_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
+    """Delete all R2 test objects with key prefix matching test_tenant_id."""
+    yield
+
+    storage_provider = os.environ.get("DI_STORAGE_PROVIDER", "minio")
+    if storage_provider not in ("r2", "minio"):
+        return
+
+    try:
+        from verigence.di.settings import get_settings
+        from verigence.di.storage.adapter import get_storage_adapter
+
+        settings = get_settings()
+        adapter = get_storage_adapter(settings)
+        prefix = f"{test_tenant_id}/"
+
+        # List and delete objects — best-effort cleanup, swallow errors
+        import aioboto3  # type: ignore[import]
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=settings.storage_endpoint,
+            aws_access_key_id=settings.storage_access_key_id,
+            aws_secret_access_key=settings.storage_secret_access_key,
+            region_name=settings.storage_region,
+        ) as s3:
+            resp = await s3.list_objects_v2(
+                Bucket=settings.storage_bucket, Prefix=prefix
+            )
+            objects = [{"Key": o["Key"]} for o in resp.get("Contents", [])]
+            if objects:
+                await s3.delete_objects(
+                    Bucket=settings.storage_bucket,
+                    Delete={"Objects": objects},
+                )
+    except Exception:  # noqa: BLE001
+        pass  # cleanup is best-effort

@@ -6,6 +6,13 @@ on:
   push:
     branches: [dev]
   workflow_dispatch:
+    inputs:
+      run_extended:
+        description: 'Run Tier 2 extended tests'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: read
@@ -15,8 +22,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Tier 0: Lint + unit tests (no DB, no network) ────────────────────────────
   quality:
-    name: Lint + Test + Build
+    name: Lint + Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -57,3 +65,86 @@ jobs:
 
       - name: Verify installed dependency consistency
         run: python -m pip check
+
+  # ── Tier 1: Smoke tests (fast, mandatory, blocks deploy) ─────────────────────
+  smoke:
+    name: Tier 1 Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install project and dev tooling
+        run: pip install -e ".[dev]"
+
+      - name: Run smoke tests
+        env:
+          DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
+          DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DI_ENV: dev
+          DI_DOCAI_MOCK: "true"
+          DI_WORKER_ENABLED: "false"
+          # R2 test bucket
+          DI_STORAGE_PROVIDER: r2
+          DI_STORAGE_BUCKET: verigence-di-test
+          DI_STORAGE_ENDPOINT: ${{ secrets.TEST_R2_ENDPOINT }}
+          DI_STORAGE_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
+          DI_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
+          DI_STORAGE_REGION: auto
+          DI_SECURITY_JWKS_URL: "https://raw.githubusercontent.com/${{ github.repository }}/dev/backend/tests/fixtures/test_jwks.json"
+          TEST_JWT_PRIVATE_KEY: ${{ secrets.TEST_JWT_PRIVATE_KEY }}
+        run: PYTHONPATH=src python -m pytest -m smoke --no-cov -q
+
+  # ── Tier 2: Extended tests (on demand only — workflow_dispatch) ───────────────
+  extended:
+    name: Tier 2 Extended Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_extended == 'true'
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install project and dev tooling
+        run: pip install -e ".[dev]"
+
+      - name: Run extended tests
+        env:
+          DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
+          DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DI_ENV: dev
+          DI_DOCAI_MOCK: "true"
+          DI_WORKER_ENABLED: "false"
+          DI_STORAGE_PROVIDER: r2
+          DI_STORAGE_BUCKET: verigence-di-test
+          DI_STORAGE_ENDPOINT: ${{ secrets.TEST_R2_ENDPOINT }}
+          DI_STORAGE_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
+          DI_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
+          DI_STORAGE_REGION: auto
+          DI_SECURITY_JWKS_URL: "https://raw.githubusercontent.com/${{ github.repository }}/dev/backend/tests/fixtures/test_jwks.json"
+          TEST_JWT_PRIVATE_KEY: ${{ secrets.TEST_JWT_PRIVATE_KEY }}
+        run: PYTHONPATH=src python -m pytest -m extended --no-cov -q

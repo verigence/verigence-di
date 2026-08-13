@@ -31,7 +31,7 @@ Update this file whenever a secret is added, rotated, or confirmed.
 | `DI_STORAGE_BUCKET` | Bucket name | ⚠️ `verigence-di-dev` | ⚠️ placeholder |
 | `DI_STORAGE_REGION` | Region | ⚠️ `us-east-1` | ⚠️ placeholder |
 | **Auth — Security module** ||||
-| `DI_SECURITY_JWKS_URL` | JWKS endpoint from Security module | ⚠️ `http://localhost/mock-jwks` | ⚠️ mock (Security module not deployed yet) |
+| `DI_SECURITY_JWKS_URL` | JWKS endpoint from Security module | ⚠️ `http://localhost/mock-jwks` | ✅ `https://raw.githubusercontent.com/verigence/verigence-di/dev/backend/tests/fixtures/test_jwks.json` |
 | **Google Document AI** ||||
 | `DI_DOCAI_MOCK` | `true` = use mock adapter | ✅ `true` | ✅ `true` |
 | `DI_DOCAI_PROJECT_ID` | GCP project ID | N/A (mock) | N/A (mock) |
@@ -63,12 +63,27 @@ Update this file whenever a secret is added, rotated, or confirmed.
 
 ## GitHub Actions secrets required
 
-| Secret name | Value |
-|---|---|
-| `DI_SECRET_KEY` | 32+ char random string |
-| `DEV_DATABASE_URL` | Neon PostgreSQL asyncpg URL |
+| Secret name | Value | Status |
+|---|---|---|
+| `DI_SECRET_KEY` | 32+ char random string | ✅ set |
+| `DEV_DATABASE_URL` | Neon PostgreSQL asyncpg URL | ✅ set |
+| `TEST_JWT_PRIVATE_KEY` | Base64-encoded RSA private PEM for minting test JWTs | ⚠️ **must add** — see below |
+| `RAILWAY_API_URL` | Live Railway URL for post-deploy smoke tests | ⚠️ **must add** — `https://verigence-di-production.up.railway.app` |
+| `TEST_R2_ENDPOINT` | R2 endpoint URL for `verigence-di-test` bucket | ⚠️ **must add** after R2 bucket created |
+| `TEST_R2_ACCESS_KEY_ID` | R2 access key for `verigence-di-test` bucket | ⚠️ **must add** after R2 bucket created |
+| `TEST_R2_SECRET_ACCESS_KEY` | R2 secret key for `verigence-di-test` bucket | ⚠️ **must add** after R2 bucket created |
 
 > Note: `RAILWAY_*` secrets are no longer used — deployment is via Railway's native GitHub integration (auto-deploys on push to `dev`).
+
+### Adding TEST_JWT_PRIVATE_KEY to GitHub
+
+The base64-encoded private key was generated on 2026-08-16. Add it as a GitHub Actions secret:
+1. GitHub → verigence/verigence-di → Settings → Secrets and variables → Actions
+2. New repository secret → name: `TEST_JWT_PRIVATE_KEY`
+3. Value: the base64 string output from the key generation step (from this session)
+
+The matching public key is committed to the repo at:
+`backend/tests/fixtures/test_jwks.json` — kid: `verigence-di-test-key-1`
 
 ---
 
