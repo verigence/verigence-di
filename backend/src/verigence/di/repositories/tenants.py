@@ -81,6 +81,61 @@ async def provision_tenant(session: AsyncSession, tenant_id: str) -> None:
     )
 
 
+async def provision_retention_policy(
+    session: AsyncSession,
+    tenant_id: str,
+) -> uuid.UUID:
+    """Ensure a default retention policy exists for tenant_id and link it.
+
+    Creates a default 7-year retention policy and sets it as the active
+    policy on tenant_settings. Safe to call multiple times.
+    Returns the retention_policy_id.
+    """
+    now = datetime.now(UTC)
+    policy_id = uuid.uuid4()
+
+    # Insert default retention policy (ON CONFLICT DO NOTHING)
+    await session.execute(
+        text("""
+            INSERT INTO docintel.retention_policies
+                (tenant_id, retention_policy_id, policy_key, display_name,
+                 retention_days, disposition, status, created_at_utc, updated_at_utc)
+            VALUES
+                (:tenant_id, :policy_id, 'default', 'Default 1-Year Retention',
+                 365, 'DELETE', 'ACTIVE', :now, :now)
+            ON CONFLICT (tenant_id, retention_policy_id) DO NOTHING
+        """),
+        {"tenant_id": tenant_id, "policy_id": policy_id, "now": now},
+    )
+
+    # Get the actual active policy_id (may already exist from a previous call)
+    row = (await session.execute(
+        text("""
+            SELECT rp.retention_policy_id
+            FROM docintel.retention_policies rp
+            WHERE rp.tenant_id = :tenant_id AND rp.status = 'ACTIVE'
+            LIMIT 1
+        """),
+        {"tenant_id": tenant_id},
+    )).one_or_none()
+
+    actual_id = row[0] if row else policy_id
+
+    # Link to tenant_settings if not already linked
+    await session.execute(
+        text("""
+            UPDATE docintel.tenant_settings
+            SET active_retention_policy_id = :policy_id,
+                updated_at_utc = :now
+            WHERE tenant_id = :tenant_id
+              AND active_retention_policy_id IS NULL
+        """),
+        {"tenant_id": tenant_id, "policy_id": actual_id, "now": now},
+    )
+
+    return actual_id
+
+
 async def provision_actor(
     session: AsyncSession,
     tenant_id: str,
