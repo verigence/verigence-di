@@ -8,6 +8,59 @@ Update this file at the end of every session.
 
 ---
 
+## ⚠️ MANDATORY — Read before writing any code or running any test
+
+These rules were learned the hard way. Violating them wastes multiple sessions.
+
+### Rule 1 — JWT: mint and use in the same Python process
+Never mint a JWT and export it as a shell variable. The 5-minute TTL is consumed
+before the second command runs. Always mint inside the same `httpx.Client` block.
+```python
+def tok():
+    return mint_jwt(tenant_id=TENANT, actor_id="actor",
+                    roles=["TENANT_ADMIN"], exp_seconds=120)
+# Call tok() inline at the moment of each request — never store it
+```
+
+### Rule 2 — Private key: write to file first, never inline in shell
+Shell heredoc and variable expansion corrupt long base64 strings silently.
+```bash
+# Once per session — write key cleanly via Python
+python3 -c "import base64,os; open('/tmp/di_test_key.pem','w').write(base64.b64decode(os.environ['TEST_JWT_PRIVATE_KEY']).decode())"
+# Then read back for shell (macOS needs -i flag)
+TEST_JWT_PRIVATE_KEY="$(base64 -i /tmp/di_test_key.pem)" uv run ...
+```
+
+### Rule 3 — Railway 500: reproduce against Neon directly first
+Live API returns opaque `text/plain 500` (Railway proxy). Don't waste rounds on curl.
+Run the SQL directly against Neon with asyncpg to get the full traceback immediately.
+See `docs/debugging-lessons.md §3` for the exact pattern.
+
+### Rule 4 — Check DB constraints before writing column values
+```sql
+SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c
+JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = 'docintel' AND t.relname = 'your_table';
+```
+
+### Rule 5 — Check unique indexes before writing ON CONFLICT
+```sql
+SELECT indexname, indexdef FROM pg_indexes
+WHERE schemaname = 'docintel' AND tablename = 'your_table';
+```
+
+### Rule 6 — Wait 90 seconds after git push before testing Railway
+```bash
+git push origin dev && sleep 90 && echo "ready"
+```
+
+### Rule 7 — Read full schema before writing any provisioning SQL
+Columns + constraints + indexes. Three bugs in one function because this was skipped.
+
+> Full detail with examples: `docs/debugging-lessons.md`
+
+---
+
 ## Current active step
 
 **Step 13 — Railway deployment — ✅ DONE**
