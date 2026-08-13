@@ -949,3 +949,30 @@ post-deploy (in railway-dev-deploy.yml, after gate):
 }
 
 }
+
+## Session record — 2026-08-16 (Deployment unblocked) {
+
+### di-api — ✅ LIVE at https://di-api-production.up.railway.app {
+
+#### Root causes fixed (in order)
+
+1. **`cd` not found** — Railway dashboard Config File Path was blank so `railway.toml` was ignored. Fix: set Config File Path to `railway.toml` in dashboard.
+2. **Health check failure** — `healthcheckPath` was `/health/ready` which returns 503 when DB unreachable. Fix: changed to `/health/live` (always 200).
+3. **Port mismatch** — uvicorn was hardcoded to port 8000 but Railway assigns port 8080 via `$PORT`. Fix: `sh -c '... --port ${PORT:-8000}'` so shell expands the env var.
+
+#### Verified working (2026-08-16)
+
+```
+GET /health/live   → {"status":"live"}            ✅
+GET /health/ready  → {"status":"ready","databaseReady":true}  ✅
+GET /health        → {"status":"ok"}              ✅
+GET /v1/tenants/x/subjects (no token) → 401       ✅
+X-Correlation-ID header present                   ✅
+```
+
+#### Correct Railway URL
+- di-api: https://di-api-production.up.railway.app
+
+}
+
+}
