@@ -102,7 +102,7 @@ async def provision_retention_policy(
                  retention_days, disposition, status, created_at_utc, updated_at_utc)
             VALUES
                 (:tenant_id, :policy_id, 'default', 'Default 1-Year Retention',
-                 365, 'DELETE', 'ACTIVE', :now, :now)
+                 365, 'PURGE_CONTENT', 'ACTIVE', :now, :now)
             ON CONFLICT (tenant_id, retention_policy_id) DO NOTHING
         """),
         {"tenant_id": tenant_id, "policy_id": policy_id, "now": now},
