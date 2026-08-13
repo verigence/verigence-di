@@ -77,10 +77,12 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 # ── Context manager for worker/scheduler use ─────────────────────────────────
 @asynccontextmanager
 async def tenant_session(tenant_id: str) -> AsyncGenerator[AsyncSession, None]:
-    """Open a session, set RLS context and yield — for use outside FastAPI."""
+    """Open a session, set RLS context, auto-provision tenant, and yield."""
+    from verigence.di.repositories.tenants import provision_tenant  # noqa: PLC0415
     async with AsyncSessionFactory() as session:
         try:
             await set_tenant_context(session, tenant_id)
+            await provision_tenant(session, tenant_id)
             yield session
             await session.commit()
         except Exception:

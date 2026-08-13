@@ -29,6 +29,9 @@ async def create_subject(
     created_by_actor_id: str,
 ) -> dict:  # type: ignore[type-arg]
     """Insert a new Subject row and return its data as a dict."""
+    from verigence.di.repositories.tenants import provision_actor  # noqa: PLC0415
+    await provision_actor(session, tenant_id, created_by_actor_id)
+
     now = datetime.now(UTC)
     subject_id = uuid.uuid4()
 
