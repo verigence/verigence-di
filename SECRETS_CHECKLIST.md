@@ -54,8 +54,8 @@ Update this file whenever a secret is added, rotated, or confirmed.
 | Item | Value |
 |---|---|
 | Project ID | `62c22163-78d0-4a86-a2f7-dbf39e64aa4d` |
-| di-api service ID | `c7286646-fe6f-4cb3-a055-e6e7a71e852a` |
-| di-worker service ID | `5c7124fe-8e2a-4abd-8e45-37d248ee56a3` (confirm from Railway URL) |
+| di-api service ID | `7a608cd3-67d2-45b6-afaa-4d41c01cc664` |
+| di-worker service ID | `228d06f9-1750-4654-be05-56083f6ec12a` |
 | Environment ID (production) | `3e696b3a-1128-4970-b6c0-5a8c25d8fcb0` |
 | di-api Railway URL | set by Railway on first successful deploy |
 
