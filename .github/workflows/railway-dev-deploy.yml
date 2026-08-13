@@ -213,35 +213,7 @@ jobs:
             exit 1
           fi
           echo "Railway accepted immutable image for di-api and di-worker."
-
-      - name: Trigger deployments for di-api and di-worker
-        shell: bash
-        run: |
-          set -euo pipefail
-          mutation='mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) { serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId) }'
-
-          for service_id in "$RAILWAY_SERVICE_API_ID" "$RAILWAY_SERVICE_WORKER_ID"; do
-            variables="$(jq -cn \
-              --arg environment "$RAILWAY_ENVIRONMENT_ID" \
-              --arg service "$service_id" \
-              '{environmentId:$environment,serviceId:$service}')"
-            body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
-            response="$(curl --fail-with-body --silent --show-error \
-              --request POST \
-              --url 'https://backboard.railway.com/graphql/v2' \
-              --header "Project-Access-Token: $RAILWAY_TOKEN" \
-              --header 'Content-Type: application/json' \
-              --data "$body")"
-
-            if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
-              printf '%s\n' "$response" | jq -c '.errors'
-              echo "::error::Railway rejected deployment trigger for service $service_id."
-              exit 1
-            fi
-
-            deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
-            echo "Triggered deployment for $service_id: $deployment_id"
-          done
+          echo "Railway will auto-trigger deployments from the image source change."
 
       - name: Wait for both Railway DEV deployments to succeed
         id: deployment
