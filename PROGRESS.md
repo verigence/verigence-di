@@ -976,3 +976,119 @@ X-Correlation-ID header present                   ✅
 }
 
 }
+
+## Session record — 2026-08-13 (Document upload end-to-end working) {
+
+### Document Upload Pipeline ✅ DONE {
+
+#### Goal
+
+Fix the document upload endpoint so that `POST /v1/tenants/{tenantId}/subjects/{subjectId}/documents` returns `201` with a `documentId` instead of a `500 Internal Server Error`.
+
+#### Root causes found and fixed (in order)
+
+**Bug 1 — No retention policy on new tenants (commit `3ee197a`)**
+
+`intake.py` checks `tenant_settings.active_retention_policy_id` before accepting any upload. The existing `provision_tenant()` auto-provisioning left this column `NULL`. Document upload failed with `"Tenant has no active retention policy configured"`.
+
+Fix: Added `provision_retention_policy()` to `tenants.py`:
+1. Inserts a default `retention_policies` row (1 year, `PURGE_CONTENT`)
+2. Reads back the actual active policy ID
+3. Updates `tenant_settings.active_retention_policy_id` only if currently `NULL`
+Wired into `tenant_session()` in `database.py` — runs on every request automatically.
+
+**Bug 2 — `disposition` check constraint violation (commit `7e4ea9f`)**
+
+The initial code used `disposition = 'DELETE'`. The DB check constraint `retention_policies_disposition_check` only allows `'PURGE_CONTENT'` or `'KEEP_CONTENT'`. Diagnosing method: ran the raw SQL directly against Neon and read the constraint definition from `pg_constraint`.
+
+Fix: changed to `'PURGE_CONTENT'`.
+
+**Bug 3 — Wrong `ON CONFLICT` target (commit `28db98e`)**
+
+`provision_retention_policy()` used `ON CONFLICT (tenant_id, retention_policy_id)` — but that combination is not a unique constraint. The actual unique constraint is `(tenant_id, policy_key)`. On the second request for the same tenant (e.g., subject create then document upload), a new UUID was generated and a second insert attempted, hitting the `policy_key='default'` uniqueness constraint with a `UniqueViolationError`.
+
+Fix: changed to `ON CONFLICT (tenant_id, policy_key) DO NOTHING`.
+
+**Bug 4 — Unhandled exceptions returned as `text/plain 500` (commit `1b9e443`)**
+
+Without a global exception handler, any unhandled exception (including DB `IntegrityError`) propagated as a raw Railway `text/plain 500 Internal Server Error` response — impossible to diagnose without Railway logs.
+
+Fix: Added a `try/except` block in the `correlation_middleware` in `main.py`. Unhandled exceptions now return `{"detail": {"code": "INTERNAL_ERROR", "title": "<exc message>", "type": "<ExcType>"}}` as JSON, making all errors diagnosable without log access.
+
+#### Files changed this session
+
+| File | Change |
+|------|--------|
+| `backend/src/verigence/di/repositories/tenants.py` | Added `provision_retention_policy()` — 55 lines |
+| `backend/src/verigence/di/repositories/database.py` | `tenant_session()` now calls `provision_retention_policy()` |
+| `backend/src/verigence/di/main.py` | Global exception handler in correlation middleware — JSON 500 responses |
+| `docs/deployment.md` | Updated: R2 verified, `DI_ENV=production`, troubleshooting section expanded, E2E verification section added |
+| `docs/testing.md` | Added: Manual live smoke test procedure with correct single-process pattern |
+| `PROGRESS.md` | This session record |
+
+#### Commit log (this session)
+
+```
+3ee197a fix: auto-provision default 1-year retention policy on first tenant request
+7e4ea9f fix: use PURGE_CONTENT disposition — DELETE violates retention_policies check constraint
+1b9e443 fix: catch unhandled exceptions in middleware — return JSON 500 with error detail
+28db98e fix: ON CONFLICT target is (tenant_id, policy_key) not (tenant_id, retention_policy_id)
+```
+
+#### Tenant auto-provisioning chain (final state)
+
+Every `tenant_session()` call now runs:
+```
+1. set_tenant_context(tenant_id)         — PostgreSQL RLS: SET LOCAL app.tenant_id
+2. provision_tenant(tenant_id)           — upsert tenant_settings (ON CONFLICT DO NOTHING)
+3. provision_retention_policy(tenant_id) — upsert retention_policies, link to tenant_settings
+   └── ON CONFLICT (tenant_id, policy_key) DO NOTHING
+4. (request handler runs)
+   └── provision_actor() called inside subjects.py before any insert
+```
+
+#### Smoke test result (2026-08-13, verified against live Railway)
+
+```
+✅ 1. GET  /health/live                               200  {"status":"live"}
+✅ 2. GET  /health/ready                              200  {"status":"ready","environment":"production","databaseReady":true}
+✅ 3. GET  /v1/tenants/{id}/subjects  (no token)      401  Not authenticated
+✅ 4. POST /v1/tenants/{id}/subjects                  201  {"subjectId":"...","subjectType":"PERSON",...}
+✅ 5. POST /v1/tenants/{id}/subjects/{sid}/documents  201  {"documentId":"...","uploadStatus":"CORRUPT",...}
+```
+
+`CORRUPT` on step 5 is correct — dummy PDF bytes (`%PDF-1.4`) are syntactically invalid. A real PDF returns `FIT`. The quality gate is working.
+
+#### Document upload URL (important — subjectId is in PATH not body)
+
+```
+POST /v1/tenants/{tenantId}/subjects/{subjectId}/documents
+Content-Type: multipart/form-data
+
+Fields:
+  file           — binary file content
+  sourceChannel  — "API" | "WEB" | "MOBILE"
+  mimeType       — "application/pdf" (declared, not authoritative — system detects actual MIME)
+```
+
+#### Retention policy defaults (auto-provisioned)
+
+| Field | Value | Reason |
+|-------|-------|--------|
+| `policy_key` | `default` | Used as idempotency key for ON CONFLICT |
+| `display_name` | `Default 1-Year Retention` | Per user requirement |
+| `retention_days` | `365` | 1 year |
+| `disposition` | `PURGE_CONTENT` | Only valid values: `PURGE_CONTENT`, `KEEP_CONTENT` |
+| `status` | `ACTIVE` | Required for `get_active_retention_policy()` JOIN |
+
+#### Remaining open items
+
+- [ ] `di-worker` Railway dashboard → Config File Path → `railway.worker.toml` (verify still set)
+- [ ] Add GitHub secret `TEST_JWT_PRIVATE_KEY` (base64 private key — see SECRETS_CHECKLIST.md)
+- [ ] Add GitHub secret `RAILWAY_API_URL` = `https://di-api-production.up.railway.app`
+- [ ] Step 12 — React PWA ops-ui (not started)
+- [ ] Step 9 — Google Document AI real adapter (not started)
+
+}
+
+}

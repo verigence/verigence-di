@@ -1,6 +1,6 @@
 # Verigence DI — Testing Guide
 
-**Last updated:** 2026-08-16
+**Last updated:** 2026-08-13
 
 ---
 
@@ -214,6 +214,54 @@ The smoke and extended tests use a **dedicated test bucket** `verigence-di-test`
 | Issue | File | Status |
 |---|---|---|
 | `test_empty_policy_no_rules_returns_fit` returns CORRUPT instead of FIT | `test_quality_validator.py` | Open — marked `@pytest.mark.xfail` |
+
+---
+
+## Manual Live Smoke Test (Ad-hoc)
+
+To verify document upload end-to-end against the live Railway URL without running pytest:
+
+```bash
+cd backend
+
+# 1. Write private key to file (once per session)
+python3 -c "
+import base64, os
+b64 = os.environ['TEST_JWT_PRIVATE_KEY']
+open('/tmp/di_test_key.pem','w').write(base64.b64decode(b64).decode())
+"
+
+# 2. Run the combined mint + test in one command (no token expiry risk)
+BASE="https://di-api-production.up.railway.app" \
+TENANT="manual-smoke-$(date +%s)" \
+TEST_JWT_PRIVATE_KEY="$(base64 -i /tmp/di_test_key.pem)" \
+uv run --no-sync python3 - <<'EOF'
+import sys, os
+sys.path.insert(0, "src"); sys.path.insert(0, "tests")
+BASE, TENANT = os.environ["BASE"], os.environ["TENANT"]
+import httpx
+from jwt_helper import mint_jwt
+
+def tok():
+    return mint_jwt(tenant_id=TENANT, actor_id="actor",
+                    roles=["TENANT_ADMIN"], exp_seconds=120)
+
+with httpx.Client(base_url=BASE, timeout=30) as c:
+    print(c.get("/health/live").json())
+    r = c.post(f"/v1/tenants/{TENANT}/subjects",
+               headers={"Authorization": f"Bearer {tok()}"},
+               json={"externalRef":"S1","displayName":"Test","subjectType":"PERSON"})
+    sid = r.json()["subjectId"]
+    print("subject:", sid)
+    r = c.post(f"/v1/tenants/{TENANT}/subjects/{sid}/documents",
+               headers={"Authorization": f"Bearer {tok()}"},
+               data={"sourceChannel":"API","mimeType":"application/pdf"},
+               files={"file":("t.pdf", b"%PDF-1.4", "application/pdf")})
+    print("upload:", r.status_code, r.json().get("uploadStatus"), r.json().get("documentId"))
+EOF
+```
+
+**Important:** Always mint the token and use it in the **same Python process** — never mint in one shell command and pass to another. The 5-minute default TTL is consumed by the time the second command runs.
 
 ---
 

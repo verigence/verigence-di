@@ -1,6 +1,6 @@
 # Verigence DI — Deployment Guide
 
-**Last updated:** 2026-08-16  
+**Last updated:** 2026-08-13
 **Live API URL:** `https://di-api-production.up.railway.app`
 
 ---
@@ -25,7 +25,7 @@ No manual deploy steps are needed for a normal code push.
 | **di-api** | `https://di-api-production.up.railway.app` | ✅ Running |
 | **di-worker** | Railway production env | ✅ Running |
 | **Neon PostgreSQL** | `ep-royal-pond-ayci3m0f.c-5.us-east-2.aws.neon.tech` | ✅ Live, migration 0004 |
-| **Cloudflare R2** | `verigence-di-bucket-dev` | ✅ Configured |
+| **Cloudflare R2** | `verigence-di-bucket-dev` | ✅ Configured, document upload verified |
 | **Google Document AI** | — | ⚠️ Mock only (`DI_DOCAI_MOCK=true`) |
 | **Security module JWKS** | test_jwks.json (committed) | ⚠️ Test key, not production |
 
@@ -62,7 +62,7 @@ Set on **both services** unless noted.
 
 | Variable | Value | Notes |
 |---|---|---|
-| `DI_ENV` | `dev` | Change to `production` only after JWKS + R2 production setup |
+| `DI_ENV` | `production` | RS256 JWTs required — mock tokens blocked |
 | `DI_SECRET_KEY` | (secret) | 32+ char random string — set in Railway |
 | `DI_LOG_LEVEL` | `INFO` | Optional |
 
@@ -206,8 +206,17 @@ Railway charges ~$0.25/hour per running service. Use the scripts to control cost
 
 ### 500 on POST requests (subject/document create)
 
-**Cause:** Tenant not provisioned — FK constraint on `tenant_settings` or `actors` violated  
-**Fix:** Fixed in code since commit `2616697` — `provision_tenant()` and `provision_actor()` run automatically on every `tenant_session()` call
+**Cause 1:** Tenant not provisioned — FK constraint on `tenant_settings` or `actors` violated
+**Fix:** Fixed in code — `provision_tenant()` and `provision_actor()` run automatically on every `tenant_session()` call (commit `2616697`)
+
+**Cause 2:** No active retention policy — document upload raises `"Tenant has no active retention policy configured"`
+**Fix:** Fixed in code — `provision_retention_policy()` now runs in every `tenant_session()` call (commit `3ee197a`). Inserts a default 1-year `PURGE_CONTENT` policy and links it to `tenant_settings.active_retention_policy_id`.
+
+**Cause 3:** DB check constraint on `retention_policies.disposition` — only `PURGE_CONTENT` and `KEEP_CONTENT` are valid (not `DELETE`)
+**Fix:** Fixed in commit `7e4ea9f` — provision uses `PURGE_CONTENT`.
+
+**Cause 4:** `ON CONFLICT` target was wrong — `(tenant_id, retention_policy_id)` does not exist as a unique constraint; actual constraint is `(tenant_id, policy_key)`
+**Fix:** Fixed in commit `28db98e` — corrected conflict target.
 
 ### Port mismatch (service starts but health check fails)
 
@@ -263,7 +272,25 @@ DI_DATABASE_URL=<neon-url> uv run alembic upgrade head
 | `railway.toml` | di-api: builder, startCommand, healthcheck |
 | `railway.worker.toml` | di-worker: builder, startCommand |
 | `backend/src/verigence/di/settings.py` | All env vars, production safety validator |
-| `backend/src/verigence/di/repositories/tenants.py` | `provision_tenant()` + `provision_actor()` |
+| `backend/src/verigence/di/main.py` | FastAPI factory, correlation middleware, global exception handler |
+| `backend/src/verigence/di/repositories/tenants.py` | `provision_tenant()` + `provision_actor()` + `provision_retention_policy()` |
+| `backend/src/verigence/di/application/intake.py` | Document intake flow — retention check, R2 upload, quality gate |
 | `backend/alembic/` | Database migration scripts |
 | `scripts/railway-*.sh` | Cost management scripts |
 | `docs/deployment.md` | This file |
+
+---
+
+## End-to-End Verification (confirmed 2026-08-13)
+
+The following sequence was verified against the live Railway deployment:
+
+```
+GET  /health/live                                    → 200 {"status":"live"}        ✅
+GET  /health/ready                                   → 200 {"status":"ready",...}   ✅
+GET  /v1/tenants/{id}/subjects (no token)            → 401                          ✅
+POST /v1/tenants/{id}/subjects  {"subjectType":"PERSON",...} → 201 + subjectId      ✅
+POST /v1/tenants/{id}/subjects/{subjectId}/documents (multipart PDF) → 201 + documentId ✅
+```
+
+Document upload returns `uploadStatus: CORRUPT` for dummy/minimal PDF bytes (quality gate working correctly). A real valid PDF returns `FIT`.
