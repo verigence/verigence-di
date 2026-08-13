@@ -7,4 +7,3 @@ healthcheckPath = "/health/ready"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-startCommand = "uvicorn verigence.di.main:create_app --factory --host 0.0.0.0 --port $PORT"
