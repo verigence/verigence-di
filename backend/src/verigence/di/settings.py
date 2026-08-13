@@ -82,11 +82,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "DI_SECURITY_JWKS_URL must be a real JWKS endpoint in production"
                 )
-            # Real storage required in production
-            if self.storage_provider == StorageProvider.MINIO:
-                raise ValueError(
-                    "DI_STORAGE_PROVIDER=minio is not allowed in production; use r2"
-                )
             # Real Document AI required in production (unless explicitly keeping mock)
             if not self.docai_mock and not self.docai_project_id:
                 raise ValueError(
