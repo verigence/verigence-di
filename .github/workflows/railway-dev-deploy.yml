@@ -174,11 +174,12 @@ jobs:
           for service_id in "$RAILWAY_SERVICE_API_ID" "$RAILWAY_SERVICE_WORKER_ID"; do
             node="$(printf '%s' "$response" | jq -c --arg s "$service_id" \
               '[.data.environment.serviceInstances.edges[].node | select(.serviceId == $s)] | first // {}')"
-            if [ "$(printf '%s' "$node" | jq -r '.serviceId // empty')" != "$service_id" ]; then
-              echo "::error::Railway DEV service instance missing for service $service_id."
-              exit 1
+            sid="$(printf '%s' "$node" | jq -r '.serviceId // empty')"
+            if [ "$sid" = "$service_id" ]; then
+              echo "Service $service_id current deployment: $(printf '%s' "$node" | jq -r '.latestDeployment.id // "none"')"
+            else
+              echo "Service $service_id has no existing instance — first Docker deploy, proceeding."
             fi
-            echo "Service $service_id current deployment: $(printf '%s' "$node" | jq -r '.latestDeployment.id // "none"')"
           done
 
           echo "snapshot_ok=true" >> "$GITHUB_OUTPUT"
