@@ -211,7 +211,7 @@ def get_storage_adapter() -> StorageAdapter:
     
     Both are S3-compatible and use the same S3StorageAdapter implementation.
     """
-    from verigence.di.settings import get_settings, StorageProvider
+    from verigence.di.settings import get_settings
     s = get_settings()
     
     # Both MinIO and R2 are S3-compatible

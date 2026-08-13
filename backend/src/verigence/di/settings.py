@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,6 +72,27 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env == Environment.PRODUCTION
+
+    @model_validator(mode="after")
+    def safety_rules(self) -> Settings:
+        """Block unsafe configurations at startup — fail fast before serving traffic."""
+        if self.is_production:
+            # Real JWKS URL required in production
+            if not self.security_jwks_url or "mock" in self.security_jwks_url.lower():
+                raise ValueError(
+                    "DI_SECURITY_JWKS_URL must be a real JWKS endpoint in production"
+                )
+            # Real storage required in production
+            if self.storage_provider == StorageProvider.MINIO:
+                raise ValueError(
+                    "DI_STORAGE_PROVIDER=minio is not allowed in production; use r2"
+                )
+            # Real Document AI required in production (unless explicitly keeping mock)
+            if not self.docai_mock and not self.docai_project_id:
+                raise ValueError(
+                    "DI_DOCAI_PROJECT_ID must be set when DI_DOCAI_MOCK=false in production"
+                )
+        return self
 
     @field_validator("database_url")
     @classmethod

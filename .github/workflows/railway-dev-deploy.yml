@@ -1,0 +1,409 @@
+name: DI Railway DEV Deployment
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: di-railway-dev-deployment
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/verigence/verigence-di
+  RAILWAY_PROJECT_ID: 62c22163-78d0-4a86-a2f7-dbf39e64aa4d
+  RAILWAY_ENVIRONMENT_ID: 3e696b3a-1128-4970-b6c0-5a8c25d8fcb0
+  RAILWAY_SERVICE_API_ID: c7286646-fe6f-4cb3-a055-e6e7a71e852a
+  RAILWAY_SERVICE_WORKER_ID: 5c7124fe-8e2a-4abd-8e45-37d248ee56a3
+
+jobs:
+  deploy-dev:
+    name: Build immutable image and deploy di-api + di-worker to Railway DEV
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+    steps:
+      - name: Wait for DI CI to pass on exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 60); do
+            response="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&event=push&per_page=20")"
+
+            ci_run="$(printf '%s' "$response" | jq -c '[.workflow_runs[] | select(.name == "DI CI")] | first // empty')"
+            if [ -z "$ci_run" ]; then
+              echo "DI CI has not been registered for $GITHUB_SHA yet; waiting 5 seconds."
+              sleep 5
+              continue
+            fi
+
+            status="$(printf '%s' "$ci_run" | jq -r '.status')"
+            conclusion="$(printf '%s' "$ci_run" | jq -r '.conclusion // ""')"
+            run_id="$(printf '%s' "$ci_run" | jq -r '.id')"
+            echo "DI CI run $run_id status=$status conclusion=${conclusion:-pending}"
+
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "DI CI passed for exact source commit $GITHUB_SHA."
+                exit 0
+              fi
+              echo "::error::DI CI completed with conclusion '$conclusion' for $GITHUB_SHA. Deployment is blocked."
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo "::error::Timed out waiting for DI CI on exact source commit $GITHUB_SHA."
+          exit 1
+
+      - name: Check out exact validated DEV commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: Record and validate immutable image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="${IMAGE_REPOSITORY}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+          echo "Immutable image: $image_ref"
+
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          if ! docker manifest inspect "$image_ref" >/dev/null 2>&1; then
+            echo "::error::Published GHCR image is not anonymously pullable by Railway."
+            exit 1
+          fi
+
+          docker pull "$image_ref" >/dev/null
+          docker run --rm "$image_ref" python --version 2>&1 | grep -E '^Python 3\.12\.'
+
+      - name: Verify Railway token and exact DEV scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}')"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            echo "::error::RAILWAY_TOKEN could not be validated as a Railway Project Token."
+            exit 1
+          fi
+
+          token_project_id="$(printf '%s' "$response" | jq -r '.data.projectToken.projectId // empty')"
+          token_environment_id="$(printf '%s' "$response" | jq -r '.data.projectToken.environmentId // empty')"
+
+          if [ "$token_project_id" != "$RAILWAY_PROJECT_ID" ]; then
+            echo "::error::RAILWAY_TOKEN is scoped to a different Railway project."
+            exit 1
+          fi
+          if [ "$token_environment_id" != "$RAILWAY_ENVIRONMENT_ID" ]; then
+            echo "::error::RAILWAY_TOKEN is scoped to a different Railway environment."
+            exit 1
+          fi
+
+          echo "Railway Project Token scope matches the configured DEV project and environment."
+
+      - name: Install pinned Railway CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="5.30.1"
+          asset="railway-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+          url="https://github.com/railwayapp/cli/releases/download/v${version}/${asset}"
+          expected_sha256="c6169e27e87d95d73fb7a30ec2c6b6c767c042f8a3ba9aa98c92deccda8db10c"
+
+          curl --fail --location --silent --show-error \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --output "/tmp/${asset}" \
+            "$url"
+
+          echo "${expected_sha256}  /tmp/${asset}" | sha256sum --check -
+          binary_path="$(tar -tzf "/tmp/${asset}" | awk '/(^|\/)railway$/ {print; exit}')"
+          mkdir -p /tmp/railway-cli
+          tar -xzf "/tmp/${asset}" -C /tmp/railway-cli "$binary_path"
+          sudo install -m 0755 "/tmp/railway-cli/${binary_path}" /usr/local/bin/railway
+          railway --version | grep -F "5.30.1"
+
+      # ── Deploy di-api ────────────────────────────────────────────────────────
+
+      - name: Connect immutable image to Railway di-api service
+        shell: bash
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway service source connect \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_API_ID" \
+            --image "${{ steps.image.outputs.image_ref }}" \
+            --json
+
+      - name: Trigger Railway deployment for di-api
+        id: trigger-api
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutation='mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) { serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId) }'
+          variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg service "$RAILWAY_SERVICE_API_ID" \
+            '{environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway rejected di-api deployment request."
+            exit 1
+          fi
+
+          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Triggered di-api deployment: $deployment_id"
+
+      - name: Wait for di-api deployment to succeed
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.trigger-api.outputs.id }}
+        run: |
+          set -euo pipefail
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 20) { edges { node { id status createdAt } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_API_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$body")"
+
+            status="$(printf '%s' "$response" | jq -r --arg id "$DEPLOYMENT_ID" \
+              '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
+
+            [ -z "$status" ] && { sleep 5; continue; }
+            echo "di-api deployment $DEPLOYMENT_ID status=$status"
+
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                echo "::error::di-api deployment ended with status $status."
+                exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for di-api deployment."
+          exit 1
+
+      # ── Deploy di-worker ─────────────────────────────────────────────────────
+
+      - name: Connect immutable image to Railway di-worker service
+        shell: bash
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          env -u RAILWAY_TOKEN railway service source connect \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_WORKER_ID" \
+            --image "${{ steps.image.outputs.image_ref }}" \
+            --json
+
+      - name: Trigger Railway deployment for di-worker
+        id: trigger-worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutation='mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) { serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId) }'
+          variables="$(jq -cn \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg service "$RAILWAY_SERVICE_WORKER_ID" \
+            '{environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$mutation" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          if [ "$(printf '%s' "$response" | jq -r 'has("errors")')" = "true" ]; then
+            printf '%s\n' "$response" | jq -c '.errors'
+            echo "::error::Railway rejected di-worker deployment request."
+            exit 1
+          fi
+
+          deployment_id="$(printf '%s' "$response" | jq -r '.data.serviceInstanceDeployV2 // empty')"
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Triggered di-worker deployment: $deployment_id"
+
+      - name: Wait for di-worker deployment to succeed
+        shell: bash
+        env:
+          DEPLOYMENT_ID: ${{ steps.trigger-worker.outputs.id }}
+        run: |
+          set -euo pipefail
+          query='query deployments($input: DeploymentListInput!) { deployments(input: $input, first: 20) { edges { node { id status createdAt } } } }'
+          variables="$(jq -cn --arg project "$RAILWAY_PROJECT_ID" --arg service "$RAILWAY_SERVICE_WORKER_ID" '{input:{projectId:$project,serviceId:$service}}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+
+          for attempt in $(seq 1 120); do
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --url 'https://backboard.railway.com/graphql/v2' \
+              --header "Project-Access-Token: $RAILWAY_TOKEN" \
+              --header 'Content-Type: application/json' \
+              --data "$body")"
+
+            status="$(printf '%s' "$response" | jq -r --arg id "$DEPLOYMENT_ID" \
+              '[.data.deployments.edges[].node | select(.id == $id)] | first | .status // empty')"
+
+            [ -z "$status" ] && { sleep 5; continue; }
+            echo "di-worker deployment $DEPLOYMENT_ID status=$status"
+
+            case "$status" in
+              SUCCESS) exit 0 ;;
+              FAILED|CRASHED|REMOVED|SKIPPED)
+                echo "::error::di-worker deployment ended with status $status."
+                exit 1 ;;
+              *) sleep 5 ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for di-worker deployment."
+          exit 1
+
+      # ── Post-deploy verification ─────────────────────────────────────────────
+
+      - name: Resolve Railway di-api public domain
+        id: domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          query='query domains($environmentId: String!, $serviceId: String!, $projectId: String!) { domains(environmentId: $environmentId, serviceId: $serviceId, projectId: $projectId) { serviceDomains { id domain } } }'
+          variables="$(jq -cn \
+            --arg project "$RAILWAY_PROJECT_ID" \
+            --arg environment "$RAILWAY_ENVIRONMENT_ID" \
+            --arg service "$RAILWAY_SERVICE_API_ID" \
+            '{projectId:$project,environmentId:$environment,serviceId:$service}')"
+          body="$(jq -cn --arg query "$query" --argjson variables "$variables" '{query:$query,variables:$variables}')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url 'https://backboard.railway.com/graphql/v2' \
+            --header "Project-Access-Token: $RAILWAY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data "$body")"
+
+          domain="$(printf '%s' "$response" | jq -r '.data.domains.serviceDomains[0].domain // empty')"
+          if [ -z "$domain" ]; then
+            echo "::error::Could not resolve Railway di-api public domain."
+            exit 1
+          fi
+          echo "base_url=https://$domain" >> "$GITHUB_OUTPUT"
+          echo "Railway DEV di-api base URL: https://$domain"
+
+      - name: Verify di-api readiness over HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${{ steps.domain.outputs.base_url }}"
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --output /tmp/ready.json --write-out '%{http_code}' \
+              "$base_url/health/ready" || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/ready.json
+              exit 0
+            fi
+            echo "Readiness attempt $attempt/30 returned HTTP ${code:-000}; waiting 5 seconds."
+            sleep 5
+          done
+          echo "::error::Railway DEV readiness check failed after deployment."
+          exit 1
+
+      - name: Verify liveness and correlation ID over HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${{ steps.domain.outputs.base_url }}"
+          correlation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          curl --fail-with-body --silent --show-error \
+            --dump-header /tmp/live.headers \
+            --header "X-Correlation-ID: $correlation_id" \
+            "$base_url/health/live" > /tmp/live.json
+          returned="$(awk 'BEGIN{IGNORECASE=1} /^X-Correlation-ID:/ {gsub("\r","","$2"); print $2}' \
+            /tmp/live.headers | tail -n 1)"
+          if [ "$returned" != "$correlation_id" ]; then
+            echo "::error::Correlation ID mismatch. Expected $correlation_id, got ${returned:-<missing>}."
+            exit 1
+          fi
+          cat /tmp/live.json
+
+      - name: Record deployment evidence
+        shell: bash
+        run: |
+          echo "Source commit:       $GITHUB_SHA"
+          echo "Immutable image:     ${{ steps.image.outputs.image_ref }}"
+          echo "Railway project:     $RAILWAY_PROJECT_ID"
+          echo "Railway environment: $RAILWAY_ENVIRONMENT_ID"
+          echo "di-api service:      $RAILWAY_SERVICE_API_ID"
+          echo "di-worker service:   $RAILWAY_SERVICE_WORKER_ID"
+          echo "di-api base URL:     ${{ steps.domain.outputs.base_url }}"
