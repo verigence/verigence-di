@@ -11,9 +11,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
+import traceback
+
 import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from verigence.di.settings import get_settings
 
@@ -87,7 +90,21 @@ def create_app() -> FastAPI:
         structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
 
         start = time.perf_counter()
-        response: Response = await call_next(request)
+        try:
+            response: Response = await call_next(request)
+        except Exception as exc:  # noqa: BLE001
+            correlation_id_val = structlog.contextvars.get_contextvars().get("correlation_id", "unknown")
+            logger.error(
+                "unhandled_exception",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": {"code": "INTERNAL_ERROR", "title": str(exc), "type": type(exc).__name__}},
+                headers={CORRELATION_ID_HEADER: correlation_id_val},
+            )
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
 
         response.headers[CORRELATION_ID_HEADER] = correlation_id
