@@ -203,9 +203,19 @@ class S3StorageAdapter(StorageAdapter):
 
 
 def get_storage_adapter() -> StorageAdapter:
-    """FastAPI dependency — returns configured adapter from settings."""
-    from verigence.di.settings import get_settings
+    """FastAPI dependency — returns configured adapter from settings.
+    
+    Routes the adapter selection based on DI_STORAGE_PROVIDER env var:
+    - minio: local Docker MinIO (development, local testing)
+    - r2: Cloudflare R2 (production)
+    
+    Both are S3-compatible and use the same S3StorageAdapter implementation.
+    """
+    from verigence.di.settings import get_settings, StorageProvider
     s = get_settings()
+    
+    # Both MinIO and R2 are S3-compatible
+    # Provider enum exists for future extensibility or logging/metrics
     return S3StorageAdapter(
         endpoint_url=s.storage_endpoint,
         access_key_id=s.storage_access_key_id,

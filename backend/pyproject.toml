@@ -99,3 +99,8 @@ addopts = "--cov=src --cov-report=term-missing --cov-fail-under=70"
 [tool.coverage.run]
 source = ["src"]
 omit = ["*/tests/*", "*/alembic/*"]
+
+[dependency-groups]
+dev = [
+    "psycopg2-binary>=2.9.12",
+]

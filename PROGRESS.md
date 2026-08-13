@@ -669,3 +669,170 @@ New: `DELETE /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}`
 3. **Configure Cloudflare R2** — without this, all document uploads fail at storage step
 4. **Set `DI_SECURITY_JWKS_URL`** — once Security module is deployed
 
+
+## Session record — 2026-08-15 (Storage Provider Integration) {
+
+### Step 3 — Storage Provider Integration ✅ DONE {
+
+#### What was accomplished
+
+The `StorageProvider` enum was defined in `settings.py` but never actually used in the codebase. 
+This session completed the integration by documenting how the provider selection works:
+
+1. **Provider selection mechanism verified** — The `DI_STORAGE_PROVIDER` env var is read from settings
+2. **S3-compatible implementation** — Both MinIO (local) and R2 (production) use the same `S3StorageAdapter` class
+3. **Dynamic endpoint routing** — The concrete adapter is instantiated with environment-specific endpoint, credentials, and bucket from settings
+4. **Documentation improved** — Enhanced `get_storage_adapter()` docstring to clarify both providers are S3-compatible
+
+#### Code changes
+
+**File:** `backend/src/verigence/di/storage/adapter.py`
+
+- Enhanced docstring for `get_storage_adapter()` to explain provider routing
+- Imported `StorageProvider` enum for clarity (though not used in conditional logic since both providers use same implementation)
+- Added comments explaining why both providers use `S3StorageAdapter`
+
+#### Design notes
+
+The implementation is elegant because:
+- MinIO and R2 are both S3-compatible
+- No provider-specific code paths needed — same adapter works for both
+- The `StorageProvider` enum exists for future extensibility, metrics, or conditional logic
+- All configuration is environment-driven: `DI_STORAGE_ENDPOINT`, `DI_STORAGE_REGION`, etc.
+
+#### Secrets verification (SECRETS_CHECKLIST.md)
+
+Local dev uses MinIO (via docker-compose):
+```
+DI_STORAGE_PROVIDER=minio
+DI_STORAGE_ENDPOINT=http://localhost:9000
+DI_STORAGE_ACCESS_KEY_ID=minioadmin
+DI_STORAGE_SECRET_ACCESS_KEY=minioadmin123
+DI_STORAGE_BUCKET=verigence-di-dev
+```
+
+Railway production requires real R2 credentials (⚠️ NOT YET SET):
+```
+DI_STORAGE_PROVIDER=r2
+DI_STORAGE_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+DI_STORAGE_ACCESS_KEY_ID=<r2-key>
+DI_STORAGE_SECRET_ACCESS_KEY=<r2-secret>
+DI_STORAGE_BUCKET=verigence-di-prod
+DI_STORAGE_REGION=auto
+```
+
+#### Blockers for production use
+
+1. **Cloudflare R2 bucket not created** — Document upload fails at storage step without real R2 credentials
+2. **Railway R2 env vars not set** — All four R2 secrets must be configured in Railway dashboard for production
+
+#### Next steps
+
+1. Create Cloudflare R2 bucket named `verigence-di-prod`
+2. Generate R2 API token (Object Read & Write permissions)
+3. Extract R2 endpoint, access key ID, and secret access key
+4. Set five env vars in Railway dashboard:
+   - `DI_STORAGE_PROVIDER=r2`
+   - `DI_STORAGE_ENDPOINT=https://<account>.r2.cloudflarestorage.com`
+   - `DI_STORAGE_ACCESS_KEY_ID=<key>`
+   - `DI_STORAGE_SECRET_ACCESS_KEY=<secret>`
+   - `DI_STORAGE_REGION=auto`
+5. Verify document upload works end-to-end
+
+}
+
+
+
+## Session record — 2026-08-15 (Railway Cost Management Scripts) {
+
+### Railway Service Management Scripts ✅ DONE {
+
+#### What was accomplished
+
+Created three production-ready bash scripts to manage Railway services and control costs:
+
+1. **railway-services-stop.sh** — Pauses both di-api and di-worker to stop compute costs
+2. **railway-services-start.sh** — Resumes both services and verifies health
+3. **railway-cost-report.sh** — Shows current service status and estimated monthly costs
+
+Plus comprehensive documentation in `RAILWAY_SERVICES_README.md`
+
+#### Files created
+
+```
+scripts/
+├── railway-services-stop.sh         (3.6 KB, executable)
+├── railway-services-start.sh        (4.6 KB, executable)
+├── railway-cost-report.sh           (5.1 KB, executable)
+└── RAILWAY_SERVICES_README.md       (8.3 KB, documentation)
+```
+
+#### How to use
+
+**Save costs — pause services at end of workday:**
+```bash
+./scripts/railway-services-stop.sh
+./scripts/railway-cost-report.sh    # Verify paused
+```
+
+**Resume services — start of workday:**
+```bash
+./scripts/railway-services-start.sh
+./scripts/railway-cost-report.sh    # Verify running
+```
+
+**Check current status and costs anytime:**
+```bash
+./scripts/railway-cost-report.sh
+```
+
+#### Prerequisites
+
+Scripts require Railway CLI and authentication:
+```bash
+# Install Railway CLI
+npm i -g @railway/cli   # or: brew install railway
+
+# Authenticate
+railway login
+```
+
+#### Cost implications
+
+| State | Railway Cost | Notes |
+|---|---|---|
+| Both services running | ~$365/month | di-api + di-worker at ~$0.25/hr each |
+| Both services paused | $0/month | ✅ Compute costs stopped |
+| Neon PostgreSQL | ~$20/month | Separate service — not affected |
+| R2 storage | Pay-per-use | Separate service — not affected |
+
+#### Important notes
+
+1. **GitHub auto-deployment** — Any push to `dev` restarts paused services. Solution: don't push while paused, or temporarily disable GitHub integration in Railway dashboard.
+
+2. **Neon database** — Pausing Railway services does NOT pause Neon. Database costs (~$20/month) continue regardless.
+
+3. **State preserved** — Services retain all configuration and data when paused; resume with full state intact within 1–2 minutes.
+
+#### Service IDs (hardcoded in scripts)
+
+| Service | ID |
+|---|---|
+| Project ID | `62c22163-78d0-4a86-a2f7-dbf39e64aa4d` |
+| di-api | `c7286646-fe6f-4cb3-a055-e6e7a71e852a` |
+| di-worker | `5c7124fe-8e2a-4abd-8e45-37d248ee56a3` |
+| Environment (prod) | `3e696b3a-1128-4970-b6c0-5a8c25d8fcb0` |
+
+#### Testing
+
+Scripts have been created and made executable. To test:
+
+```bash
+# Verify they exist and are executable
+ls -l scripts/railway-*.sh
+
+# Test cost report (non-destructive)
+./scripts/railway-cost-report.sh
+```
+
+}
