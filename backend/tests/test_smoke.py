@@ -2,7 +2,7 @@
 
 Markers: pytest.mark.smoke
 Infrastructure: ASGITransport + Neon DB + real JWTs (via jwt_helper)
-JWKS: patched to load from tests/fixtures/test_jwks.json (no HTTP fetch)
+JWKS: verification material is tied to the CI signing key by conftest
 Run time target: < 30 seconds
 
 Coverage:
@@ -24,11 +24,11 @@ from tests.jwt_helper import mint_jwt
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
-async def test_health_returns_ok(api_client: AsyncClient) -> None:
+async def test_health_returns_live(api_client: AsyncClient) -> None:
     resp = await api_client.get("/health/live")
     assert resp.status_code == 200
     body = resp.json()
-    assert body.get("status") == "ok"
+    assert body.get("status") == "live"
 
 
 @pytest.mark.smoke
@@ -112,7 +112,7 @@ async def test_insufficient_permission_returns_403(
     resp = await api_client.post(
         f"/v1/tenants/{test_tenant_id}/subjects",
         headers={"Authorization": f"Bearer {token}"},
-        json={"externalRef": "S-SMOKE-001", "displayName": "Smoke Test Subject"},
+        json={"subjectType": "PERSON", "displayName": "Smoke Test Subject"},
     )
     assert resp.status_code == 403
 
@@ -132,11 +132,12 @@ async def test_create_subject_returns_201(
     resp = await api_client.post(
         f"/v1/tenants/{test_tenant_id}/subjects",
         headers={"Authorization": f"Bearer {token}"},
-        json={"externalRef": "S-SMOKE-CREATE-001", "displayName": "Smoke Subject"},
+        json={"subjectType": "PERSON", "displayName": "Smoke Subject"},
     )
     assert resp.status_code == 201
     body = resp.json()
     assert "subjectId" in body
+    assert body["subjectType"] == "PERSON"
 
 
 @pytest.mark.smoke
@@ -155,7 +156,7 @@ async def test_get_subject_returns_created_subject(
     create_resp = await api_client.post(
         f"/v1/tenants/{test_tenant_id}/subjects",
         headers=auth,
-        json={"externalRef": "S-SMOKE-GET-001", "displayName": "Smoke Get Subject"},
+        json={"subjectType": "PERSON", "displayName": "Smoke Get Subject"},
     )
     assert create_resp.status_code == 201
     subject_id = create_resp.json()["subjectId"]
@@ -168,7 +169,7 @@ async def test_get_subject_returns_created_subject(
     assert get_resp.status_code == 200
     body = get_resp.json()
     assert body["subjectId"] == subject_id
-    assert body["externalRef"] == "S-SMOKE-GET-001"
+    assert body["subjectType"] == "PERSON"
     assert body["displayName"] == "Smoke Get Subject"
 
 
