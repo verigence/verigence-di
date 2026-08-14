@@ -2,10 +2,10 @@
 
 Implements:
   POST   /v1/tenants/{tenantId}/subjects            createSubject
-  GET    /v1/tenants/{tenantId}/subjects             listSubjects
+  GET    /v1/tenants/{tenantId}/subjects            listSubjects
   GET    /v1/tenants/{tenantId}/subjects/{subjectId} getSubject
 
-v2.2: authorization uses require_permission() (permissions[], not role names).
+v2.2: authorization uses permissions[] rather than role names.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from verigence.di.api.v1.schemas import (
     SubjectListData,
     SubjectResponse,
 )
-from verigence.di.auth.dependencies import require_tenant_actor, require_tenant_permission
+from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.domain.enums import SubjectStatus
@@ -73,7 +73,7 @@ async def create_subject_endpoint(
 )
 async def list_subjects_endpoint(
     tenantId: str,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.SUBJECT_READ))],
     subject_status: Annotated[SubjectStatus | None, Query(alias="status")] = None,
     query: Annotated[str | None, Query(max_length=240)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -89,7 +89,6 @@ async def list_subjects_endpoint(
             cursor=cursor,
         )
 
-    # Cursor pagination: fetch limit+1, return cursor if over limit
     has_next = len(subjects) > limit
     page = subjects[:limit]
     next_cursor = str(page[-1]["subject_id"]) if has_next and page else None
@@ -120,7 +119,7 @@ async def list_subjects_endpoint(
 async def get_subject_endpoint(
     tenantId: str,
     subjectId: uuid.UUID,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.SUBJECT_READ))],
 ) -> SubjectResponse:
     async with tenant_session(actor.tenant_id) as session:
         subject = await get_subject(
@@ -129,6 +128,7 @@ async def get_subject_endpoint(
 
     if subject is None:
         from verigence.di.errors import ErrorCode, problem  # noqa: PLC0415
+
         raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
 
     return SubjectResponse(
