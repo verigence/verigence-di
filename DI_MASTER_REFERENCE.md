@@ -283,7 +283,7 @@ If a design decision needs to change, the human must agree, a new baseline versi
 |---|---|
 | di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ✅ Migrations 0001–0005 at head — 0006 pending manual apply |
+| Neon PostgreSQL | ✅ All 6 migrations at head (0001–0006) — verified 2026-08-18 |
 | Cloudflare R2 | ✅ Working — slug-based path with 4 form-type folders |
 | Security module JWKS | ✅ Using GitHub raw test JWKS |
 | CI pipeline | ✅ Green — `108 passed, 0 xfailed` |
@@ -297,6 +297,9 @@ If a design decision needs to change, the human must agree, a new baseline versi
 | `0002` | `processing_runs`: added `classification_candidate_set jsonb` |
 | `0002` | `audit_chain_heads`: rebuilt from per-tenant to entity-scoped PK `(tenant_id, entity_type, entity_id)` |
 | `0003` | `tenant_settings`: added nullable `verification_threshold NUMERIC(5,2)` |
+| `0004` | `tenant_settings`: relaxed constraints |
+| `0005` | new table `tenant_document_types`; `documents`: added `physical_form_type`, `requires_processing`; 15 global seed document types |
+| `0006` | `documents.source_channel`: dropped NOT NULL — now nullable (D10) |
 
 ### Code additions beyond Baseline 2.2 spec
 
