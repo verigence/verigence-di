@@ -4,8 +4,9 @@ Docker / PostgreSQL fixtures are gated behind a `needs_docker` marker so that
 pure unit tests (marked `no_docker`) can run in CI without Docker Desktop.
 
 Smoke / Extended tests use ASGITransport + Neon DB + real R2 + real RSA JWTs.
-The JWKS HTTP fetch is patched to load from the committed test_jwks.json so
-tests never make real network calls to fetch keys.
+The JWKS verification key is derived from TEST_JWT_PRIVATE_KEY in CI so the
+signing and verification material cannot drift; local runs fall back to the
+committed public test JWKS fixture.
 
 Fixture dependency chain (unit tests):
     pg_container  ← needs_docker
@@ -22,6 +23,7 @@ Fixture dependency chain (smoke / extended):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import uuid
@@ -50,10 +52,10 @@ os.environ.setdefault("DI_DATABASE_URL", "postgresql+asyncpg://test:test@localho
 # ── JWKS fixture path ─────────────────────────────────────────────────────────
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 _TEST_JWKS_PATH = _FIXTURES_DIR / "test_jwks.json"
+_TEST_KID = "verigence-di-test-key-1"
 
 
 # ── Marker registration ───────────────────────────────────────────────────────
-
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -74,14 +76,27 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 def _needs_docker(config: pytest.Config) -> bool:
     """Return True when at least one collected test needs Docker (is NOT no_docker)."""
     return True  # Conservative default
 
 
-# ── Event loop (session-scoped for pytest-asyncio) ────────────────────────────
+def _async_db_url(url: str) -> str:
+    """Normalize PostgreSQL URLs for SQLAlchemy's asyncpg engine."""
+    for prefix in (
+        "postgresql+psycopg2://",
+        "postgresql+psycopg://",
+        "postgresql://",
+        "postgres://",
+    ):
+        if url.startswith(prefix):
+            url = "postgresql+asyncpg://" + url[len(prefix):]
+            break
+    url = url.replace("?sslmode=require", "?ssl=require")
+    return url.replace("&sslmode=require", "&ssl=require")
 
+
+# ── Event loop (session-scoped for pytest-asyncio) ────────────────────────────
 @pytest.fixture(scope="session")
 def event_loop():  # type: ignore[override]
     loop = asyncio.new_event_loop()
@@ -90,7 +105,6 @@ def event_loop():  # type: ignore[override]
 
 
 # ── JWKS patch — session-scoped, used by smoke + extended tests ───────────────
-
 def _load_test_jwks() -> dict:  # type: ignore[type-arg]
     """Load the committed test JWKS file."""
     with _TEST_JWKS_PATH.open() as f:
@@ -98,7 +112,7 @@ def _load_test_jwks() -> dict:  # type: ignore[type-arg]
 
 
 def _make_jwks_get_key(jwks_data: dict):  # type: ignore[type-arg]
-    """Return a get_key function that serves keys from the committed test JWKS."""
+    """Return a get_key function that serves keys from committed test JWKS."""
     from jose import jwk  # type: ignore[import]
 
     key_map = {}
@@ -112,21 +126,37 @@ def _make_jwks_get_key(jwks_data: dict):  # type: ignore[type-arg]
     return get_key
 
 
+def _make_ci_private_key_get_key(private_key_b64: str):  # type: ignore[no-untyped-def]
+    """Verify CI JWTs with the exact private key used to sign them.
+
+    The private key never leaves process memory. python-jose's RSA key object can
+    verify signatures using private-key material, which removes stale public-JWKS
+    fixture risk while preserving real RS256 verification in smoke tests.
+    """
+    from jose import jwk  # type: ignore[import]
+
+    key = jwk.construct(base64.b64decode(private_key_b64), algorithm="RS256")
+
+    def get_key(kid: str):  # type: ignore[return]
+        return key if kid == _TEST_KID else None
+
+    return get_key
+
+
 @pytest.fixture(scope="session", autouse=False)
 def _patch_jwks_cache():
-    """Session-scoped: patch JWKSCache.get_key to load from test_jwks.json.
-
-    Applied automatically for smoke / extended test sessions via api_client.
-    """
-    jwks_data = _load_test_jwks()
-    get_key_fn = _make_jwks_get_key(jwks_data)
+    """Patch JWKSCache.get_key for deterministic smoke/extended JWT verification."""
+    private_key_b64 = os.environ.get("TEST_JWT_PRIVATE_KEY", "")
+    if private_key_b64:
+        get_key_fn = _make_ci_private_key_get_key(private_key_b64)
+    else:
+        get_key_fn = _make_jwks_get_key(_load_test_jwks())
 
     with patch("verigence.di.auth.jwks.JWKSCache.get_key", side_effect=get_key_fn):
         yield
 
 
 # ── Docker-gated PostgreSQL fixtures ─────────────────────────────────────────
-
 @pytest.fixture(scope="session")
 def pg_container(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
     """Start a real PostgreSQL container for the entire test session.
@@ -151,11 +181,7 @@ def pg_container(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def
 
 @pytest.fixture(scope="session")
 def db_url(pg_container) -> str:  # type: ignore[no-untyped-def]
-    url = pg_container.get_connection_url()
-    return (
-        url.replace("psycopg2", "asyncpg")
-        .replace("postgresql://", "postgresql+asyncpg://")
-    )
+    return _async_db_url(pg_container.get_connection_url())
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -185,7 +211,6 @@ def apply_migrations(request: pytest.FixtureRequest) -> None:
 
 
 # ── Per-test DB session ────────────────────────────────────────────────────────
-
 @pytest_asyncio.fixture
 async def db_session(db_url: str) -> AsyncGenerator[AsyncSession, None]:
     """Yield a test DB session that rolls back after each test."""
@@ -198,7 +223,6 @@ async def db_session(db_url: str) -> AsyncGenerator[AsyncSession, None]:
 
 
 # ── HTTP test client (unit tests) ─────────────────────────────────────────────
-
 @pytest_asyncio.fixture
 async def client(db_url: str) -> AsyncGenerator[AsyncClient, None]:
     """Async HTTP test client wired to the FastAPI app (unit/docker tests)."""
@@ -215,7 +239,6 @@ async def client(db_url: str) -> AsyncGenerator[AsyncClient, None]:
 
 
 # ── Integration test fixtures (smoke + extended) ─────────────────────────────
-
 @pytest.fixture
 def test_tenant_id() -> str:
     """Return a unique tenant ID for each test (format: test-<8 hex chars>)."""
@@ -279,18 +302,14 @@ async def api_client(_patch_jwks_cache) -> AsyncGenerator[AsyncClient, None]:  #
 
 @pytest_asyncio.fixture
 async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
-    """Delete all DB rows for test_tenant_id after each integration test.
-
-    Uses a direct asyncpg connection to Neon so cleanup works even if the
-    app's connection pool is closed.
-    """
+    """Delete all DB rows for test_tenant_id after each integration test."""
     yield
 
     neon_url = os.environ.get("DI_DATABASE_URL", "")
     if not neon_url or "localhost" in neon_url:
         return
 
-    engine = create_async_engine(neon_url, echo=False)
+    engine = create_async_engine(_async_db_url(neon_url), echo=False)
     try:
         async with engine.begin() as conn:
             # Delete in FK-safe order (children first)
