@@ -623,7 +623,7 @@ async def _get_requirement_keys(
         await session.execute(
             text("""
                 SELECT dt.document_type_key
-                FROM docintel.subject_requirement_profile_assignments srpa
+                FROM docintel.subject_requirement_assignments srpa
                 JOIN docintel.document_requirement_profile_items drpi
                   ON drpi.requirement_profile_id = srpa.requirement_profile_id
                  AND drpi.tenant_id = srpa.tenant_id
