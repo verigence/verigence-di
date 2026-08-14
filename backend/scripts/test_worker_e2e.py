@@ -185,6 +185,10 @@ async def _cleanup(
         tid, sid,
     )
     await conn.execute(
+        f"DELETE FROM docintel.document_search_index WHERE document_id IN ({doc_ids_sql})",
+        tid, sid,
+    )
+    await conn.execute(
         f"DELETE FROM docintel.document_field_values WHERE document_id IN ({doc_ids_sql})",
         tid, sid,
     )
@@ -198,6 +202,11 @@ async def _cleanup(
     )
     await conn.execute(
         f"DELETE FROM docintel.processor_invocations WHERE processing_run_id IN ({run_ids_sql})",
+        tid, sid,
+    )
+    # Null the FK reference on documents before deleting processing_runs
+    await conn.execute(
+        f"UPDATE docintel.documents SET current_processing_run_id = NULL WHERE tenant_id = $1 AND subject_id = $2",
         tid, sid,
     )
     await conn.execute(
@@ -298,6 +307,20 @@ async def run_test_case(
                     _info(f"  {fr['field_key']:35s}  value={str(fr['current_value'])[:60]}  conf={fr['confidence_score']}")
             else:
                 _info("No field values in DB (mock adapter may have returned NOT_FOUND)")
+
+            # Check document_search_index row (Step 9c)
+            si_row = await conn.fetchrow(
+                "SELECT document_type_key, indexed_fields, schema_version "
+                "FROM docintel.document_search_index "
+                "WHERE document_id = $1",
+                uuid.UUID(document_id),
+            )
+            if si_row:
+                _ok(f"document_search_index row ✓  doc_type={si_row['document_type_key']}  schema={si_row['schema_version']}")
+                _info(f"  indexed_fields: {str(si_row['indexed_fields'])[:120]}")
+            else:
+                _fail("No document_search_index row — Step 9c NOT triggered!")
+                passed = False
 
             backout = await _get_backout_row(conn, TENANT_ID, document_id)
             if backout:

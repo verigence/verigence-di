@@ -826,8 +826,7 @@ async def _load_original_artifact(
     from verigence.di.storage.adapter import get_storage_adapter
     storage = get_storage_adapter()
     try:
-        stream = await storage.get_stream(logical_key)
-        data = b"".join([chunk async for chunk in stream])
+        data = b"".join([chunk async for chunk in storage.get_stream(logical_key)])
     except Exception as exc:
         raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}") from exc
 
