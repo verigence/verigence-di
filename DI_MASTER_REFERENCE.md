@@ -273,14 +273,22 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current: Step 9c — Worker writes to document_search_index** (next after migration 0007 applied to Neon)
-Step 9 complete: Gemini 2.5 Flash adapter + Document Schema Registry implemented (D19–D23).
-Migration 0007 ready — apply to Neon: `alembic upgrade head`.
-Next: Step 9c (worker upserts to document_search_index after CONFIRMED), then Step 9d (POST /analyse R1–R5).
+**Immediate: Backout Queue — migration 0008 + implementation (D24)**
+Design for backout queue locked in D24. Documents that fail processing are now
+immediately moved to a `backout_jobs` dead-letter table (TTL 12 h) and their
+`processing_status` set to `FAILED`. This unblocks the job queue during smoke
+testing.
+
+Steps in order:
+1. Apply migration `0007` to Neon (`alembic upgrade head`) — `document_search_index` table
+2. Apply migration `0008` to Neon — `backout_jobs` table (new, from D24)
+3. Implement backout queue code (see D24 implementation file list)
+4. Step 9c — Worker upserts to `document_search_index` after CONFIRMED
+5. Step 9d — `POST /analyse` endpoint (R1–R5 reconciliation rules, D15/D17)
 
 ---
 
-### Infrastructure status — 2026-08-18 (current)
+### Infrastructure status — current
 
 | Service | Status |
 |---|---|
@@ -303,7 +311,8 @@ Next: Step 9c (worker upserts to document_search_index after CONFIRMED), then St
 | `0004` | `tenant_settings`: relaxed constraints |
 | `0005` | new table `tenant_document_types`; `documents`: added `physical_form_type`, `requires_processing`; 15 global seed document types |
 | `0006` | `documents.source_channel`: dropped NOT NULL — now nullable (D10) |
-| `0007` | ❌ NOT YET — `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
+| `0007` | ❌ NOT YET APPLIED — `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
+| `0008` | ❌ NOT YET WRITTEN — `backout_jobs` table + 2 indexes (D24) |
 
 ### Code additions beyond Baseline 2.2 spec
 
@@ -316,6 +325,7 @@ Next: Step 9c (worker upserts to document_search_index after CONFIRMED), then St
 | Tenant document types | `repositories/tenants.py`, `repositories/database.py`, `0005` migration | 15 global seed types, per-tenant physical_form_type + requires_processing |
 | R2 path redesign | `storage/adapter.py`, `application/intake.py` | Slug-based path: `{tenant_slug}/subjects/{slug}-{id_short}/documents/{form_folder}/...` |
 | API contract redesign (D8–D12) | `api/v1/documents.py`, `api/v1/schemas.py`, `application/intake.py`, `repositories/documents.py`, `0006` migration | Universal envelope, ACCEPTED/REJECTED upload status, sourceChannel nullable, document-types summary endpoint |
+| Backout queue (D24) | `repositories/backout.py`, `workers/processor.py`, `scheduler/beat.py`, `settings.py`, `0008` migration | Dead-letter store for failed jobs; 12 h TTL; sweeper in EODRetryScheduler; `processing_status = FAILED` immediately on any failure |
 
 ### Railway deployment method (no CLI token needed)
 

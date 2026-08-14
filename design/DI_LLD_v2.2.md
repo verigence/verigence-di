@@ -212,6 +212,21 @@ Published profile is resolved once per Processing Run and cached by immutable pr
 16. derive Human Verification Status (`>90 OPTIONAL`, `<=90 MANDATORY`);
 17. set `PROCESSED + CONFIRMED`.
 
+**Failure path (D24):** When any step raises a `ProcessingError` (retryable or
+non-retryable), the worker must:
+
+1. mark the Processing Run `FAILED` with `error_class`, `error_code`,
+   `error_detail`;
+2. set Document `processing_status = FAILED`, `confirmation_status =
+   NOT_CONFIRMED`, `processing_failure_code`, `processing_failure_detail`;
+3. mark the Processing Job `FAILED`;
+4. insert one row in `docintel.backout_jobs` with `expires_at_utc =
+   NOW() + backout_ttl_hours` (default 12 h).
+
+The `RETRY_PENDING` document state is **not used** under this failure path.
+The EOD Retry Scheduler remains present but only activates for documents
+that are explicitly left in `RETRY_PENDING` state through other mechanisms.
+
 ### DocumentAIAdapter
 
 Canonical operations:
@@ -273,9 +288,36 @@ At configured Tenant local EOD time:
 2. insert one EOD_RETRY job (`attempt_no=2`);
 3. worker retries the same immutable FIT original evidence;
 4. success => `PROCESSED/CONFIRMED`;
-5. failure => `FAILED/NOT_CONFIRMED`.
+5. failure => `FAILED/NOT_CONFIRMED` + insert backout row (D24).
 
 INITIAL jobs are `attempt_no=1`. Database constraint prevents swapping attempt numbers.
+
+On every scheduler tick (every 60 s), regardless of EOD window, the scheduler
+also runs the Backout Queue Sweeper (see below).
+
+### Backout Queue Sweeper (D24)
+
+Runs on every EODRetryScheduler tick (every 60 s). Executes one bounded delete:
+
+```sql
+DELETE FROM docintel.backout_jobs
+WHERE expires_at_utc <= NOW();
+```
+
+Expired backout rows are dead-letter records. Deleting them does not change the
+Document row — the document remains `FAILED / NOT_CONFIRMED`. The sweeper
+merely keeps the backout table from growing unboundedly.
+
+**Backout Queue contract:**
+
+- One `backout_jobs` row per document at any time (enforced by
+  `UNIQUE (tenant_id, document_id)`).
+- TTL controlled by `DI_BACKOUT_TTL_HOURS` env var (default `12`).
+- No reprocessing is triggered from the backout queue. It is a dead-letter
+  store only.
+- `error_class` records whether the failure was `RETRYABLE` or `NON_RETRYABLE`
+  — this is retained for diagnostics even after the row would otherwise have
+  been retried under the old path.
 
 ### Query/Operations Service
 

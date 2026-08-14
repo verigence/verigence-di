@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     worker_enabled: bool = True
     worker_id: str = ""   # auto-generated from hostname+PID when empty
 
+    # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24)
+    backout_ttl_hours: int = 12
+
     # Verification threshold — system-wide default; per-tenant value in DB overrides this
     verification_threshold: float = 90.00
 

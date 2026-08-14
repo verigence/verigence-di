@@ -34,6 +34,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from verigence.di.repositories.backout import sweep_expired_backout_jobs
+
 logger = structlog.get_logger(__name__)
 
 # How many seconds around the EOD window we consider "just passed"
@@ -77,10 +79,23 @@ class EODRetryScheduler:
 
 
 async def _run_eod_check(session_factory: async_sessionmaker) -> None:
-    """Periodic check: for every enabled Tenant, insert EOD_RETRY jobs if EOD just passed."""
+    """Periodic check (every 60 s):
+    1. Sweep expired backout_jobs rows (D24) — runs on every tick.
+    2. For every enabled Tenant, insert EOD_RETRY jobs if EOD just passed.
+    """
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
 
+    # ── 1. Backout sweep — runs on every tick regardless of EOD window ────────
+    try:
+        async with session_factory() as session, session.begin():
+            deleted = await sweep_expired_backout_jobs(session)
+        if deleted:
+            log.info("backout_sweep_completed", rows_deleted=deleted)
+    except Exception as exc:
+        log.warning("backout_sweep_failed", error=str(exc))
+
+    # ── 2. EOD retry job injection — only when Tenant EOD window matches ──────
     async with session_factory() as session:
         tenants = await _load_enabled_tenants(session)
 

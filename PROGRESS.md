@@ -72,25 +72,10 @@ deploy → crash → hotfix cycle entirely.
 
 ## Current active step
 
-**Step 9 — Azure Document Intelligence adapter — ❌ NOT STARTED**
+**Backout Queue — ✅ DESIGN + IMPLEMENTATION COMPLETE (D24)**
+121 tests passing, 0 xfailed. Migration 0008 ready to apply to Neon.
 
-Provider chosen: Azure Document Intelligence (D13). Azure account + resource creation pending (manual).
-See session record 2026-08-18 for full implementation plan.
-
-**Completed this session (2026-08-18):**
-- Design decisions D8–D13 locked in DI_DECISIONS.md
-- API contract redesign: universal `{errorCode, errorMessage, data}` envelope (D8)
-- Upload request simplified: `file + documentTypeKey` only — sourceChannel removed (D9)
-- Upload response: `ACCEPTED/REJECTED` + `processingStatus` (D9)
-- `source_channel` made nullable on documents — migration 0006 applied to Neon (D10)
-- GET document response slimmed to 7 public fields + documentTypeKey join (D11)
-- New `GET /document-types` summary endpoint (D12)
-- Azure Document Intelligence chosen as OCR/AI provider (D13)
-- All design documents (v2.2 active + superseded archive) committed to `design/` folder
-- 108 tests passing, lint clean
-
-**Next: Step 9 — Azure Document Intelligence adapter**
-Manual prerequisite: Create Azure account → Document Intelligence resource → get endpoint + key
+**Next: Apply migration 0008 to Neon (`alembic upgrade head`), then Step 9c**
 
 ---
 
@@ -1757,3 +1742,71 @@ All modified files backed up to `backup/pre-step9/` before changes.
 
 ---
 
+
+## Session record — today (Backout Queue design)
+
+### D24 — Processing Backout Queue — ✅ DESIGN COMPLETE {
+
+#### Problem observed during smoke testing
+
+Documents were getting stuck in the job queue permanently after processing
+failures:
+
+1. **Retryable failures** → `processing_status = RETRY_PENDING` — waiting for
+   the EOD Retry Scheduler window (up to 24 h). Queue appeared blocked during
+   short smoke-test sessions.
+2. **Worker crash while `RUNNING`** — no heartbeat/timeout mechanism exists.
+   A job stays `RUNNING` forever. (Phase-2 fix; not addressed by D24.)
+
+#### Design decision locked (D24)
+
+Introduce `docintel.backout_jobs` as a **dead-letter table**:
+
+- Any failure (retryable **or** non-retryable) immediately:
+  1. Sets `processing_status = FAILED`, `confirmation_status = NOT_CONFIRMED` on the document
+  2. Inserts one `backout_jobs` row with `expires_at_utc = NOW() + 12 h`
+  3. Marks the processing job `FAILED`
+- A sweeper in `EODRetryScheduler._run_eod_check()` (runs every 60 s) deletes
+  expired rows (`expires_at_utc <= NOW()`)
+- TTL is controlled by `DI_BACKOUT_TTL_HOURS` env var (default `12`)
+- No reprocessing from backout — it is a dead-letter store only
+- The `RETRY_PENDING` state and EOD Retry Scheduler are **not removed** — they
+  remain for future operational use
+
+#### Design documents updated this session
+
+| File | Change |
+|---|---|
+| `DI_DECISIONS.md` | D24 appended |
+| `design/DI_LLD_v2.2.md` | Processing Worker §17 failure path updated; §Backout Queue Sweeper added |
+| `design/DI_POSTGRESQL_SCHEMA_v2.2.sql` | `backout_jobs` table + `ix_backout_jobs_ttl` + `ix_backout_jobs_document` indexes |
+| `DI_MASTER_REFERENCE.md` | Next step updated; migration `0008` added to schema changes table; D24 added to code additions |
+
+#### `backout_jobs` key schema points
+
+- PK: `(tenant_id, backout_job_id)`
+- UNIQUE: `(tenant_id, document_id)` — one backout row per document at any time
+- FK: `→ documents`, `→ processing_jobs`
+- `processing_run_id` nullable — may not exist if worker crashed before creating a run
+- `error_class`: `RETRYABLE` or `NON_RETRYABLE`
+- `expires_at_utc`: hard TTL, deleted by sweeper
+
+#### Implementation files (NOT YET WRITTEN)
+
+| File | What |
+|---|---|
+| `backend/alembic/versions/0008_backout_queue.py` | Migration |
+| `backend/src/verigence/di/settings.py` | `backout_ttl_hours: int = 12` |
+| `backend/src/verigence/di/repositories/backout.py` | `insert_backout_job()`, `sweep_expired_backout_jobs()` |
+| `backend/src/verigence/di/workers/processor.py` | `_handle_failure()` routes all failures to backout |
+| `backend/src/verigence/di/scheduler/beat.py` | Sweep call on every tick |
+| Tests | `tests/test_backout_queue.py` |
+
+#### What is NOT changing
+
+- `processing_jobs` table schema — untouched
+- `EOD_RETRY` job type — untouched
+- `RETRY_PENDING` document status — still a valid value, just never reached under D24 normal path
+- Document state machine DB constraints — `FAILED + NOT_CONFIRMED` is already a valid combination
+
+}

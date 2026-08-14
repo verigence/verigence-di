@@ -685,3 +685,132 @@ All changes additive. No existing table altered destructively.
 
 ---
 
+
+## D24 — Processing Backout Queue (today's session)
+
+### Problem
+During smoke testing, documents were observed getting stuck in the job queue
+permanently when processing fails. Two specific stuck states:
+
+1. **`job_status = RUNNING` — worker crash mid-job**: no heartbeat exists; the job
+   never self-heals.
+2. **`processing_status = RETRY_PENDING` — waiting for EOD**: documents wait up
+   to ~24 hours for the EOD Retry Scheduler window; during testing this makes
+   the queue visibly blocked.
+
+The EOD Retry Scheduler remains in place for its intended purpose (end-of-day
+business retry). The backout queue is a **separate, faster drain** for failed
+documents so the active queue stays clean during testing and production.
+
+### Decision
+
+Introduce a dedicated `backout_jobs` table. Any processing job that ends in
+failure — whether retryable or non-retryable — is moved to the backout queue
+immediately. The document `processing_status` is set to `FAILED` and
+`confirmation_status` to `NOT_CONFIRMED` at the same time.
+
+**TTL:** Backout entries expire after **12 hours** (`expires_at_utc`). A
+lightweight sweeper (runs every 60 s inside the existing `EODRetryScheduler`
+tick) hard-deletes expired rows. No reprocessing happens from the backout queue
+— it is a dead-letter store, not a retry mechanism.
+
+**The EOD Retry Scheduler is NOT changed.** It still inserts `EOD_RETRY` jobs
+for `RETRY_PENDING` documents. With D24 in place, a document only stays
+`RETRY_PENDING` if the operator explicitly decides to keep it retryable (i.e.
+does not move it to backout). For the current smoke-testing phase, **all
+failures go directly to backout** — the `RETRY_PENDING` path is effectively
+bypassed.
+
+### Behaviour contract
+
+| Event | Old behaviour | New behaviour (D24) |
+|---|---|---|
+| Retryable failure | `processing_status = RETRY_PENDING`, job `FAILED`, wait for EOD | `processing_status = FAILED`, `confirmation_status = NOT_CONFIRMED`, insert backout row |
+| Non-retryable failure | `processing_status = FAILED`, `confirmation_status = NOT_CONFIRMED` | Same + insert backout row |
+| Worker crash (`RUNNING` stuck) | Stuck forever | Not addressed by D24 — Phase-2 heartbeat improvement |
+| Backout TTL expires (12 h) | N/A | Row hard-deleted from `backout_jobs`; document record untouched (already `FAILED`) |
+
+### `backout_jobs` table
+
+```sql
+CREATE TABLE docintel.backout_jobs (
+    tenant_id           varchar(128)  NOT NULL,
+    backout_job_id      uuid          NOT NULL,
+    document_id         uuid          NOT NULL,
+    processing_job_id   uuid          NOT NULL,   -- FK to the failed processing_jobs row
+    processing_run_id   uuid,                     -- FK to the failed processing_runs row (nullable — may not exist if worker crashed before run was created)
+    error_class         varchar(20)   NOT NULL
+                          CHECK (error_class IN ('RETRYABLE','NON_RETRYABLE')),
+    error_code          varchar(120),
+    error_detail        text,
+    expires_at_utc      timestamptz   NOT NULL,   -- created_at_utc + backout_ttl_hours
+    created_at_utc      timestamptz   NOT NULL,
+    PRIMARY KEY (tenant_id, backout_job_id),
+    UNIQUE (tenant_id, document_id),              -- one backout row per document at any time
+    FOREIGN KEY (tenant_id, document_id)
+      REFERENCES docintel.documents(tenant_id, document_id),
+    FOREIGN KEY (tenant_id, processing_job_id)
+      REFERENCES docintel.processing_jobs(tenant_id, processing_job_id)
+);
+
+CREATE INDEX ix_backout_jobs_ttl
+ON docintel.backout_jobs(expires_at_utc);
+
+CREATE INDEX ix_backout_jobs_document
+ON docintel.backout_jobs(tenant_id, document_id);
+```
+
+**No change** to `processing_jobs` schema. The `job_type` constraint
+`CHECK (job_type IN ('INITIAL','EOD_RETRY'))` and the `attempt_no` constraint
+remain untouched. The backout table is a separate, parallel record.
+
+### `DI_BACKOUT_TTL_HOURS` setting
+
+New optional env var `DI_BACKOUT_TTL_HOURS` (default: `12`) controls the TTL.
+Parsed as `settings.backout_ttl_hours: int = 12`.
+
+### Sweeper
+
+The sweeper runs inside the existing `EODRetryScheduler._run_eod_check()` loop
+every 60 seconds. It executes one bounded delete:
+
+```sql
+DELETE FROM docintel.backout_jobs
+WHERE expires_at_utc <= NOW();
+```
+
+Safe to run on every tick — expired rows are already dead-letter records.
+
+### What does NOT change
+
+- `processing_jobs` schema — untouched
+- `EOD_RETRY` path — still present and still fires at EOD for any document left
+  in `RETRY_PENDING` state (which under D24 is none during smoke-test phase,
+  but the mechanism is preserved for later operational use)
+- Document state machine invariant constraints — the DB constraint
+  `ck_documents_confirmation_invariants` already permits `FAILED +
+  NOT_CONFIRMED` so no schema constraint change is required on `documents`
+- All existing error codes — `backout_jobs.error_code` uses values from the
+  existing `errors.py` catalogue
+
+### Migration
+
+New migration `0008_backout_queue.py`:
+1. `CREATE TABLE docintel.backout_jobs`
+2. Two indexes (`ix_backout_jobs_ttl`, `ix_backout_jobs_document`)
+
+### Implementation files
+
+| File | Change |
+|---|---|
+| `backend/alembic/versions/0008_backout_queue.py` | New migration |
+| `backend/src/verigence/di/settings.py` | Add `backout_ttl_hours: int = 12` |
+| `backend/src/verigence/di/repositories/backout.py` | New — `insert_backout_job()`, `sweep_expired_backout_jobs()` |
+| `backend/src/verigence/di/workers/processor.py` | `_handle_failure()` writes document to `FAILED/NOT_CONFIRMED` and calls `insert_backout_job()` for ALL failures (retryable and non-retryable) |
+| `backend/src/verigence/di/scheduler/beat.py` | `_run_eod_check()` calls `sweep_expired_backout_jobs()` on every tick |
+| `design/DI_POSTGRESQL_SCHEMA_v2.2.sql` | Add `backout_jobs` table + indexes |
+| `design/DI_LLD_v2.2.md` | New §Backout Queue Sweeper section; update §Processing Worker failure path |
+
+### Status: AGREED — design documented; implementation is next step
+
+---

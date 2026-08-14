@@ -4,8 +4,9 @@ Implements the outer loop of DI_LLD_v2.2 §Processing Worker:
   - Poll for PENDING jobs using SELECT ... FOR UPDATE SKIP LOCKED
   - Call job_runner.run_processing_job() for each claimed job
   - On success: commit + complete_job(COMPLETED)
-  - On retryable failure: rollback + retry_job() + set Document RETRY_PENDING
-  - On non-retryable failure: rollback + fail_job() + set Document FAILED/NOT_CONFIRMED
+  - On any failure (retryable or non-retryable): D24 backout path —
+      set Document FAILED/NOT_CONFIRMED, mark job FAILED,
+      insert backout_jobs row with TTL=DI_BACKOUT_TTL_HOURS (default 12 h)
   - Sleep poll_interval when no jobs are available
 
 Lifecycle:
@@ -15,6 +16,7 @@ Lifecycle:
 Configuration:
   - DI_WORKER_POLL_INTERVAL_SECONDS  (default: 5)
   - DI_WORKER_ID                     (default: hostname + PID)
+  - DI_BACKOUT_TTL_HOURS             (default: 12)
 """
 from __future__ import annotations
 
@@ -28,11 +30,11 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.document_ai.adapter import get_document_ai_adapter
+from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
     claim_next_job,
     complete_job,
     fail_job,
-    retry_job,
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.job_runner import run_processing_job
@@ -174,6 +176,7 @@ class ProcessingWorker:
                         tenant_id=tenant_id,
                         job_id=job_id,
                         document_id=document_id,
+                        processing_run_id=result.processing_run_id,
                         error_code=result.error_code,
                         error_detail=result.error_detail,
                         retryable=result.retryable,
@@ -182,12 +185,14 @@ class ProcessingWorker:
 
             except Exception as exc:
                 # Catch anything that escaped run_processing_job (should not happen)
+                # processing_run_id is unknown here — the run may not have been created
                 job_log.exception("job_runner_unexpected_escape", error=str(exc))
                 await _handle_failure(
                     session_factory=session_factory,
                     tenant_id=tenant_id,
                     job_id=job_id,
                     document_id=document_id,
+                    processing_run_id=None,
                     error_code="WORKER_INTERNAL_ERROR",
                     error_detail=str(exc),
                     retryable=True,
@@ -203,53 +208,85 @@ async def _handle_failure(
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
+    processing_run_id: uuid.UUID | None,
     error_code: str | None,
     error_detail: str | None,
     retryable: bool,
     job_log,
 ) -> None:
-    """Write job + document failure state outside the failed transaction."""
-    async with session_factory() as session, session.begin():
-        if retryable:
-            await retry_job(
-                session,
-                tenant_id=tenant_id,
-                processing_job_id=job_id,
-                error_code=error_code,
-                error_detail=error_detail,
-            )
-            # Set document to RETRY_PENDING
-            from datetime import UTC, datetime
+    """D24 backout path — write FAILED state + insert backout_jobs row.
 
-            from sqlalchemy import text
-            await session.execute(
-                text("""
-                        UPDATE docintel.documents
-                        SET processing_status = 'RETRY_PENDING',
-                            updated_at_utc = :now
-                        WHERE tenant_id = :tid AND document_id = :doc_id
-                    """),
-                {
-                    "tid": tenant_id,
-                    "doc_id": document_id,
-                    "now": datetime.now(UTC),
-                },
-            )
-            job_log.warning("job_failed_retryable",
-                            error_code=error_code,
-                            error_detail=error_detail)
-        else:
-            await fail_job(
-                session,
-                tenant_id=tenant_id,
-                processing_job_id=job_id,
-                document_id=document_id,
-                error_code=error_code,
-                error_detail=error_detail,
-            )
-            job_log.warning("job_failed_non_retryable",
-                            error_code=error_code,
-                            error_detail=error_detail)
+    All failures (retryable or non-retryable) follow the same path:
+      1. Mark the processing job FAILED + set document FAILED/NOT_CONFIRMED
+      2. Insert a backout_jobs row with a TTL (default 12 h)
+
+    The RETRY_PENDING document state is no longer used here. The EOD Retry
+    Scheduler path remains intact for any document explicitly left in that
+    state through other mechanisms, but under normal operation all failures
+    go to backout immediately.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text
+
+    settings = get_settings()
+    ttl_hours: int = settings.backout_ttl_hours
+    error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
+
+    async with session_factory() as session, session.begin():
+        # 1a. Mark job FAILED
+        await fail_job(
+            session,
+            tenant_id=tenant_id,
+            processing_job_id=job_id,
+            document_id=document_id,
+            error_code=error_code,
+            error_detail=error_detail,
+        )
+
+        # 1b. Ensure document is FAILED/NOT_CONFIRMED (fail_job already does this,
+        #     but be explicit in case the document was left in PROCESSING state
+        #     by a crash before fail_job was called)
+        await session.execute(
+            text("""
+                UPDATE docintel.documents
+                SET processing_status     = 'FAILED',
+                    confirmation_status   = 'NOT_CONFIRMED',
+                    processing_failure_code   = :error_code,
+                    processing_failure_detail = :error_detail,
+                    updated_at_utc        = :now
+                WHERE tenant_id = :tid AND document_id = :doc_id
+                  AND processing_status != 'PROCESSED'
+            """),
+            {
+                "tid": tenant_id,
+                "doc_id": document_id,
+                "error_code": error_code,
+                "error_detail": error_detail,
+                "now": datetime.now(UTC),
+            },
+        )
+
+        # 2. Insert backout row (upsert — safe on second attempt for same document)
+        await insert_backout_job(
+            session,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            processing_job_id=job_id,
+            processing_run_id=processing_run_id,
+            error_class=error_class,
+            error_code=error_code,
+            error_detail=error_detail,
+            ttl_hours=ttl_hours,
+        )
+
+    job_log.warning(
+        "job_failed_backout",
+        error_class=error_class,
+        error_code=error_code,
+        error_detail=error_detail,
+        ttl_hours=ttl_hours,
+    )
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

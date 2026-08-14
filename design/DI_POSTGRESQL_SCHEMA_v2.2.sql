@@ -702,6 +702,38 @@ CREATE TABLE docintel.processor_invocations (
 );
 
 -- -----------------------------------------------------------------------------
+-- Backout queue — dead-letter store for failed processing jobs (D24)
+-- Documents that fail processing (retryable or non-retryable) are immediately
+-- written here. Rows expire after DI_BACKOUT_TTL_HOURS (default 12 h).
+-- No reprocessing is triggered from this table — it is diagnostic only.
+-- -----------------------------------------------------------------------------
+CREATE TABLE docintel.backout_jobs (
+    tenant_id           varchar(128)  NOT NULL,
+    backout_job_id      uuid          NOT NULL,
+    document_id         uuid          NOT NULL,
+    processing_job_id   uuid          NOT NULL,
+    processing_run_id   uuid,
+    error_class         varchar(20)   NOT NULL
+                          CHECK (error_class IN ('RETRYABLE','NON_RETRYABLE')),
+    error_code          varchar(120),
+    error_detail        text,
+    expires_at_utc      timestamptz   NOT NULL,
+    created_at_utc      timestamptz   NOT NULL,
+    PRIMARY KEY (tenant_id, backout_job_id),
+    UNIQUE (tenant_id, document_id),
+    FOREIGN KEY (tenant_id, document_id)
+      REFERENCES docintel.documents(tenant_id, document_id),
+    FOREIGN KEY (tenant_id, processing_job_id)
+      REFERENCES docintel.processing_jobs(tenant_id, processing_job_id)
+);
+
+CREATE INDEX ix_backout_jobs_ttl
+ON docintel.backout_jobs(expires_at_utc);
+
+CREATE INDEX ix_backout_jobs_document
+ON docintel.backout_jobs(tenant_id, document_id);
+
+-- -----------------------------------------------------------------------------
 -- Classification / extracted facts / accepted values / validation
 -- -----------------------------------------------------------------------------
 CREATE TABLE docintel.document_classifications (
