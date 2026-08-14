@@ -25,7 +25,7 @@ from verigence.di.api.v1.schemas import (
     public_upload_status,
 )
 from verigence.di.application.intake import intake_document
-from verigence.di.auth.dependencies import require_tenant_actor, require_tenant_permission
+from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.domain.enums import ProcessingStatus, UploadStatus
@@ -172,7 +172,7 @@ async def upload_subject_document(
 async def get_subject_documents(
     tenantId: str,
     subjectId: uuid.UUID,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.DOCUMENT_READ))],
 ) -> ApiResponse[DocumentListData]:
     async with tenant_session(actor.tenant_id) as session:
         exists = await subject_exists(session, tenant_id=actor.tenant_id, subject_id=subjectId)
@@ -205,7 +205,7 @@ async def get_subject_document(
     tenantId: str,
     subjectId: uuid.UUID,
     documentId: uuid.UUID,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.DOCUMENT_READ))],
 ) -> ApiResponse[DocumentData]:
     async with tenant_session(actor.tenant_id) as session:
         doc = await get_document(
@@ -235,7 +235,7 @@ async def get_subject_document(
 async def get_subject_document_types(
     tenantId: str,
     subjectId: uuid.UUID,
-    actor: Annotated[ActorPrincipal, Depends(require_tenant_actor)],
+    actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.DOCUMENT_READ))],
 ) -> ApiResponse[DocumentTypeSummaryData]:
     async with tenant_session(actor.tenant_id) as session:
         exists = await subject_exists(session, tenant_id=actor.tenant_id, subject_id=subjectId)
