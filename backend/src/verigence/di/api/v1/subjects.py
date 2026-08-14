@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from verigence.di.api.v1.schemas import (
     CreateSubjectRequest,
-    SubjectListResponse,
+    SubjectListData,
     SubjectResponse,
 )
 from verigence.di.auth.dependencies import require_tenant_actor, require_tenant_permission
@@ -67,7 +67,7 @@ async def create_subject_endpoint(
 
 @router.get(
     "/subjects",
-    response_model=SubjectListResponse,
+    response_model=SubjectListData,
     summary="List/search Verigence Subjects within a Tenant",
     operation_id="listSubjects",
 )
@@ -78,7 +78,7 @@ async def list_subjects_endpoint(
     query: Annotated[str | None, Query(max_length=240)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query(max_length=500)] = None,
-) -> SubjectListResponse:
+) -> SubjectListData:
     async with tenant_session(actor.tenant_id) as session:
         subjects = await list_subjects(
             session,
@@ -94,7 +94,7 @@ async def list_subjects_endpoint(
     page = subjects[:limit]
     next_cursor = str(page[-1]["subject_id"]) if has_next and page else None
 
-    return SubjectListResponse(
+    return SubjectListData(
         items=[
             SubjectResponse(
                 tenantId=s["tenant_id"],
