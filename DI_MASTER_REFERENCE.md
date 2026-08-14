@@ -273,16 +273,16 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ---
 
-### Infrastructure status at start of 2026-08-14 session
+### Infrastructure status — 2026-08-17 (current)
 
 | Service | Status |
 |---|---|
-| di-api (Railway) | ✅ Running — `https://verigence-di-production.up.railway.app` |
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` — commit `b93ae4e` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ✅ All 3 migrations at head (0001 + 0002 + 0003) — verified 2026-08-14 |
-| Cloudflare R2 | ❌ Not configured — document upload fails at storage step |
-| Security module JWKS | ❌ Not deployed — mock tokens work in `dev` mode |
-| CI pipeline | ✅ Green — `107 passed, 1 xfailed` |
+| Neon PostgreSQL | ✅ All 5 migrations at head (0001–0005) — verified 2026-08-17 |
+| Cloudflare R2 | ✅ Working — new slug-based path with 4 form-type folders |
+| Security module JWKS | ✅ Using GitHub raw test JWKS — mock tokens rejected in production |
+| CI pipeline | ✅ Green — `108 passed, 0 xfailed` |
 
 ### Schema changes beyond Baseline 2.2 spec
 

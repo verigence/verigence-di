@@ -63,11 +63,19 @@ Columns + constraints + indexes. Three bugs in one function because this was ski
 
 ## Current active step
 
-**Step 13 — Railway deployment — ✅ DONE**
+**Step 9 — Google Document AI adapter — ❌ NOT STARTED**
 
-Both di-api and di-worker are live on Railway production environment via GitHub integration.
+Design agreed, GCP setup pending (manual action required).
+See session record 2026-08-17 for full step plan.
 
-**Next: Step 12 — React PWA ops-ui**
+**Completed this session (2026-08-17):**
+- Document type master catalogue + tenant_document_types design (DI_DECISIONS.md D1–D7)
+- Migration 0005: tenant_document_types table, 15 global seed types, physical_form_type + requires_processing on documents
+- New R2 path: slug-based with 4 form-type folders
+- Three live bugs fixed: upload CORRUPT, download 500, missing Content-Disposition
+- End-to-end verified: real PDF (INV1834589_GOYAL_AMIT_HCPJ73.pdf) uploaded and downloaded correctly
+
+**Next: Step 9 — Google Document AI adapter** (pending GCP project + processor creation)
 
 ---
 
@@ -83,12 +91,12 @@ Both di-api and di-worker are live on Railway production environment via GitHub 
 | 6 | Document Intake + Subject/Document REST endpoints | ✅ | ✅ | ✅ DONE |
 | 7 | Quality rules + Upload Validator wired into intake | ✅ | ✅ | ✅ DONE |
 | 8 | Normalization + Validation rules (`rules/` package) | ✅ | ✅ | ✅ DONE |
-| 9 | Real Google Document AI adapter | ❌ mock only | — | ❌ NOT STARTED |
+| 9 | Real Google Document AI adapter | ❌ mock only | — | ❌ NOT STARTED — GCP setup required |
 | 10a | Processing Worker (job claim loop) | ✅ | ✅ | ✅ DONE |
 | 10b | EOD Retry Scheduler | ✅ | ✅ | ✅ DONE |
 | 11 | All remaining 48 REST API operations | ✅ | ✅ | ✅ DONE |
 | 12 | React PWA ops-ui | ❌ README only | — | ❌ NOT STARTED |
-| 13 | Railway + Cloudflare Pages + CI/CD | ✅ | ✅ | ✅ DONE — both di-api and di-worker deployed via Railway GitHub integration |
+| 13 | Railway + Cloudflare Pages + CI/CD | ✅ | ✅ | ✅ DONE — both services live on Railway |
 | 14 | WhatsApp adapter (Phase 2) | ❌ empty | — | ❌ NOT STARTED |
 | 15 | Registered device enforcement (Phase 2) | ❌ | — | ❌ NOT STARTED |
 | 16 | Idempotency records (Phase 2) | ❌ | — | ❌ NOT STARTED |
@@ -1182,4 +1190,215 @@ Four gaps documented and written into the design document:
 ### What was NOT changed (correctly out of scope)
 - `auth/dependencies.py` — `_unauthorized()` and `_forbidden()` already return dicts with `code`, `status`, `retryable` keys. They are caught by the Layer 2 HTTPException handler which passes them through. ✅ Compliant.
 - All other route files (`verification.py`, `tenant_config.py`, `unassigned.py`, `entity_links.py`, `subject_matching.py`, `whatsapp_system.py`, `extraction_profiles.py`, `requirement_profiles.py`, `operations.py`) already use `raise problem(...)` exclusively. ✅ Compliant.
+
+
+---
+
+## Session record — 2026-08-17
+
+### DI_DECISIONS.md created ✅
+
+New file — mandatory first read every session, before `DI_MASTER_REFERENCE.md`.
+Captures every design decision agreed in conversation so it survives across sessions.
+`DI_MASTER_REFERENCE.md` reading order updated to put `DI_DECISIONS.md` first.
+
+**Rule going forward:** every design decision agreed verbally must be written into
+`DI_DECISIONS.md` before any code is written. If it is not in that file, it is not decided.
+
+---
+
+### Design decisions captured (DI_DECISIONS.md D1–D7) ✅
+
+| Decision | Summary |
+|---|---|
+| D1 | Document type master catalogue — 15 global seed types |
+| D2 | `physical_form_type` lives on `tenant_document_types`, NOT on `document_types` |
+| D3 | New `tenant_document_types` table — per-tenant form type + processing flag |
+| D4 | Upload API: unrecognised `documentTypeKey` → ADDITIONAL + no AI processing |
+| D5 | R2 path: `{tenant_slug}/subjects/{slug}-{id_short}/documents/{form_folder}/{doc_id_short}_{filename}` |
+| D6 | `category` column on `document_types` repurposed to hold default form type for seeding |
+| D7 | `requires_processing` defaults: GOVT_ID/PRINTABLE/HANDWRITTEN=true, ADDITIONAL=false (no override) |
+
+---
+
+### Migration 0005 — tenant_document_types ✅
+
+**Applied to Neon — verified at revision `0005`**
+
+**New table:** `docintel.tenant_document_types`
+
+```sql
+PRIMARY KEY (tenant_id, document_type_id)
+physical_form_type  VARCHAR(20)  CHECK IN ('GOVT_ID','PRINTABLE','HANDWRITTEN','ADDITIONAL')
+requires_processing BOOLEAN      NOT NULL DEFAULT true
+is_active           BOOLEAN      NOT NULL DEFAULT true
+display_order       INTEGER      NOT NULL DEFAULT 100
+```
+
+**New columns on `docintel.documents`:**
+- `physical_form_type VARCHAR(20)` — snapshotted at upload time from tenant config
+- `requires_processing BOOLEAN NOT NULL DEFAULT true`
+
+**15 global document types seeded** (`owner_tenant_id IS NULL`):
+
+| document_type_key | display_name | physical_form_type |
+|---|---|---|
+| pan_card | PAN Card | GOVT_ID |
+| aadhaar | Aadhaar Card | GOVT_ID |
+| passport | Passport | GOVT_ID |
+| driving_licence | Driving Licence | GOVT_ID |
+| voter_id | Voter ID | GOVT_ID |
+| corporate_id | Corporate ID | PRINTABLE |
+| bank_statement | Bank Statement | PRINTABLE |
+| loan_statement | Loan Statement | PRINTABLE |
+| customer_ledger | Customer Ledger | PRINTABLE |
+| insurance_cover | Insurance Cover Note | PRINTABLE |
+| utility_bill | Utility Bill | PRINTABLE |
+| booking_docket | Booking Docket | PRINTABLE |
+| salary_slip | Salary Slip | PRINTABLE |
+| signed_declaration | Signed Declaration | HANDWRITTEN |
+| supporting_document | Supporting Document | ADDITIONAL |
+
+Note: `corporate_id` is PRINTABLE (not GOVT_ID — corrected after initial mistake).
+
+---
+
+### Tenant onboarding — provision_tenant_document_types ✅
+
+New function `provision_tenant_document_types()` in
+[`repositories/tenants.py`](backend/src/verigence/di/repositories/tenants.py).
+
+Called automatically inside `tenant_session()` after `provision_retention_policy()`.
+Seeds all global ACTIVE document_types into `tenant_document_types` with default
+physical_form_type from `document_types.category`. ON CONFLICT DO NOTHING — safe
+on every request.
+
+---
+
+### R2 storage path redesign ✅ (DI_DECISIONS.md D5)
+
+**Old path (removed):**
+```
+tenants/{tenant_storage_key}/documents/{document_id}/original/{artifact_id}
+```
+
+**New path:**
+```
+{tenant_slug}/subjects/{subject_slug}-{subject_id_short}/documents/{form_folder}/{doc_id_short}_{filename}
+```
+
+**Four form folders:** `govt_id/` | `printable/` | `handwritten/` | `additional/`
+
+**MIME → extension map** — full set added to
+[`storage/adapter.py`](backend/src/verigence/di/storage/adapter.py) including:
+`pdf, jpg, png, tif, webp, gif, bmp, docx, xlsx, pptx, doc, xls, ppt, odt, ods, odp, txt, csv, zip`
+
+**artifact_id removed from path.** Still generated internally and stored in
+`document_artifacts` but never exposed in the R2 key.
+
+**Files changed:**
+- `storage/adapter.py` — `build_original_key()`, `_slugify()`, `_sanitise_filename()`, `_MIME_EXT` map, old static methods removed
+- `application/intake.py` — Steps 2+3+4+5 rewritten: type resolution, subject name fetch, new path builder, job creation gated on `requires_processing`
+- `repositories/documents.py` — `create_document_receiving()` accepts `physical_form_type`, `requires_processing`, `document_type_id`
+
+---
+
+### Upload behaviour for unknown documentTypeKey ✅ (D4)
+
+If `documentTypeKey` is absent or not found in `tenant_document_types`:
+- `physical_form_type = 'ADDITIONAL'`
+- `requires_processing = false`
+- No processing job created
+- Document stored as FIT/NOT_FIT/CORRUPT normally
+- Never sent to Document AI
+
+---
+
+### Expanded MIME allow-list ✅
+
+[`application/intake.py`](backend/src/verigence/di/application/intake.py) `_DEFAULT_ALLOWED_MIME`
+expanded from 5 types to 22 types (all Office formats, CSV, ZIP).
+Previously `.docx`, `.xlsx` etc. were rejected as CORRUPT.
+
+---
+
+### Three live bugs fixed ✅
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| Upload returns CORRUPT on valid files | `quality/validator.py` checked `not policy_row[0]` — empty list `[]` is falsy → CORRUPT instead of FIT | Changed to `if policy_row is None` — empty policy = no rules = FIT |
+| Download returns 500 | `await storage.get_stream(...)` — `get_stream` is an async generator, not a coroutine | Removed spurious `await` |
+| Downloaded file can't be opened | No `Content-Disposition` header on content endpoint | Added `Content-Disposition: attachment; filename="{doc_id_short}_{original_filename}"` |
+
+Pre-existing known bug `test_empty_policy_no_rules_returns_fit` (marked xfail since 2026-08-12)
+is now **fixed** and the xfail marker removed. **Test count: 108 passed, 0 xfailed.**
+
+---
+
+### End-to-end verification ✅
+
+Tested against live Railway production with real file `INV1834589_GOYAL_AMIT_HCPJ73.pdf` (104.7 KB):
+
+```
+Subject created     : 201  subjectId=25eeda86-3328-4597-8d46-8dc32bb8dcf7
+Upload              : 201  uploadStatus=FIT  documentId=3688beb6
+Download            : 200
+Content-Type        : application/pdf
+Content-Disposition : attachment; filename="3688beb6_INV1834589_GOYAL_AMIT_HCPJ73.pdf"
+Bytes received      : 107,214  ✅ exact match
+R2 path             : amit-goyal-test/subjects/amit-goyal-25eeda86/documents/printable/3688beb6_INV1834589_GOYAL_AMIT_HCPJ73.pdf
+```
+
+---
+
+### Commits this session
+
+| Hash | Message |
+|---|---|
+| `f681d7b` | feat: tenant document types, new R2 path, expanded MIME support, download Content-Disposition |
+| `6073a1a` | fix: empty quality policy → FIT not CORRUPT; fix pre-existing xfail bug |
+| `b93ae4e` | fix: remove spurious await on async generator get_stream — fixes download 500 |
+
+---
+
+### Current infrastructure state
+
+| Service | URL / Location | Status |
+|---|---|---|
+| di-api (Railway) | `https://di-api-production.up.railway.app` | ✅ Running — commit `b93ae4e` |
+| di-worker (Railway) | Railway production | ✅ Running |
+| Neon PostgreSQL | `ep-royal-pond-ayci3m0f.c-5.us-east-2.aws.neon.tech` | ✅ Live — migrations 0001–0005 at head |
+| Cloudflare R2 | — | ✅ Working — new path structure active |
+| Security module JWKS | GitHub raw test JWKS | ✅ Working — test key in use |
+| CI pipeline | GitHub Actions `ci-dev.yml` | ✅ Green — 108 passed, 0 xfailed |
+
+---
+
+### Known open items
+
+| Item | Priority | Blocker |
+|---|---|---|
+| Step 9 — Google Document AI adapter | 🔴 Next | GCP project + processor creation (manual) |
+| Step 12 — React PWA ops-ui | 🟡 After Step 9 | None |
+| Cloudflare R2 prod bucket | 🟡 | None — test bucket working |
+| Audit chain wired into routes | 🟢 Phase 2 | None |
+| WhatsApp adapter | 🟢 Phase 2 | None |
+
+---
+
+### Step 9 — Google Document AI — agreed implementation plan
+
+**7 steps to implement (agreed 2026-08-17):**
+
+1. **GCP setup (manual)** — Enable Document AI API, create Form Parser processor, create service account + JSON key
+2. **Railway env vars** — Set `DI_DOCAI_MOCK=false`, `DI_DOCAI_PROJECT_ID`, `DI_DOCAI_LOCATION`, `DI_DOCAI_PROCESSOR_ID`, `GOOGLE_APPLICATION_CREDENTIALS_JSON` on both services
+3. **`GoogleDocumentAIAdapter`** — New file `document_ai/google_adapter.py`. Implements `classify()` + `extract()` against `google-cloud-documentai` SDK. Routes to correct processor by `physical_form_type` (GOVT_ID → Identity Document Parser, PRINTABLE/HANDWRITTEN → Form Parser)
+4. **Configure ExtractionProfiles** — Via existing API, define `canonical_fields` + `extraction_profile_fields` for each document type (bank_statement, passport, etc.)
+5. **Wire `physical_form_type` into worker** — `job_runner.py` passes form type to `extract()` so adapter routes to correct processor
+6. **Local integration test** — Upload real document, verify fields extracted, document reaches CONFIRMED
+7. **Deploy to Railway** — Set env vars, push, verify worker picks up existing FIT jobs
+
+**Processors needed:**
+- Form Parser — for PRINTABLE + HANDWRITTEN
+- Identity Document Parser — for GOVT_ID (passport, Aadhaar, PAN, driving licence, voter ID)
 
