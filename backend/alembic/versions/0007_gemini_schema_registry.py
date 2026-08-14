@@ -48,8 +48,8 @@ def upgrade() -> None:
             document_type_key   varchar(120),
             indexed_fields      jsonb           NOT NULL DEFAULT '{}',
             schema_version      varchar(20),
-            created_at_utc      timestamptz     NOT NULL DEFAULT NOW() AT TIME ZONE 'UTC',
-            updated_at_utc      timestamptz     NOT NULL DEFAULT NOW() AT TIME ZONE 'UTC',
+            created_at_utc      timestamptz     NOT NULL DEFAULT now(),
+            updated_at_utc      timestamptz     NOT NULL DEFAULT now(),
             PRIMARY KEY (tenant_id, document_id),
             FOREIGN KEY (tenant_id)
                 REFERENCES docintel.tenant_settings(tenant_id),
@@ -74,26 +74,26 @@ def upgrade() -> None:
     # ── 3. Seed new global document types (D16 + D23) ────────────────────────
     for key, display_name, category in _NEW_DOCUMENT_TYPES:
         op.execute(f"""
-            INSERT INTO docintel.document_types
-                (document_type_id, owner_tenant_id, document_type_key,
-                 display_name, description, category, status,
-                 created_at_utc, updated_at_utc)
-            SELECT
-                gen_random_uuid(),
-                NULL,
-                '{key}',
-                '{display_name}',
-                NULL,
-                '{category}',
-                'ACTIVE',
-                NOW() AT TIME ZONE 'UTC',
-                NOW() AT TIME ZONE 'UTC'
-            WHERE NOT EXISTS (
-                SELECT 1 FROM docintel.document_types
-                WHERE document_type_key = '{key}'
-                  AND owner_tenant_id IS NULL
-            )
-        """)
+                INSERT INTO docintel.document_types
+                    (document_type_id, owner_tenant_id, document_type_key,
+                     display_name, description, category, status,
+                     created_at_utc, updated_at_utc)
+                SELECT
+                    gen_random_uuid(),
+                    NULL,
+                    '{key}',
+                    '{display_name}',
+                    NULL,
+                    '{category}',
+                    'ACTIVE',
+                    now(),
+                    now()
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM docintel.document_types
+                    WHERE document_type_key = '{key}'
+                      AND owner_tenant_id IS NULL
+                )
+            """)
 
     # ── 4. Flip requires_processing = true for all tenant_document_types (D18) ─
     # D18 supersedes D4: every document type is processed regardless of form type.
@@ -101,7 +101,7 @@ def upgrade() -> None:
     op.execute("""
         UPDATE docintel.tenant_document_types
         SET requires_processing = true,
-            updated_at_utc = NOW() AT TIME ZONE 'UTC'
+            updated_at_utc = now()
         WHERE requires_processing = false
     """)
 
@@ -111,7 +111,7 @@ def downgrade() -> None:
     op.execute("""
         UPDATE docintel.tenant_document_types tdt
         SET requires_processing = false,
-            updated_at_utc = NOW() AT TIME ZONE 'UTC'
+            updated_at_utc = now()
         FROM docintel.document_types dt
         WHERE dt.document_type_id = tdt.document_type_id
           AND COALESCE(dt.category, 'ADDITIONAL') = 'ADDITIONAL'
