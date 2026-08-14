@@ -30,8 +30,8 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
 
-    # Google Document AI
-    "google-cloud-documentai>=2.29.0",
+    # Azure Document Intelligence (D13)
+    "azure-ai-documentintelligence>=1.0.0",
 
     # Image / PDF quality checks
     "Pillow>=10.3.0",

@@ -51,11 +51,10 @@ class Settings(BaseSettings):
     # Auth — Security module
     security_jwks_url: str = ""  # https://<security-host>/.well-known/jwks.json
 
-    # Google Document AI
+    # Azure Document Intelligence (D13 + D18)
     docai_mock: bool = True  # True = use mock adapter (local/CI)
-    docai_project_id: str = ""
-    docai_location: str = "us"
-    docai_processor_id: str = ""
+    docai_azure_endpoint: str = ""   # https://<resource>.cognitiveservices.azure.com/
+    docai_azure_key: str = ""        # API key from Azure portal → Keys and Endpoint
 
     # Sentry
     sentry_dsn: str = ""
@@ -82,10 +81,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "DI_SECURITY_JWKS_URL must be a real JWKS endpoint in production"
                 )
-            # Real Document AI required in production (unless explicitly keeping mock)
-            if not self.docai_mock and not self.docai_project_id:
+            # Real Azure Document Intelligence required in production
+            if not self.docai_mock and not self.docai_azure_endpoint:
                 raise ValueError(
-                    "DI_DOCAI_PROJECT_ID must be set when DI_DOCAI_MOCK=false in production"
+                    "DI_DOCAI_AZURE_ENDPOINT must be set when DI_DOCAI_MOCK=false in production"
                 )
         return self
 

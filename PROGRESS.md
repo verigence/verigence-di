@@ -1562,3 +1562,102 @@ Classification: pass-through — hint key used as accepted type (no AI classifie
 8. **Local integration test** — upload a real document, verify extraction
 9. **Deploy** — push to Railway, verify worker picks up existing FIT jobs
 
+## Session record — 2026-08-19
+
+### Design decisions locked D14–D18 ✅
+
+All five decisions that were agreed in conversation on 2026-08-18 but not yet
+written to `DI_DECISIONS.md` are now locked:
+
+| Decision | Summary |
+|---|---|
+| D14 | `document_search_index` table — JSONB + GIN index, one row per document, upserted at Step 17 |
+| D15 | `POST /v1/tenants/{tenantId}/analyse` — cross-document reconciliation by doc ID list |
+| D16 | Two new document types: `dealer_receipt` (prebuilt-invoice), `upi_screenshot` (prebuilt-read) |
+| D17 | Seven reconciliation rules R1–R7 (amount match, UTR suffix, date proximity, name match, total check, date sequence, duplicate detection) |
+| D18 | **All documents scanned on upload** — `requires_processing=true` for every document regardless of `physical_form_type`. ADDITIONAL documents use `prebuilt-read` model. Supersedes D4 ADDITIONAL skip. |
+
+---
+
+### Updated model routing table (D13 + D18)
+
+| Condition | Azure model |
+|-----------|-------------|
+| GOVT_ID (any) | `prebuilt-idDocument` |
+| PRINTABLE — bank_statement, loan_statement, customer_ledger | `prebuilt-bankStatement` |
+| PRINTABLE — salary_slip | `prebuilt-payStub` |
+| PRINTABLE — insurance_cover, utility_bill, booking_docket, dealer_receipt | `prebuilt-invoice` |
+| PRINTABLE — corporate_id, others | `prebuilt-layout` |
+| HANDWRITTEN (any) | `prebuilt-read` |
+| ADDITIONAL (any) | `prebuilt-read` |
+| upi_screenshot (any physical_form_type) | `prebuilt-read` |
+
+---
+
+### Files changed this session
+
+| File | Change |
+|---|---|
+| `DI_DECISIONS.md` | Added D14–D18 (all locked) |
+| `DI_MASTER_REFERENCE.md` | Step 9 renamed Azure; D18 in key decisions; secrets table updated; migration 0007 noted |
+| `DI_DESIGN_SUMMARY.md` | Technology stack updated; immutable decisions table updated |
+| `SECRETS_CHECKLIST.md` | Replaced Google DocAI vars with `DI_DOCAI_AZURE_ENDPOINT` + `DI_DOCAI_AZURE_KEY` |
+| `backend/src/verigence/di/settings.py` | Replaced `docai_project_id/location/processor_id` with `docai_azure_endpoint` + `docai_azure_key`; production safety check updated |
+| `backend/pyproject.toml` | Replaced `google-cloud-documentai` with `azure-ai-documentintelligence>=1.0.0` |
+| `backend/src/verigence/di/document_ai/adapter.py` | `get_document_ai_adapter()` now imports and returns `AzureDocumentAIAdapter`; docstring updated for D13+D18 |
+| `backend/src/verigence/di/document_ai/azure_adapter.py` | **NEW** — stub adapter with `_select_model()` routing table and `classify()` pass-through; `extract()` raises `NotImplementedError` until Step 9 |
+
+---
+
+### Smoke check ✅
+
+`python -m compileall -q src tests` + `create_app()` import smoke check: **OK**
+
+---
+
+### Current infrastructure state
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ All 6 migrations at head (0001–0006) |
+| Cloudflare R2 | ✅ Working |
+| Security module JWKS | ✅ GitHub raw test JWKS |
+| CI pipeline | ✅ Green (last known: 108 passed) — push pending for this session's changes |
+
+---
+
+### What's next — in order
+
+#### Manual (human action required first)
+1. Create Azure Document Intelligence resource at portal.azure.com
+   - Region: East US or West Europe
+   - Tier: Standard S0
+2. Copy **Endpoint URL** → `DI_DOCAI_AZURE_ENDPOINT`
+3. Copy **Key 1** → `DI_DOCAI_AZURE_KEY`
+
+#### Step 9 — Azure adapter implementation (after Azure resource ready)
+1. `azure_adapter.py` `extract()` — implement using `azure-ai-documentintelligence` SDK
+2. `workers/job_runner.py` — pass `physical_form_type` + `document_type_key` through to `extract()`
+3. **Requires worker update** — `requires_processing` in DB currently set to `false` for ADDITIONAL;
+   need migration 0007 (D18) to flip all existing `requires_processing = true` + provision new doc types
+4. Local integration test — upload real document, verify extraction
+5. Deploy — push to Railway, set Azure env vars, set `DI_DOCAI_MOCK=false`
+
+#### Step 9b — Migration 0007
+- `pg_trgm` extension
+- `document_search_index` table + GIN index (D14)
+- `dealer_receipt` + `upi_screenshot` seed document types (D16)
+- UPDATE `tenant_document_types SET requires_processing = true` for all existing rows (D18)
+
+#### Step 9c — Worker writes to document_search_index (D14)
+- After Step 17 (CONFIRMED), upsert into `document_search_index`
+
+#### Step 9d — POST /analyse endpoint (D15 + D17)
+- Load indexed fields for requested document IDs
+- Run R1–R7 rules
+- Return findings + summary verdict
+
+---
+

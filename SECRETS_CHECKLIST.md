@@ -32,12 +32,10 @@ Update this file whenever a secret is added, rotated, or confirmed.
 | `DI_STORAGE_REGION` | Region | ⚠️ `us-east-1` | ⚠️ placeholder |
 | **Auth — Security module** ||||
 | `DI_SECURITY_JWKS_URL` | JWKS endpoint from Security module | ⚠️ `http://localhost/mock-jwks` | ✅ `https://raw.githubusercontent.com/verigence/verigence-di/dev/backend/tests/fixtures/test_jwks.json` |
-| **Google Document AI** ||||
-| `DI_DOCAI_MOCK` | `true` = use mock adapter | ✅ `true` | ✅ `true` |
-| `DI_DOCAI_PROJECT_ID` | GCP project ID | N/A (mock) | N/A (mock) |
-| `DI_DOCAI_LOCATION` | Processor location (`us` / `eu`) | N/A (mock) | N/A (mock) |
-| `DI_DOCAI_PROCESSOR_ID` | Document AI processor ID | N/A (mock) | N/A (mock) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service account JSON | N/A (mock) | N/A (mock) |
+| **Azure Document Intelligence** ||||
+| `DI_DOCAI_MOCK` | `true` = use mock adapter (local/CI) | ✅ `true` | ✅ `true` |
+| `DI_DOCAI_AZURE_ENDPOINT` | Azure DI resource endpoint URL (`https://<resource>.cognitiveservices.azure.com/`) | N/A (mock) | ❌ not set |
+| `DI_DOCAI_AZURE_KEY` | Azure DI API key | N/A (mock) | ❌ not set |
 | **Monitoring** ||||
 | `DI_SENTRY_DSN` | Sentry project DSN | ⚠️ empty | ⚠️ not set |
 | **WhatsApp (Phase 2)** ||||
@@ -106,11 +104,13 @@ The matching public key is committed to the repo at:
 - Set once Security module is deployed: `https://<security-host>/.well-known/jwks.json`
 - Until then mock mode is active (`DI_ENV != production` bypasses real JWT verification)
 
-### Google Document AI (`DI_DOCAI_*`)
-1. GCP Console → Enable Document AI API
-2. Create processor (Form Parser recommended)
-3. Create service account → download JSON key
-4. Note project ID, location (`us`), processor ID
+### Azure Document Intelligence (`DI_DOCAI_AZURE_*`)
+1. portal.azure.com → Create resource → "Document Intelligence" (Cognitive Services)
+2. Choose region: East US or West Europe (best Indian document coverage)
+3. Copy **Endpoint** from resource → Keys and Endpoint → `DI_DOCAI_AZURE_ENDPOINT`
+4. Copy **Key 1** → `DI_DOCAI_AZURE_KEY`
+5. Set `DI_DOCAI_MOCK=false` on Railway di-api + di-worker services
+6. Set both vars on Railway → di-api service → Variables
 
 ### Sentry (`DI_SENTRY_DSN`)
 1. https://sentry.io → create project (Python / FastAPI)

@@ -353,7 +353,7 @@ Authorization checks permissions[] — never role name strings
 | Database | PostgreSQL 16 · `docintel` schema · Row-Level Security |
 | Object storage | Cloudflare R2 (prod) · MinIO (local) · S3-compatible via aioboto3 |
 | Auth | Security module (OIDC/JWT) — provider-neutral; only canonical JWT claims consumed |
-| AI / OCR | Azure Document Intelligence · behind `DocumentAIAdapter` · mock in dev/CI |
+| AI / OCR | Azure Document Intelligence (D13) · all documents scanned on upload (D18) · `prebuilt-read` for ADDITIONAL · mock in dev/CI |
 | Scheduling | APScheduler (in-process, no external queue in Phase 1) |
 | Operator UI | React 18 · TypeScript · Vite PWA · TanStack Query · Tailwind CSS |
 | Hosting | Railway (API + Worker) · Cloudflare Pages (ops-ui) · Neon (PostgreSQL) |
@@ -426,6 +426,10 @@ Resolve Tenant from whatsapp_routes table
 | API response contract | universal envelope `{errorCode, errorMessage, data}` — `000` = success; branch on errorCode |
 | source_channel | nullable — set by WhatsApp adapter only; not supplied by REST API callers |
 | AI/OCR provider | Azure Document Intelligence (replaces Google Doc AI) — D13 |
+| Scan all documents | Every document scanned by Azure DI on upload; no ADDITIONAL skip (D18) |
+| ADDITIONAL model | `prebuilt-read` for ADDITIONAL + upi_screenshot doc types (D18) |
+| New document types | `dealer_receipt` (prebuilt-invoice), `upi_screenshot` (prebuilt-read) — D16 |
+| Cross-doc analysis | `POST /analyse` — R1–R7 reconciliation rules — D15 + D17 |
 
 ---
 

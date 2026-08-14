@@ -139,7 +139,7 @@ The original list had **4 gaps** discovered during validation against the design
 | **6** | Document Intake use case + Subject/Document REST endpoints | LLD §Document Intake Service; OAS: `createSubject`, `listSubjects`, `getSubject`, `uploadSubjectDocument`, `getSubjectDocuments`, `getSubjectDocument` | ✅ DONE |
 | **7** | Quality rules + Upload Validator wired into intake | LLD §Upload Validator / Quality Service | ✅ DONE |
 | **8** | Normalization + Validation rules (`rules/` package) | LLD §Processing Worker steps 11–12 | ✅ DONE |
-| **9** | Real Google Document AI adapter | LLD §DocumentAIAdapter | ❌ NOT STARTED — needs GCP project + processor |
+| **9** | Azure Document Intelligence adapter (D13 + D18) | LLD §DocumentAIAdapter | ❌ NOT STARTED — needs Azure resource endpoint + key |
 | **10a** | Processing Worker — full job claim loop + classification + extraction + scoring | LLD §Processing Worker (17 steps) + `DI_CLASSIFICATION_v2.2.md` | ✅ DONE |
 | **10b** | EOD Retry Scheduler | LLD §EOD Retry Scheduler | ✅ DONE |
 | **11** | All remaining 48 REST API operations (see breakdown below) | `DI_OPENAPI_v2.2.yaml` — 54 total, 54 done | ✅ DONE |
@@ -216,8 +216,8 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | `DI_CLERK_PUBLISHABLE_KEY` | `pk_test_mock` | ❌ not set | ❌ not set |
 | `DI_CLERK_SECRET_KEY` | `sk_test_mock` | ❌ not set | ❌ not set |
 | `DI_DOCAI_MOCK` | `true` | `true` | `false` |
-| `DI_DOCAI_PROJECT_ID` | _(not needed)_ | _(not needed)_ | ❌ not set |
-| `DI_DOCAI_PROCESSOR_ID` | _(not needed)_ | _(not needed)_ | ❌ not set |
+| `DI_DOCAI_AZURE_ENDPOINT` | N/A (mock) | N/A (mock) | ❌ not set |
+| `DI_DOCAI_AZURE_KEY` | N/A (mock) | N/A (mock) | ❌ not set |
 | `DI_SENTRY_DSN` | empty | empty | ❌ not set |
 | `DI_ENV` | `local` | `dev` | `production` |
 
@@ -243,6 +243,8 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | WhatsApp source channel | `WHATSAPP` — subject_id nullable until assigned |
 | Mock token format (dev/CI) | `mock.<tenant_id>.<actor_id>.<ROLE>[.<ROLE>...]` |
 | AI/OCR provider | Azure Document Intelligence (D13 — replaces Google Doc AI) |
+| Scan all documents | Every document processed by Azure DI regardless of physical_form_type (D18 — supersedes D4 ADDITIONAL skip) |
+| ADDITIONAL model routing | `prebuilt-read` — OCR only, no structured extraction profile required (D18) |
 
 ---
 
@@ -272,7 +274,9 @@ If a design decision needs to change, the human must agree, a new baseline versi
 ## 10. Next step
 
 **Current: Step 9 — Azure Document Intelligence adapter** ❌ NOT STARTED
-(API contract changes D8–D12 complete. Azure account + resource creation pending — manual step.)
+(Decisions D8–D18 all locked. Azure account + resource creation pending — manual step.)
+D18 locked: all documents scanned on upload regardless of physical_form_type.
+D14–D17 locked: document_search_index, POST /analyse, dealer_receipt/upi_screenshot, R1–R7 rules.
 
 ---
 
@@ -299,6 +303,7 @@ If a design decision needs to change, the human must agree, a new baseline versi
 | `0004` | `tenant_settings`: relaxed constraints |
 | `0005` | new table `tenant_document_types`; `documents`: added `physical_form_type`, `requires_processing`; 15 global seed document types |
 | `0006` | `documents.source_channel`: dropped NOT NULL — now nullable (D10) |
+| `0007` | ❌ NOT YET — `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
 
 ### Code additions beyond Baseline 2.2 spec
 

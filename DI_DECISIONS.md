@@ -399,3 +399,160 @@ The `classify()` call returns a pass-through result with the hint key at confide
 - `extract()` → calls Azure Document Intelligence, routes model by form type + doc type key
 
 ### Status: AGREED — implementation pending (after API contract changes)
+
+---
+
+## D14 — document_search_index table (2026-08-18)
+
+### Decision
+A new table `docintel.document_search_index` stores a denormalised, queryable
+representation of extracted field values for every processed document.
+One row per document, updated after each successful processing run.
+
+### Purpose
+Enables cross-document queries (e.g. "find all documents for this subject where
+amount = X or UTR contains Y") without joining across extracted_facts +
+document_field_values. Required by the `POST /analyse` endpoint (D15).
+
+### Schema (key columns)
+- `tenant_id`, `document_id` (PK)
+- `subject_id`, `document_type_key`
+- `indexed_fields JSONB` — flat key→value map of all extracted canonical fields
+- `created_at_utc`, `updated_at_utc`
+
+### Index
+- GIN index on `indexed_fields` for JSONB containment queries
+- `pg_trgm` extension for fuzzy string search within field values
+
+### Write path
+Worker writes to `document_search_index` at Step 17 (after CONFIRMED).
+A new `document_search_index` row is upserted (INSERT … ON CONFLICT UPDATE).
+
+### Status: AGREED — implementation pending (Step 9b)
+
+---
+
+## D15 — POST /analyse endpoint (2026-08-18)
+
+### Decision
+New endpoint:
+
+```
+POST /v1/tenants/{tenantId}/analyse
+```
+
+**Request body:**
+```json
+{ "documentIds": ["uuid", "uuid", ...] }
+```
+
+**Purpose:** Load extracted field values for the given document IDs and run
+the seven reconciliation rules (D17). Returns a structured findings report
+with a summary verdict.
+
+**Authorization:** requires `di.document.read` permission.
+
+**Response** (inside D8 envelope):
+```json
+{
+  "analysedDocuments": 3,
+  "findings": [ { "ruleKey": "R1_AMOUNT_MATCH", "result": "PASS", "detail": "..." }, ... ],
+  "summary": "RECONCILED" | "DISCREPANCY" | "INSUFFICIENT_DATA"
+}
+```
+
+### Status: AGREED — implementation pending (Step 9d)
+
+---
+
+## D16 — Two new document types: dealer_receipt and upi_screenshot (2026-08-18)
+
+### Decision
+Two new global seed document types are added to the master catalogue:
+
+| document_type_key | display_name       | category  |
+|-------------------|--------------------|-----------|
+| dealer_receipt    | Dealer Receipt     | PRINTABLE |
+| upi_screenshot    | UPI Screenshot     | PRINTABLE |
+
+**Model routing (per D13):**
+- `dealer_receipt` → `prebuilt-invoice` (printed receipt with amounts, dates, RTGS ref)
+- `upi_screenshot` → `prebuilt-read` (phone screenshot — treated like HANDWRITTEN for OCR)
+
+Added in migration 0007 as INSERT … ON CONFLICT DO NOTHING alongside the
+`document_search_index` table.
+
+### Status: AGREED — implementation pending (Step 9c)
+
+---
+
+## D17 — Seven reconciliation rules for POST /analyse (2026-08-18)
+
+### Decision
+The `POST /analyse` endpoint (D15) runs seven deterministic reconciliation rules:
+
+| Rule | Key | Description |
+|------|-----|-------------|
+| R1 | AMOUNT_MATCH | Sum of dealer receipt amounts equals booking docket total |
+| R2 | UTR_SUFFIX_MATCH | RTGS reference on receipt is a suffix of the UTR in bank statement |
+| R3 | DATE_PROXIMITY | Payment date on receipt is within ±3 days of bank statement transaction date |
+| R4 | NAME_MATCH | Payee/payer name on receipt matches subject display name (fuzzy, ≥80% similarity) |
+| R5 | TOTAL_CHECK | All receipts for a subject sum to the expected booking total (±₹1 tolerance) |
+| R6 | DATE_SEQUENCE | Delivery order date is after the latest receipt date |
+| R7 | DUPLICATE_DETECTION | No two receipts for the same subject have identical amount + date + RTGS reference |
+
+**UTR suffix matching rule (R2):**
+Indian RTGS/NEFT UTR numbers (e.g. `KKBK0007395659`) often contain the
+last 6–9 digits of the dealer-facing RTGS reference (e.g. `395659`).
+The rule checks: `utr_number.endswith(rtgs_reference)` after stripping
+leading zeros from the receipt reference.
+
+### Status: AGREED — implementation pending (Step 9d)
+
+---
+
+## D18 — All documents scanned on upload regardless of type (2026-08-19)
+
+### Decision
+**Every uploaded document is sent to Azure Document Intelligence for OCR/field
+extraction, regardless of `physical_form_type` or `document_type_key`.**
+
+This supersedes the D4 rule that `ADDITIONAL` documents skip processing.
+
+### Rationale
+- The client needs extraction results even from documents originally classified
+  as supplementary/supporting (e.g. WhatsApp photos, miscellaneous receipts).
+- Eliminating the ADDITIONAL skip path simplifies the worker pipeline.
+- Azure Document Intelligence is cheap enough (~$0.01/page) that the marginal
+  cost of scanning "supporting" documents is acceptable.
+
+### What changes
+
+| Before (D4 rule) | After (D18 rule) |
+|---|---|
+| `ADDITIONAL` documents set `requires_processing = false` | All documents set `requires_processing = true` |
+| Worker skips ADDITIONAL documents | Worker processes every document |
+| `processing_status` for ADDITIONAL = PROCESSED immediately at upload | `processing_status` starts NOT_STARTED; worker drives it to PROCESSED |
+
+### What does NOT change
+- `physical_form_type` column still exists and is still snapshotted at upload
+- `document_type_key` is still resolved and snapshotted
+- D2 `ADDITIONAL` form type label is retained (it means "no extraction profile required",
+  not "skip OCR") — use `prebuilt-read` model for ADDITIONAL documents
+- D13 model routing table gains a new row: `ADDITIONAL → prebuilt-read`
+
+### Updated model routing table (D13 + D18)
+
+| Condition | Azure model |
+|-----------|-------------|
+| GOVT_ID (any) | `prebuilt-idDocument` |
+| PRINTABLE — bank_statement, loan_statement, customer_ledger | `prebuilt-bankStatement` |
+| PRINTABLE — salary_slip | `prebuilt-payStub` |
+| PRINTABLE — insurance_cover, utility_bill, booking_docket, dealer_receipt | `prebuilt-invoice` |
+| PRINTABLE — corporate_id, others | `prebuilt-layout` |
+| HANDWRITTEN (any) | `prebuilt-read` |
+| ADDITIONAL (any) | `prebuilt-read` |
+| upi_screenshot (any physical_form_type) | `prebuilt-read` |
+
+### Status: AGREED — 2026-08-19
+
