@@ -8,16 +8,17 @@ Lifespan: starts/stops the ProcessingWorker background task.
 from __future__ import annotations
 
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 
-import traceback
-
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from verigence.di.errors import ErrorCode, problem_response
 from verigence.di.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -76,7 +77,51 @@ def create_app() -> FastAPI:
         expose_headers=[CORRELATION_ID_HEADER],
     )
 
-    # ── Correlation ID middleware ────────────────────────────────────────────
+    # ── Layer 1: RequestValidationError → Problem INVALID_REQUEST ────────────
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        correlation_id = structlog.contextvars.get_contextvars().get(
+            "correlation_id", str(uuid.uuid4())
+        )
+        body = problem_response(
+            ErrorCode.INVALID_REQUEST,
+            detail=str(exc.errors()),
+            correlation_id=correlation_id,
+        )
+        return JSONResponse(
+            status_code=400,
+            content=body,
+            headers={CORRELATION_ID_HEADER: correlation_id},
+        )
+
+    # ── Layer 2: HTTPException → Problem (pass-through if already Problem) ───
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        correlation_id = structlog.contextvars.get_contextvars().get(
+            "correlation_id", str(uuid.uuid4())
+        )
+        # If detail is already a Problem dict (has a 'code' key), attach correlationId
+        if isinstance(exc.detail, dict) and "code" in exc.detail:
+            body = dict(exc.detail)
+            body.setdefault("correlationId", correlation_id)
+        else:
+            # Wrap plain string or unexpected dict in a canonical Problem body
+            body = problem_response(
+                ErrorCode.INTERNAL_ERROR,
+                detail=str(exc.detail),
+                correlation_id=correlation_id,
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=body,
+            headers={CORRELATION_ID_HEADER: correlation_id},
+        )
+
+    # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
@@ -93,17 +138,23 @@ def create_app() -> FastAPI:
         try:
             response: Response = await call_next(request)
         except Exception as exc:  # noqa: BLE001
-            correlation_id_val = structlog.contextvars.get_contextvars().get("correlation_id", "unknown")
+            # Layer 3 catch-all: exceptions that escaped both registered handlers.
+            # Must return Problem JSON — never text/plain.
             logger.error(
                 "unhandled_exception",
                 exc_type=type(exc).__name__,
                 exc_msg=str(exc),
                 traceback=traceback.format_exc(),
             )
+            body = problem_response(
+                ErrorCode.INTERNAL_ERROR,
+                detail=f"{type(exc).__name__}: {exc}",
+                correlation_id=correlation_id,
+            )
             return JSONResponse(
                 status_code=500,
-                content={"detail": {"code": "INTERNAL_ERROR", "title": str(exc), "type": type(exc).__name__}},
-                headers={CORRELATION_ID_HEADER: correlation_id_val},
+                content=body,
+                headers={CORRELATION_ID_HEADER: correlation_id},
             )
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
 

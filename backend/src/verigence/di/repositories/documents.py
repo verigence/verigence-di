@@ -71,7 +71,10 @@ async def create_document_receiving(
     source_device_id: str | None = None,
     captured_at: datetime | None = None,
     replaces_document_id: uuid.UUID | None = None,
-    document_type_hint_key: str | None = None,  # v2.2: persisted non-authoritative hint
+    document_type_hint_key: str | None = None,
+    physical_form_type: str = "ADDITIONAL",
+    requires_processing: bool = False,
+    document_type_id: uuid.UUID | None = None,
 ) -> dict:  # type: ignore[type-arg]
     """Insert a RECEIVING Document row and return its data dict."""
     from datetime import timedelta
@@ -87,7 +90,10 @@ async def create_document_receiving(
         text("""
             INSERT INTO docintel.documents (
                 tenant_id, document_id, subject_id,
+                document_type_id,
                 document_type_hint_key,
+                physical_form_type,
+                requires_processing,
                 active_retention_policy_id, retention_until_utc, retention_disposition,
                 source_channel, uploaded_by_actor_id, uploaded_by_actor_type,
                 source_device_id, captured_at,
@@ -99,7 +105,10 @@ async def create_document_receiving(
                 created_at_utc, updated_at_utc
             ) VALUES (
                 :tenant_id, :document_id, :subject_id,
+                :document_type_id,
                 :hint_key,
+                :physical_form_type,
+                :requires_processing,
                 :retention_policy_id, :retention_until, :retention_disposition,
                 :source_channel, :actor_id, :actor_type,
                 :device_id, :captured_at,
@@ -115,7 +124,10 @@ async def create_document_receiving(
             "tenant_id": tenant_id,
             "document_id": document_id,
             "subject_id": subject_id,
+            "document_type_id": document_type_id,
             "hint_key": document_type_hint_key,
+            "physical_form_type": physical_form_type,
+            "requires_processing": requires_processing,
             "retention_policy_id": retention_policy_id,
             "retention_until": retention_until,
             "retention_disposition": retention_disposition.value,

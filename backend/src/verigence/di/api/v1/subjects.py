@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
 from verigence.di.api.v1.schemas import (
     CreateSubjectRequest,
@@ -128,10 +128,8 @@ async def get_subject_endpoint(
         )
 
     if subject is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"type": "NOT_FOUND", "title": "Subject not found"},
-        )
+        from verigence.di.errors import ErrorCode, problem  # noqa: PLC0415
+        raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
 
     return SubjectResponse(
         tenantId=subject["tenant_id"],

@@ -81,12 +81,14 @@ async def tenant_session(tenant_id: str) -> AsyncGenerator[AsyncSession, None]:
     from verigence.di.repositories.tenants import (  # noqa: PLC0415
         provision_retention_policy,
         provision_tenant,
+        provision_tenant_document_types,
     )
     async with AsyncSessionFactory() as session:
         try:
             await set_tenant_context(session, tenant_id)
             await provision_tenant(session, tenant_id)
             await provision_retention_policy(session, tenant_id)
+            await provision_tenant_document_types(session, tenant_id)
             yield session
             await session.commit()
         except Exception:

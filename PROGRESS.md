@@ -1145,3 +1145,41 @@ Fields:
 }
 
 }
+
+## Session record — 2026-08-16 (Exception handling design + code fix)
+
+### DI_LLD_v2.2.md — exception handling design added ✅ DONE
+
+Four gaps documented and written into the design document:
+
+| Section updated | What was added |
+|---|---|
+| §4 Error/Problem contract | Complete Problem schema, 5-layer exception handling architecture (RequestValidationError handler, HTTPException handler, middleware catch-all, route handler rules, application layer rules) |
+| §5 REST API Service | `SET LOCAL app.tenant_id` constraint (no bind params — sanitise + interpolate directly); tenant auto-provisioning on every `tenant_session()` |
+| §5 Document Intake Service | Step 0: tenant_session() guarantees settings + retention policy exist; Step 9: typed IntakeError instead of bare ValueError |
+| §5 DocumentAIAdapter | `physical_form_type` parameter on `extract()` — GOVT_ID / PRINTED / HANDWRITTEN scanner routing |
+
+### Exception handling code fixes ✅ DONE
+
+**`backend/src/verigence/di/main.py`**
+- Added Layer 1: `app.exception_handler(RequestValidationError)` → Problem `INVALID_REQUEST` (HTTP 400)
+- Added Layer 2: `app.exception_handler(HTTPException)` → pass-through if already Problem dict; else wrap as `INTERNAL_ERROR`
+- Fixed Layer 3 (middleware catch-all): now calls `problem_response(ErrorCode.INTERNAL_ERROR, ...)` — was hand-rolling a non-conforming dict
+- Added imports: `HTTPException`, `RequestValidationError`, `problem_response`, `ErrorCode`
+
+**`backend/src/verigence/di/api/v1/documents.py`**
+- Replaced all 5 raw `HTTPException` with non-Problem dict detail with `raise problem(..., ErrorCode.*)`
+- Removed bare `ValueError` catch wrapping intake — intake errors now propagate as typed domain errors
+- Removed unused `HTTPException` import
+
+**`backend/src/verigence/di/api/v1/subjects.py`**
+- Replaced raw `HTTPException` with `raise problem(404, ..., ErrorCode.SUBJECT_NOT_FOUND)`
+- Removed unused `HTTPException` import
+
+**Test result after fixes:** `107 passed, 1 xfailed` — unchanged, all green.
+**Lint:** `ruff check` passes on all changed files.
+
+### What was NOT changed (correctly out of scope)
+- `auth/dependencies.py` — `_unauthorized()` and `_forbidden()` already return dicts with `code`, `status`, `retryable` keys. They are caught by the Layer 2 HTTPException handler which passes them through. ✅ Compliant.
+- All other route files (`verification.py`, `tenant_config.py`, `unassigned.py`, `entity_links.py`, `subject_matching.py`, `whatsapp_system.py`, `extraction_profiles.py`, `requirement_profiles.py`, `operations.py`) already use `raise problem(...)` exclusively. ✅ Compliant.
+

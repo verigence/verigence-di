@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
 from sqlalchemy import text
 
 from verigence.di.api.v1.schemas import (
@@ -93,38 +93,30 @@ async def upload_subject_document(
     try:
         channel = SourceChannel(sourceChannel)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "type": "VALIDATION_ERROR",
-                "title": f"Invalid sourceChannel: {sourceChannel!r}. Must be MOBILE, WEB, or API.",
-            },
+        raise problem(
+            400,
+            f"Invalid sourceChannel: {sourceChannel!r}. Must be MOBILE, WEB, or API.",
+            ErrorCode.INVALID_REQUEST,
         ) from exc
     if channel == SourceChannel.WHATSAPP:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"type": "VALIDATION_ERROR", "title": "WHATSAPP channel not accepted here"},
-        )
+        raise problem(400, "WHATSAPP channel not accepted on this endpoint",
+                      ErrorCode.INVALID_REQUEST)
 
     replaces_id: uuid.UUID | None = None
     if replacesDocumentId:
         try:
             replaces_id = uuid.UUID(replacesDocumentId)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"type": "VALIDATION_ERROR", "title": "Invalid replacesDocumentId UUID"},
-            ) from exc
+            raise problem(400, "Invalid replacesDocumentId: not a valid UUID",
+                          ErrorCode.INVALID_REQUEST) from exc
 
     captured_at_dt: datetime | None = None
     if capturedAt:
         try:
             captured_at_dt = datetime.fromisoformat(capturedAt)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"type": "VALIDATION_ERROR", "title": "Invalid capturedAt datetime format"},
-            ) from exc
+            raise problem(400, "Invalid capturedAt: must be ISO 8601 datetime",
+                          ErrorCode.INVALID_REQUEST) from exc
 
     # Get correlation_id from request state (set by middleware)
     ctx = structlog.contextvars.get_contextvars()
@@ -136,32 +128,23 @@ async def upload_subject_document(
         # Validate subject exists and belongs to this tenant
         exists = await subject_exists(session, tenant_id=actor.tenant_id, subject_id=subjectId)
         if not exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"type": "NOT_FOUND", "title": "Subject not found or inactive"},
-            )
+            raise problem(404, "Subject not found or inactive", ErrorCode.SUBJECT_NOT_FOUND)
 
-        try:
-            doc = await intake_document(
-                session=session,
-                storage=storage,
-                tenant_id=actor.tenant_id,
-                subject_id=subjectId,
-                source_channel=channel,
-                uploaded_by_actor_id=actor.actor_id,
-                uploaded_by_actor_type=actor.actor_type.value,
-                correlation_id=correlation_id,
-                upload=file,
-                document_type_key=documentTypeKey,
-                captured_at=captured_at_dt,
-                source_reference=sourceReference,
-                replaces_document_id=replaces_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={"type": "INTAKE_ERROR", "title": str(exc)},
-            ) from exc
+        doc = await intake_document(
+            session=session,
+            storage=storage,
+            tenant_id=actor.tenant_id,
+            subject_id=subjectId,
+            source_channel=channel,
+            uploaded_by_actor_id=actor.actor_id,
+            uploaded_by_actor_type=actor.actor_type.value,
+            correlation_id=correlation_id,
+            upload=file,
+            document_type_key=documentTypeKey,
+            captured_at=captured_at_dt,
+            source_reference=sourceReference,
+            replaces_document_id=replaces_id,
+        )
 
     return _doc_response(doc)
 
@@ -180,10 +163,7 @@ async def get_subject_documents(
     async with tenant_session(actor.tenant_id) as session:
         exists = await subject_exists(session, tenant_id=actor.tenant_id, subject_id=subjectId)
         if not exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"type": "NOT_FOUND", "title": "Subject not found"},
-            )
+            raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
         docs = await list_subject_documents(
             session, tenant_id=actor.tenant_id, subject_id=subjectId
         )
@@ -218,10 +198,7 @@ async def get_subject_document(
         )
 
     if doc is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"type": "NOT_FOUND", "title": "Document not found"},
-        )
+        raise problem(404, "Document not found", ErrorCode.SUBJECT_DOCUMENT_NOT_FOUND)
 
     return _doc_response(doc)
 
@@ -337,10 +314,21 @@ async def get_subject_document_content(
     async for chunk in await storage.get_stream(art_row[0]):
         chunks.append(chunk)
     data = b"".join(chunks)
-    headers = {}
+
+    # Build a safe filename from the R2 key (last path segment) for Content-Disposition
+    raw_key: str = art_row[0] or ""
+    filename = raw_key.split("/")[-1] if raw_key else f"{documentId}"
+
+    headers: dict[str, str] = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
     if art_row[2]:
         headers["X-Content-SHA256"] = art_row[2]
-    return Response(content=data, media_type=art_row[1] or "application/octet-stream", headers=headers)
+    return Response(
+        content=data,
+        media_type=art_row[1] or "application/octet-stream",
+        headers=headers,
+    )
 
 
 @router.get(

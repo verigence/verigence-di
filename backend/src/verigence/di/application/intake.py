@@ -39,14 +39,39 @@ from verigence.di.repositories.documents import (
     update_document_upload_complete,
 )
 from verigence.di.repositories.processing_jobs import create_initial_job
-from verigence.di.storage.adapter import StorageAdapter
+from verigence.di.storage.adapter import StorageAdapter, build_original_key
 
 logger = structlog.get_logger(__name__)
 
-# Allowed MIME types for now — these will come from Tenant config in a full impl
+# Allowed MIME types — kept in sync with _MIME_EXT in storage/adapter.py.
+# Full list so Office docs, CSV, ZIP are accepted and not rejected as CORRUPT.
 _DEFAULT_ALLOWED_MIME: frozenset[str] = frozenset({
-    "image/jpeg", "image/png", "image/webp", "image/tiff",
+    # Images
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/tiff",
+    "image/gif",
+    "image/bmp",
+    # PDF
     "application/pdf",
+    # Microsoft Office (modern)
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    # Microsoft Office (legacy)
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    # OpenDocument
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation",
+    # Text / CSV
+    "text/plain",
+    "text/csv",
+    # Archives
+    "application/zip",
 })
 _MAX_BYTES_DEFAULT = 30 * 1024 * 1024  # 30 MB default, overridden by Tenant config
 
@@ -101,10 +126,50 @@ async def intake_document(
     # ── Step 1: Fetch tenant retention policy ────────────────────────────────
     retention = await get_active_retention_policy(session, tenant_id=tenant_id)
     if retention is None:
-        # No active retention policy → cannot accept production uploads
         raise ValueError("Tenant has no active retention policy configured")
 
-    # ── Step 2: Create RECEIVING document row ────────────────────────────────
+    # ── Step 2: Resolve document type from tenant_document_types (D4) ────────
+    # If documentTypeKey is absent or unrecognised → ADDITIONAL / no processing.
+    from sqlalchemy import text
+    physical_form_type = "ADDITIONAL"
+    requires_processing = False
+    resolved_document_type_id = None
+
+    if document_type_key:
+        tdt_row = (
+            await session.execute(
+                text("""
+                    SELECT tdt.physical_form_type, tdt.requires_processing,
+                           dt.document_type_id
+                    FROM docintel.tenant_document_types tdt
+                    JOIN docintel.document_types dt
+                      ON dt.document_type_id = tdt.document_type_id
+                    WHERE tdt.tenant_id = :tid
+                      AND dt.document_type_key = :key
+                      AND tdt.is_active = true
+                    LIMIT 1
+                """),
+                {"tid": tenant_id, "key": document_type_key},
+            )
+        ).one_or_none()
+        if tdt_row:
+            physical_form_type = tdt_row[0]
+            requires_processing = tdt_row[1]
+            resolved_document_type_id = tdt_row[2]
+
+    # ── Step 3: Fetch subject display_name for path building (D5) ────────────
+    subject_row = (
+        await session.execute(
+            text("""
+                SELECT display_name FROM docintel.subjects
+                WHERE tenant_id = :tid AND subject_id = :sid
+            """),
+            {"tid": tenant_id, "sid": subject_id},
+        )
+    ).one_or_none()
+    subject_display_name: str | None = subject_row[0] if subject_row else None
+
+    # ── Step 4: Create RECEIVING document row ────────────────────────────────
     doc = await create_document_receiving(
         session,
         tenant_id=tenant_id,
@@ -121,25 +186,23 @@ async def intake_document(
         source_device_id=source_device_id,
         captured_at=captured_at,
         replaces_document_id=replaces_document_id,
-        document_type_hint_key=document_type_key,  # v2.2: persist caller hint
+        document_type_hint_key=document_type_key,
+        physical_form_type=physical_form_type,
+        requires_processing=requires_processing,
+        document_type_id=resolved_document_type_id,
     )
     document_id: uuid.UUID = doc["document_id"]
 
-    # ── Step 3: Fetch tenant storage key ─────────────────────────────────────
-    from sqlalchemy import text
-    row = (
-        await session.execute(
-            text("SELECT tenant_storage_key FROM docintel.tenant_settings WHERE tenant_id = :tid"),
-            {"tid": tenant_id},
-        )
-    ).one_or_none()
-    tenant_storage_key: str = str(row[0]) if row else str(uuid.uuid4())
-
-    # ── Step 4: Allocate ORIGINAL artifact ───────────────────────────────────
+    # ── Step 5: Build R2 object key (D5) ─────────────────────────────────────
     artifact_id = uuid.uuid4()
-    logical_key = (
-        f"tenants/{tenant_storage_key}/documents/{document_id}"
-        f"/original/{artifact_id}"
+    logical_key = build_original_key(
+        tenant_id=tenant_id,
+        subject_id=subject_id,
+        subject_display_name=subject_display_name,
+        document_id=document_id,
+        physical_form_type=physical_form_type,
+        original_filename=upload.filename,
+        detected_mime_type=upload.content_type,
     )
 
     # ── Step 5: Stream bytes to storage ──────────────────────────────────────
@@ -267,8 +330,9 @@ async def intake_document(
         upload_issue_detail=validator_result.upload_issue_detail,
     )
 
-    # ── Step 10: For FIT documents only — create processing job ───────────────
-    if validator_result.upload_status == UploadStatus.FIT:
+    # ── Step 10: For FIT documents — create processing job if required ────────
+    # requires_processing=False (ADDITIONAL) → skip Document AI entirely (D4)
+    if validator_result.upload_status == UploadStatus.FIT and requires_processing:
         await create_initial_job(
             session,
             tenant_id=tenant_id,

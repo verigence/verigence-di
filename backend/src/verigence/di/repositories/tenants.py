@@ -136,6 +136,44 @@ async def provision_retention_policy(
     return actual_id
 
 
+async def provision_tenant_document_types(
+    session: AsyncSession,
+    tenant_id: str,
+) -> None:
+    """Seed tenant_document_types from all ACTIVE global document_types.
+
+    Called once per tenant on first request. Subsequent calls are no-ops
+    (ON CONFLICT DO NOTHING). Tenant inherits all global document types
+    with their default physical_form_type (stored in document_types.category).
+
+    ADDITIONAL types always get requires_processing = false (D7).
+    """
+    now = datetime.now(UTC)
+    await session.execute(
+        text("""
+            INSERT INTO docintel.tenant_document_types
+                (tenant_id, document_type_id, physical_form_type,
+                 requires_processing, is_active, display_order,
+                 created_at_utc, updated_at_utc)
+            SELECT
+                :tenant_id,
+                dt.document_type_id,
+                COALESCE(dt.category, 'ADDITIONAL'),
+                CASE WHEN COALESCE(dt.category, 'ADDITIONAL') = 'ADDITIONAL'
+                     THEN false ELSE true END,
+                true,
+                100,
+                :now,
+                :now
+            FROM docintel.document_types dt
+            WHERE dt.owner_tenant_id IS NULL
+              AND dt.status = 'ACTIVE'
+            ON CONFLICT (tenant_id, document_type_id) DO NOTHING
+        """),
+        {"tenant_id": tenant_id, "now": now},
+    )
+
+
 async def provision_actor(
     session: AsyncSession,
     tenant_id: str,

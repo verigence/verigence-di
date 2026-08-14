@@ -1,21 +1,143 @@
 """storage/adapter.py — Provider-neutral StorageAdapter interface + R2/MinIO implementation.
 
 The domain and application layers only import StorageAdapter (the abstract base).
-The concrete implementation (R2StorageAdapter) is wired in via dependency injection
+The concrete implementation (S3StorageAdapter) is wired in via dependency injection
 from settings. No cloud provider SDK leaks into domain or API code.
 
-Logical key shapes (from DI_LLD_v2.1.md §3):
-  ORIGINAL: tenants/{tenant_storage_key}/documents/{document_id}/original/{artifact_id}
-  DERIVED:  tenants/{tenant_storage_key}/documents/{document_id}/derived/{artifact_id}
+Logical key shape (DI_DECISIONS.md D5):
+  {tenant_slug}/subjects/{subject_slug}-{subject_id_short}/
+    documents/{form_folder}/{doc_id_short}_{sanitised_filename}
+
+  form_folder = govt_id | printable | handwritten | additional
+
+Example:
+  acme-bank/subjects/john-smith-a3f2b1c0/documents/govt_id/d74194e2_passport.pdf
 """
 from __future__ import annotations
 
 import abc
 import io
+import re
+import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import IO, Any
 from uuid import UUID
+
+# ── R2 path helpers (D5) ──────────────────────────────────────────────────────
+
+_FORM_TYPE_FOLDER: dict[str, str] = {
+    "GOVT_ID":     "govt_id",
+    "PRINTABLE":   "printable",
+    "HANDWRITTEN": "handwritten",
+    "ADDITIONAL":  "additional",
+}
+
+# MIME type → file extension mapping.
+# Includes images, PDF, and all common Office / document formats.
+_MIME_EXT: dict[str, str] = {
+    # Images
+    "image/jpeg":                                                          "jpg",
+    "image/png":                                                           "png",
+    "image/tiff":                                                          "tif",
+    "image/webp":                                                          "webp",
+    "image/gif":                                                           "gif",
+    "image/bmp":                                                           "bmp",
+    # PDF
+    "application/pdf":                                                     "pdf",
+    # Microsoft Office (modern)
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":   "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         "xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    # Microsoft Office (legacy)
+    "application/msword":                                                  "doc",
+    "application/vnd.ms-excel":                                            "xls",
+    "application/vnd.ms-powerpoint":                                       "ppt",
+    # OpenDocument
+    "application/vnd.oasis.opendocument.text":                             "odt",
+    "application/vnd.oasis.opendocument.spreadsheet":                      "ods",
+    "application/vnd.oasis.opendocument.presentation":                     "odp",
+    # Text / CSV
+    "text/plain":                                                          "txt",
+    "text/csv":                                                            "csv",
+    # Archives (for multi-page scans)
+    "application/zip":                                                     "zip",
+}
+
+
+def _slugify(value: str, max_len: int) -> str:
+    """Convert an arbitrary string to a lowercase URL-safe slug."""
+    value = unicodedata.normalize("NFKD", value)
+    value = value.encode("ascii", "ignore").decode("ascii")
+    value = value.lower().strip()
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value[:max_len] or "unknown"
+
+
+def _sanitise_filename(
+    filename: str | None,
+    fallback_stem: str,
+    mime_type: str | None,
+) -> str:
+    """Return a safe, extension-bearing filename for use in R2 keys.
+
+    Rules (D5):
+    - Strip directory separators
+    - Spaces → underscores
+    - Only alphanumeric, dot, underscore, hyphen allowed
+    - Max 80 chars total
+    - If filename is absent or empty, fall back to '{fallback_stem}.{ext_from_mime}'
+    """
+    if filename:
+        name = filename.replace("\\", "/").split("/")[-1]  # strip directory
+        name = name.replace(" ", "_")
+        name = re.sub(r"[^A-Za-z0-9._\-]", "", name)
+        name = name[:80]
+        if name:
+            return name
+
+    ext = _MIME_EXT.get(mime_type or "", "bin")
+    return f"{fallback_stem}.{ext}"
+
+
+def build_original_key(
+    *,
+    tenant_id: str,
+    subject_id: UUID,
+    subject_display_name: str | None,
+    document_id: UUID,
+    physical_form_type: str,
+    original_filename: str | None,
+    detected_mime_type: str | None = None,
+) -> str:
+    """Build the R2 object key for an ORIGINAL document artifact.
+
+    Format (DI_DECISIONS.md D5):
+      {tenant_slug}/subjects/{subject_slug}-{subject_id_short}/
+        documents/{form_folder}/{doc_id_short}_{sanitised_filename}
+    """
+    tenant_slug      = _slugify(tenant_id, 40)
+    subject_slug     = _slugify(subject_display_name or "unknown", 30)
+    subject_id_short = str(subject_id).replace("-", "")[:8]
+    doc_id_short     = str(document_id).replace("-", "")[:8]
+    form_folder      = _FORM_TYPE_FOLDER.get(physical_form_type, "additional")
+
+    safe_filename = _sanitise_filename(
+        original_filename,
+        fallback_stem=f"{doc_id_short}_{form_folder}",
+        mime_type=detected_mime_type,
+    )
+
+    # Always prefix with doc_id_short so filename is unique and DB-correlatable
+    if not safe_filename.startswith(doc_id_short):
+        safe_filename = f"{doc_id_short}_{safe_filename}"
+
+    return (
+        f"{tenant_slug}"
+        f"/subjects/{subject_slug}-{subject_id_short}"
+        f"/documents/{form_folder}"
+        f"/{safe_filename}"
+    )
 
 
 @dataclass(frozen=True)
@@ -54,29 +176,6 @@ class StorageAdapter(abc.ABC):
     @abc.abstractmethod
     async def delete(self, logical_key: str) -> None:
         """Delete object — only callable under retention authorization."""
-
-    # ── Key construction helpers ──────────────────────────────────────────────
-    @staticmethod
-    def original_key(
-        tenant_storage_key: UUID,
-        document_id: UUID,
-        artifact_id: UUID,
-    ) -> str:
-        return (
-            f"tenants/{tenant_storage_key}/documents/{document_id}"
-            f"/original/{artifact_id}"
-        )
-
-    @staticmethod
-    def derived_key(
-        tenant_storage_key: UUID,
-        document_id: UUID,
-        artifact_id: UUID,
-    ) -> str:
-        return (
-            f"tenants/{tenant_storage_key}/documents/{document_id}"
-            f"/derived/{artifact_id}"
-        )
 
 
 # ── R2 / MinIO S3-compatible implementation ───────────────────────────────────

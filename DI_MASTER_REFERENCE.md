@@ -18,10 +18,11 @@
 > All design decisions are locked at Baseline 2.2 unless a new baseline is explicitly agreed and this file is updated. Do not infer design intent from older versioned files (v2.0, v2.1).
 
 **Reading order for a new session:**
-1. `DI_MASTER_REFERENCE.md` — this file (document map + step status)
-2. `DI_DESIGN_SUMMARY.md` — 5-minute visual overview (diagrams, lifecycle, stack)
-3. `PROGRESS.md` — current step detail and blockers
-4. Relevant spec file from §2 only if implementing that specific component
+1. `DI_DECISIONS.md` — **READ THIS FIRST** — every locked design decision agreed in conversation
+2. `DI_MASTER_REFERENCE.md` — this file (document map + step status)
+3. `DI_DESIGN_SUMMARY.md` — 5-minute visual overview (diagrams, lifecycle, stack)
+4. `PROGRESS.md` — current step detail and blockers
+5. Relevant spec file from §2 only if implementing that specific component
 
 ---
 

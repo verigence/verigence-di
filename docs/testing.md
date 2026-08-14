@@ -242,22 +242,51 @@ BASE, TENANT = os.environ["BASE"], os.environ["TENANT"]
 import httpx
 from jwt_helper import mint_jwt
 
+# Minimal but structurally valid single-page PDF (pypdf parses this without error)
+VALID_PDF = (
+    b"%PDF-1.4\n"
+    b"1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n"
+    b"2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n"
+    b"3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>\nendobj\n"
+    b"xref\n0 4\n"
+    b"0000000000 65535 f \n"
+    b"0000000009 00000 n \n"
+    b"0000000058 00000 n \n"
+    b"0000000115 00000 n \n"
+    b"trailer\n<</Size 4 /Root 1 0 R>>\n"
+    b"startxref\n190\n%%EOF\n"
+)
+
 def tok():
     return mint_jwt(tenant_id=TENANT, actor_id="actor",
                     roles=["TENANT_ADMIN"], exp_seconds=120)
 
 with httpx.Client(base_url=BASE, timeout=30) as c:
-    print(c.get("/health/live").json())
+    # 1. Health
+    print("health:", c.get("/health/live").json())
+
+    # 2. Create subject
     r = c.post(f"/v1/tenants/{TENANT}/subjects",
                headers={"Authorization": f"Bearer {tok()}"},
-               json={"externalRef":"S1","displayName":"Test","subjectType":"PERSON"})
+               json={"externalRef":"S1","displayName":"Smoke Test Person","subjectType":"PERSON"})
+    print("create subject:", r.status_code, r.json())
     sid = r.json()["subjectId"]
-    print("subject:", sid)
+
+    # 3. Upload valid PDF with documentTypeKey=passport
     r = c.post(f"/v1/tenants/{TENANT}/subjects/{sid}/documents",
                headers={"Authorization": f"Bearer {tok()}"},
-               data={"sourceChannel":"API","mimeType":"application/pdf"},
-               files={"file":("t.pdf", b"%PDF-1.4", "application/pdf")})
-    print("upload:", r.status_code, r.json().get("uploadStatus"), r.json().get("documentId"))
+               data={"sourceChannel":"API","documentTypeKey":"passport"},
+               files={"file":("passport.pdf", VALID_PDF, "application/pdf")})
+    print("upload:", r.status_code, r.json())
+    doc = r.json()
+    did = doc.get("documentId")
+    print(f"  uploadStatus={doc.get('uploadStatus')}  physicalFormType={doc.get('physicalFormType')}")
+
+    # 4. Download content — verify Content-Disposition header present
+    r = c.get(f"/v1/tenants/{TENANT}/subjects/{sid}/documents/{did}/content",
+              headers={"Authorization": f"Bearer {tok()}"})
+    print("download:", r.status_code, "Content-Disposition:", r.headers.get("content-disposition"))
+    print("  bytes received:", len(r.content))
 EOF
 ```
 
