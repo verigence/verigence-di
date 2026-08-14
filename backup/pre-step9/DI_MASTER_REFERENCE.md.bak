@@ -139,7 +139,7 @@ The original list had **4 gaps** discovered during validation against the design
 | **6** | Document Intake use case + Subject/Document REST endpoints | LLD §Document Intake Service; OAS: `createSubject`, `listSubjects`, `getSubject`, `uploadSubjectDocument`, `getSubjectDocuments`, `getSubjectDocument` | ✅ DONE |
 | **7** | Quality rules + Upload Validator wired into intake | LLD §Upload Validator / Quality Service | ✅ DONE |
 | **8** | Normalization + Validation rules (`rules/` package) | LLD §Processing Worker steps 11–12 | ✅ DONE |
-| **9** | Gemini 2.5 Flash adapter + Document Schema Registry (D19–D23) | LLD §DocumentAIAdapter | ✅ DONE — `gemini_adapter.py` + `schemas/` package; set `DI_DOCAI_GEMINI_API_KEY` + `DI_DOCAI_MOCK=false` to activate |
+| **9** | Azure Document Intelligence adapter (D13 + D18) | LLD §DocumentAIAdapter | ❌ NOT STARTED — needs Azure resource endpoint + key |
 | **10a** | Processing Worker — full job claim loop + classification + extraction + scoring | LLD §Processing Worker (17 steps) + `DI_CLASSIFICATION_v2.2.md` | ✅ DONE |
 | **10b** | EOD Retry Scheduler | LLD §EOD Retry Scheduler | ✅ DONE |
 | **11** | All remaining 48 REST API operations (see breakdown below) | `DI_OPENAPI_v2.2.yaml` — 54 total, 54 done | ✅ DONE |
@@ -216,7 +216,8 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | `DI_CLERK_PUBLISHABLE_KEY` | `pk_test_mock` | ❌ not set | ❌ not set |
 | `DI_CLERK_SECRET_KEY` | `sk_test_mock` | ❌ not set | ❌ not set |
 | `DI_DOCAI_MOCK` | `true` | `true` | `false` |
-| `DI_DOCAI_GEMINI_API_KEY` | N/A (mock) | N/A (mock) | ❌ not set |
+| `DI_DOCAI_AZURE_ENDPOINT` | N/A (mock) | N/A (mock) | ❌ not set |
+| `DI_DOCAI_AZURE_KEY` | N/A (mock) | N/A (mock) | ❌ not set |
 | `DI_SENTRY_DSN` | empty | empty | ❌ not set |
 | `DI_ENV` | `local` | `dev` | `production` |
 
@@ -241,10 +242,9 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | Audit chain key | `(tenant_id, entity_type, entity_id)` — entity-scoped, not tenant-wide |
 | WhatsApp source channel | `WHATSAPP` — subject_id nullable until assigned |
 | Mock token format (dev/CI) | `mock.<tenant_id>.<actor_id>.<ROLE>[.<ROLE>...]` |
-| AI/OCR provider | Gemini 2.5 Flash — `gemini-2.5-flash` (D19 — supersedes D13 Azure) |
-| Scan all documents | Every document processed on upload; no ADDITIONAL skip (D18 — supersedes D4) |
-| Schema registry | `document_ai/schemas/` — one file per document type (D20) |
-| New document types | `booking_form`, `dealer_receipt`, `bank_statement_extract`, `upi_transaction`, `delivery_order_cover`, `upi_screenshot` — D16+D23 |
+| AI/OCR provider | Azure Document Intelligence (D13 — replaces Google Doc AI) |
+| Scan all documents | Every document processed by Azure DI regardless of physical_form_type (D18 — supersedes D4 ADDITIONAL skip) |
+| ADDITIONAL model routing | `prebuilt-read` — OCR only, no structured extraction profile required (D18) |
 
 ---
 
@@ -273,10 +273,10 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current: Step 9c — Worker writes to document_search_index** (next after migration 0007 applied to Neon)
-Step 9 complete: Gemini 2.5 Flash adapter + Document Schema Registry implemented (D19–D23).
-Migration 0007 ready — apply to Neon: `alembic upgrade head`.
-Next: Step 9c (worker upserts to document_search_index after CONFIRMED), then Step 9d (POST /analyse R1–R5).
+**Current: Step 9 — Azure Document Intelligence adapter** ❌ NOT STARTED
+(Decisions D8–D18 all locked. Azure account + resource creation pending — manual step.)
+D18 locked: all documents scanned on upload regardless of physical_form_type.
+D14–D17 locked: document_search_index, POST /analyse, dealer_receipt/upi_screenshot, R1–R7 rules.
 
 ---
 
@@ -286,7 +286,7 @@ Next: Step 9c (worker upserts to document_search_index after CONFIRMED), then St
 |---|---|
 | di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ⚠️ Migration 0007 ready, not yet applied — run `alembic upgrade head` |
+| Neon PostgreSQL | ✅ All 6 migrations at head (0001–0006) — verified 2026-08-18 |
 | Cloudflare R2 | ✅ Working — slug-based path with 4 form-type folders |
 | Security module JWKS | ✅ Using GitHub raw test JWKS |
 | CI pipeline | ✅ Green — `108 passed, 0 xfailed` |

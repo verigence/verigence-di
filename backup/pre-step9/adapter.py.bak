@@ -88,8 +88,6 @@ class DocumentAIAdapter(abc.ABC):
         mime_type: str,
         fields: list[ExtractionField],
         correlation_id: str | None = None,
-        physical_form_type: str = "PRINTABLE",   # D22 — routing hint for adapter
-        document_type_key: str | None = None,    # D22 — schema registry lookup key
     ) -> AIInvocationResult:
         """Extract configured fields. Returns FieldResult list."""
 
@@ -137,8 +135,6 @@ class MockDocumentAIAdapter(DocumentAIAdapter):
         mime_type: str,
         fields: list[ExtractionField],
         correlation_id: str | None = None,
-        physical_form_type: str = "PRINTABLE",   # D22 — accepted, ignored by mock
-        document_type_key: str | None = None,    # D22 — accepted, ignored by mock
     ) -> AIInvocationResult:
         import uuid
         results = [
@@ -167,12 +163,16 @@ def get_document_ai_adapter() -> DocumentAIAdapter:
     """FastAPI / worker dependency — returns configured adapter.
 
     DI_DOCAI_MOCK=true  → MockDocumentAIAdapter (local dev + CI)
-    DI_DOCAI_MOCK=false → GeminiDocumentAIAdapter (production — D19)
+    DI_DOCAI_MOCK=false → AzureDocumentAIAdapter (production — Step 9)
     """
     from verigence.di.settings import get_settings
     s = get_settings()
     if s.docai_mock:
         return MockDocumentAIAdapter()
-    # Gemini 2.5 Flash adapter (D19) — requires DI_DOCAI_GEMINI_API_KEY to be set.
-    from verigence.di.document_ai.gemini_adapter import GeminiDocumentAIAdapter  # noqa: PLC0415
-    return GeminiDocumentAIAdapter(api_key=s.docai_gemini_api_key)
+    # Azure Document Intelligence adapter — implemented in Step 9
+    # Requires DI_DOCAI_AZURE_ENDPOINT and DI_DOCAI_AZURE_KEY to be set.
+    from verigence.di.document_ai.azure_adapter import AzureDocumentAIAdapter  # noqa: PLC0415
+    return AzureDocumentAIAdapter(
+        endpoint=s.docai_azure_endpoint,
+        api_key=s.docai_azure_key,
+    )

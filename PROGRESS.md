@@ -1661,3 +1661,99 @@ written to `DI_DECISIONS.md` are now locked:
 
 ---
 
+## Session record — 2026-08-19 (Step 9 — Gemini 2.5 Flash + Schema Registry)
+
+### Step 9 — Gemini 2.5 Flash adapter + Document Schema Registry ✅ DONE
+
+#### What was accomplished
+
+Implemented Step 9 in full using Gemini 2.5 Flash as the AI/OCR provider.
+Decisions D19–D23 locked and implemented.
+
+#### Design decisions locked (D19–D23)
+
+| Decision | Summary |
+|---|---|
+| D19 | Gemini 2.5 Flash replaces Azure Document Intelligence (D13 superseded) |
+| D20 | Document Schema Registry — `document_ai/schemas/` package, one file per doc type |
+| D21 | `GeminiDocumentAIAdapter` — classify() pass-through, extract() schema-driven |
+| D22 | `extract()` signature extended with `physical_form_type` + `document_type_key` kwargs |
+| D23 | Migration 0007 — pg_trgm, document_search_index, 6 new seed types, requires_processing flip |
+
+#### Files created (new)
+
+| File | Purpose |
+|---|---|
+| `backend/src/verigence/di/document_ai/gemini_adapter.py` | Production Gemini 2.5 Flash adapter |
+| `backend/src/verigence/di/document_ai/schemas/__init__.py` | SCHEMA_REGISTRY + get_schema() |
+| `backend/src/verigence/di/document_ai/schemas/base.py` | FieldSpec + SchemaDefinition dataclasses |
+| `backend/src/verigence/di/document_ai/schemas/booking_form.py` | Booking Form — 23 fields |
+| `backend/src/verigence/di/document_ai/schemas/dealer_receipt.py` | Dealer Receipt — 15 fields |
+| `backend/src/verigence/di/document_ai/schemas/bank_statement.py` | Bank Statement Extract — 9 fields |
+| `backend/src/verigence/di/document_ai/schemas/upi_transaction.py` | UPI Transaction — 11 fields |
+| `backend/src/verigence/di/document_ai/schemas/upi_screenshot.py` | UPI Screenshot — 11 fields |
+| `backend/src/verigence/di/document_ai/schemas/delivery_order.py` | Delivery Order Cover — 7 fields |
+| `backend/src/verigence/di/document_ai/schemas/insurance_cover.py` | Insurance Cover Note — 11 fields |
+| `backend/src/verigence/di/document_ai/schemas/_fallback.py` | Fallback schema for unregistered types |
+| `backend/alembic/versions/0007_gemini_schema_registry.py` | Migration 0007 |
+| `DI_GEMINI_DESIGN_v2.3.md` | Full design amendment document |
+| `plans/gemini-step9-plan.md` | Implementation plan |
+
+#### Files changed (edited)
+
+| File | Change |
+|---|---|
+| `backend/pyproject.toml` | `azure-ai-documentintelligence` → `google-generativeai>=0.8.0` |
+| `backend/src/verigence/di/settings.py` | `docai_azure_*` → `docai_gemini_api_key`; safety check updated |
+| `backend/src/verigence/di/document_ai/adapter.py` | `extract()` signature + `get_document_ai_adapter()` points to Gemini |
+| `backend/src/verigence/di/workers/job_runner.py` | Step 10: fetches `physical_form_type`, passes both kwargs to `extract()` |
+| `DI_DECISIONS.md` | D19–D23 added |
+| `SECRETS_CHECKLIST.md` | Azure vars → `DI_DOCAI_GEMINI_API_KEY` |
+| `DI_MASTER_REFERENCE.md` | Step 9 → ✅ DONE, provider updated, next step updated |
+| `DI_DESIGN_SUMMARY.md` | Technology stack updated |
+
+#### Files renamed (preserved)
+
+| From | To |
+|---|---|
+| `document_ai/azure_adapter.py` | `document_ai/_azure_adapter_archived.py` |
+
+#### Backups
+
+All modified files backed up to `backup/pre-step9/` before changes.
+
+#### Validation
+
+- `python3 -m compileall -q src tests` → clean
+- Schema registry: all 7 schemas import and return correct fields
+- `MockDocumentAIAdapter.extract()` with new kwargs → unchanged behaviour confirmed
+- `Settings.docai_gemini_api_key` present, no Azure fields
+- `GeminiDocumentAIAdapter` imports cleanly
+- Full test suite: Docker not running locally; all errors are testcontainer Docker dependency — expected pass in CI
+
+#### Current infrastructure state
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ⚠️ Migration 0007 ready — NOT YET APPLIED — run `alembic upgrade head` |
+| Cloudflare R2 | ✅ Working |
+| Security module JWKS | ✅ GitHub raw test JWKS |
+| CI pipeline | Push pending — will trigger Railway deploy |
+
+#### Immediate next actions (in order)
+
+1. **Get Gemini API key** → https://aistudio.google.com/app/apikey → Create API key
+2. **Set Railway env vars** on BOTH di-api and di-worker:
+   - `DI_DOCAI_GEMINI_API_KEY` = your key
+   - `DI_DOCAI_MOCK` = `false`
+3. **Apply migration 0007** → `cd verigence-di/backend && alembic upgrade head`
+   (against Neon — requires `DI_DATABASE_URL` set locally)
+4. **Push to Railway** → triggers auto-deploy on `dev` branch
+5. **Smoke test** → upload a booking form or dealer receipt, verify document reaches CONFIRMED with extracted fields
+6. **Step 9c** → worker writes to `document_search_index` after CONFIRMED
+7. **Step 9d** → `POST /analyse` endpoint (R1–R5 reconciliation rules)
+
+---
+

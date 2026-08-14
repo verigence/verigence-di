@@ -353,7 +353,7 @@ Authorization checks permissions[] — never role name strings
 | Database | PostgreSQL 16 · `docintel` schema · Row-Level Security |
 | Object storage | Cloudflare R2 (prod) · MinIO (local) · S3-compatible via aioboto3 |
 | Auth | Security module (OIDC/JWT) — provider-neutral; only canonical JWT claims consumed |
-| AI / OCR | Gemini 2.5 Flash (D19) · all documents scanned on upload (D18) · schema registry per doc type (D20) · mock in dev/CI |
+| AI / OCR | Azure Document Intelligence (D13) · all documents scanned on upload (D18) · `prebuilt-read` for ADDITIONAL · mock in dev/CI |
 | Scheduling | APScheduler (in-process, no external queue in Phase 1) |
 | Operator UI | React 18 · TypeScript · Vite PWA · TanStack Query · Tailwind CSS |
 | Hosting | Railway (API + Worker) · Cloudflare Pages (ops-ui) · Neon (PostgreSQL) |

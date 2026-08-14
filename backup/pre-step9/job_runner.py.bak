@@ -348,12 +348,6 @@ async def _execute_steps(
         for pf in profile_fields
     ]
 
-    # D22: fetch physical_form_type for the accepted document type
-    accepted_document_type_key: str = accepted["document_type_key"]
-    physical_form_type_for_extract = await _get_physical_form_type(
-        session, tenant_id, document_type_id,
-    )
-
     extract_invocation_id = uuid.uuid4()
     await _insert_invocation(
         session, tenant_id, extract_invocation_id, processing_run_id,
@@ -366,8 +360,6 @@ async def _execute_steps(
             mime_type=mime_type,
             fields=extract_fields,
             correlation_id=correlation_id,
-            physical_form_type=physical_form_type_for_extract,
-            document_type_key=accepted_document_type_key,
         )
     except Exception as exc:
         await _update_invocation(session, tenant_id, extract_invocation_id,
@@ -843,32 +835,6 @@ async def _load_profile_fields(
         )
     ).mappings().all()
     return [dict(r) for r in rows]
-
-
-async def _get_physical_form_type(
-    session: AsyncSession,
-    tenant_id: str,
-    document_type_id: uuid.UUID,
-) -> str:
-    """Fetch physical_form_type from tenant_document_types for the accepted type.
-
-    D22: passed to ai_adapter.extract() for schema registry routing.
-    Falls back to 'PRINTABLE' if the row is not found.
-    """
-    row = (
-        await session.execute(
-            text("""
-                SELECT physical_form_type
-                FROM docintel.tenant_document_types
-                WHERE tenant_id = :tid
-                  AND document_type_id = :dtid
-            """),
-            {"tid": tenant_id, "dtid": document_type_id},
-        )
-    ).one_or_none()
-    return row[0] if row else "PRINTABLE"
-
-
 
 
 def _build_scored_fields(
