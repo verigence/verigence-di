@@ -63,19 +63,25 @@ Columns + constraints + indexes. Three bugs in one function because this was ski
 
 ## Current active step
 
-**Step 9 — Google Document AI adapter — ❌ NOT STARTED**
+**Step 9 — Azure Document Intelligence adapter — ❌ NOT STARTED**
 
-Design agreed, GCP setup pending (manual action required).
-See session record 2026-08-17 for full step plan.
+Provider chosen: Azure Document Intelligence (D13). Azure account + resource creation pending (manual).
+See session record 2026-08-18 for full implementation plan.
 
-**Completed this session (2026-08-17):**
-- Document type master catalogue + tenant_document_types design (DI_DECISIONS.md D1–D7)
-- Migration 0005: tenant_document_types table, 15 global seed types, physical_form_type + requires_processing on documents
-- New R2 path: slug-based with 4 form-type folders
-- Three live bugs fixed: upload CORRUPT, download 500, missing Content-Disposition
-- End-to-end verified: real PDF (INV1834589_GOYAL_AMIT_HCPJ73.pdf) uploaded and downloaded correctly
+**Completed this session (2026-08-18):**
+- Design decisions D8–D13 locked in DI_DECISIONS.md
+- API contract redesign: universal `{errorCode, errorMessage, data}` envelope (D8)
+- Upload request simplified: `file + documentTypeKey` only — sourceChannel removed (D9)
+- Upload response: `ACCEPTED/REJECTED` + `processingStatus` (D9)
+- `source_channel` made nullable on documents — migration 0006 applied to Neon (D10)
+- GET document response slimmed to 7 public fields + documentTypeKey join (D11)
+- New `GET /document-types` summary endpoint (D12)
+- Azure Document Intelligence chosen as OCR/AI provider (D13)
+- All design documents (v2.2 active + superseded archive) committed to `design/` folder
+- 108 tests passing, lint clean
 
-**Next: Step 9 — Google Document AI adapter** (pending GCP project + processor creation)
+**Next: Step 9 — Azure Document Intelligence adapter**
+Manual prerequisite: Create Azure account → Document Intelligence resource → get endpoint + key
 
 ---
 
@@ -91,10 +97,10 @@ See session record 2026-08-17 for full step plan.
 | 6 | Document Intake + Subject/Document REST endpoints | ✅ | ✅ | ✅ DONE |
 | 7 | Quality rules + Upload Validator wired into intake | ✅ | ✅ | ✅ DONE |
 | 8 | Normalization + Validation rules (`rules/` package) | ✅ | ✅ | ✅ DONE |
-| 9 | Real Google Document AI adapter | ❌ mock only | — | ❌ NOT STARTED — GCP setup required |
+| 9 | Azure Document Intelligence adapter | ❌ mock only | — | ❌ NOT STARTED — Azure resource creation required |
 | 10a | Processing Worker (job claim loop) | ✅ | ✅ | ✅ DONE |
 | 10b | EOD Retry Scheduler | ✅ | ✅ | ✅ DONE |
-| 11 | All remaining 48 REST API operations | ✅ | ✅ | ✅ DONE |
+| 11 | All remaining REST API operations | ✅ | ✅ | ✅ DONE |
 | 12 | React PWA ops-ui | ❌ README only | — | ❌ NOT STARTED |
 | 13 | Railway + Cloudflare Pages + CI/CD | ✅ | ✅ | ✅ DONE — both services live on Railway |
 | 14 | WhatsApp adapter (Phase 2) | ❌ empty | — | ❌ NOT STARTED |
@@ -1401,4 +1407,142 @@ R2 path             : amit-goyal-test/subjects/amit-goyal-25eeda86/documents/pri
 **Processors needed:**
 - Form Parser — for PRINTABLE + HANDWRITTEN
 - Identity Document Parser — for GOVT_ID (passport, Aadhaar, PAN, driving licence, voter ID)
+
+
+---
+
+## Session record — 2026-08-18
+
+### Design documents added to git ✅
+
+All v2.2 design documents were living in the workspace root (`/IDBP/`) outside git.
+Now committed to `verigence-di/design/` with an index README.
+
+**Active documents in `design/`:**
+- `DI_ARCHITECTURE_v2.2.md`, `DI_LLD_v2.2.md`, `DI_DATA_MODEL_v2.2.md`
+- `DI_POSTGRESQL_SCHEMA_v2.2.sql`, `DI_OPENAPI_v2.2.yaml`
+- `DI_SECURITY_RBAC_v2.2.md`, `DI_RBAC_v2.2.yaml`
+- `DI_ERROR_CATALOG_v2.2.md`, `DI_ERROR_CATALOG_v2.2.yaml`
+- `DI_CLASSIFICATION_v2.2.md`, `DI_AUDIT_MODEL_v2.2.md`
+- `DI_BASELINE_AUDIT_REPORT_v2.2.md`, `BASELINE_MANIFEST.md`, `CHANGED_FILES_v2.2.md`
+- `design/README.md` — full index + reading order
+
+**Superseded documents in `design/archive/`:**
+- v2.0 and v2.1 versions of all docs
+- `design/archive/README.md` — supersession table
+
+`DI_MASTER_REFERENCE.md` and `DI_DESIGN_SUMMARY.md` updated to point at `design/` folder.
+
+---
+
+### API contract redesign ✅ (D8–D12)
+
+| Decision | What changed |
+|---|---|
+| D8 | Universal `{errorCode, errorMessage, data}` envelope on all endpoints |
+| D9 | Upload: `file + documentTypeKey` only. Response: `ACCEPTED/REJECTED + processingStatus` |
+| D10 | `source_channel` nullable — migration 0006 applied. REST API stores NULL. |
+| D11 | GET document responses slimmed to 7 public fields. Internal fields stay in DB. |
+| D12 | New `GET /document-types` endpoint — count per type, FIT uploads only |
+
+**Error code catalogue:**
+
+| errorCode | Meaning | HTTP |
+|---|---|---|
+| 000 | Success | 200/201 |
+| E001 | Quality check failed | 200 |
+| E002 | File corrupt | 200 |
+| E003 | Storage error (retryable) | 500 |
+| E004 | Subject not found | 404 |
+| E005 | Document not found | 404 |
+| E006 | Unsupported file type | 400 |
+| E007 | File too large | 400 |
+| E008 | Document not yet confirmed | 409 |
+| E009 | Unauthorised | 401 |
+| E010 | Forbidden | 403 |
+
+**Files changed:**
+- `api/v1/schemas.py` — `ApiResponse[T]`, `UploadData`, `DocumentData`, `DocumentListData`, `DocumentTypeSummaryData`
+- `api/v1/documents.py` — all endpoints use envelope; new `/document-types` endpoint; sourceChannel removed
+- `application/intake.py` — `source_channel` param removed; `None` passed to DB
+- `repositories/documents.py` — `source_channel` optional; `_row_to_dict` slimmed; queries joined to `document_types`; `list_document_type_counts()` added
+- `tests/test_intake_quality.py` — `source_channel` removed from all calls
+- `pyproject.toml` — `UP046` added to ruff ignore list
+
+---
+
+### OCR/AI provider decision ✅ (D13)
+
+**Azure Document Intelligence** chosen over Google Document AI.
+
+Rationale:
+- Has prebuilt models for all document types in the catalogue
+- `prebuilt-bankStatement` returns structured `transactions[]` array (critical for bank statements)
+- `prebuilt-read` is best-in-class for freeform multi-style handwriting
+- 6x cheaper than Google at target volume (~12,000 docs/month → ~$225/month)
+- Single vendor (one Azure subscription, one billing account)
+
+Model routing by physical_form_type:
+- GOVT_ID → `prebuilt-idDocument`
+- PRINTABLE (bank/loan/ledger) → `prebuilt-bankStatement`
+- PRINTABLE (salary_slip) → `prebuilt-payStub`
+- PRINTABLE (insurance/utility/booking) → `prebuilt-invoice`
+- PRINTABLE (other) → `prebuilt-layout`
+- HANDWRITTEN → `prebuilt-read`
+
+Classification: pass-through — hint key used as accepted type (no AI classifier in Phase 1).
+
+`google-cloud-documentai` dependency to be replaced with `azure-ai-documentintelligence>=1.0.0`.
+
+---
+
+### Migration 0006 ✅ applied to Neon
+
+`documents.source_channel` is now nullable. All 6 migrations at head.
+
+---
+
+### Commits this session
+
+| Hash | Message |
+|---|---|
+| `2aa83ee` | feat: API contract redesign D8–D12 |
+| `69ef2db` | docs: migration 0006 applied to Neon |
+| `bb4726e` | docs: add design/ folder — all v2.2 design docs now in git |
+
+---
+
+### Current infrastructure state
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` — commit `69ef2db` (new API contract deploys on next push) |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ All 6 migrations at head (0001–0006) — verified 2026-08-18 |
+| Cloudflare R2 | ✅ Working |
+| Security module JWKS | ✅ GitHub raw test JWKS |
+| CI pipeline | ✅ Green — 108 passed, 0 xfailed |
+
+---
+
+### Step 9 — Azure Document Intelligence — implementation plan
+
+**Manual prerequisites (human action required first):**
+1. Create Azure account at portal.azure.com
+2. Create a Document Intelligence resource (region: East US or West Europe)
+3. Copy endpoint URL + API key from resource → Keys and Endpoint
+
+**Code work (after Azure resource is ready):**
+
+1. **`settings.py`** — replace `docai_project_id/location/processor_id` with `docai_azure_endpoint` + `docai_azure_key`
+2. **`pyproject.toml`** — replace `google-cloud-documentai` with `azure-ai-documentintelligence>=1.0.0`
+3. **`document_ai/azure_adapter.py`** — new file implementing `DocumentAIAdapter`:
+   - `classify()` → pass-through using `document_type_hint_key` at confidence 100
+   - `extract()` → routes to correct prebuilt model by `physical_form_type` + `document_type_key`
+4. **`document_ai/adapter.py`** — update `get_document_ai_adapter()` to return `AzureDocumentAIAdapter`
+5. **`workers/job_runner.py`** — pass `physical_form_type` + `document_type_key` to `extract()`
+6. **`SECRETS_CHECKLIST.md`** — update with new Azure env var names
+7. **Railway env vars** — set `DI_DOCAI_AZURE_ENDPOINT`, `DI_DOCAI_AZURE_KEY`, `DI_DOCAI_MOCK=false`
+8. **Local integration test** — upload a real document, verify extraction
+9. **Deploy** — push to Railway, verify worker picks up existing FIT jobs
 
