@@ -326,16 +326,16 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
     try:
         async with engine.begin() as conn:
             # Delete in FK-safe order (children first). Smoke subject access
-            # auto-provisions Tenant settings, retention policy and document types.
+            # auto-provisions Tenant settings, retention policy, document types and actors.
             for table in [
                 "docintel.processing_jobs",
                 "docintel.document_artifacts",
                 "docintel.documents",
                 "docintel.subjects",
                 "docintel.tenant_document_types",
-                "docintel.tenant_settings",
-                "docintel.retention_policies",
                 "docintel.actors",
+                "docintel.retention_policies",
+                "docintel.tenant_settings",
             ]:
                 await conn.execute(
                     __import__("sqlalchemy", fromlist=["text"]).text(
