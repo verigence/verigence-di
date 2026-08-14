@@ -126,18 +126,17 @@ async def test_missing_quality_policy_returns_corrupt() -> None:
 
 # ── Empty quality policy (no rules) → FIT ────────────────────────────────────
 
-@pytest.mark.xfail(reason="Known bug: validator returns CORRUPT instead of FIT for empty policy", strict=True)
 @pytest.mark.asyncio
 async def test_empty_policy_no_rules_returns_fit() -> None:
     session = _make_session(quality_policy=[], catalog_rows=[])
-    # Use raw JPEG bytes — simpler structure than PDF, avoids pypdf warnings
+    # Use structurally valid PDF — pypdf parses it, PIL not involved
     result = await validate_upload(
         session=session,
         tenant_id="t1",
         document_id=uuid.uuid4(),
-        data=_jpeg_bytes(),
-        declared_mime="image/jpeg",
-        filename="test.jpg",
+        data=_pdf_bytes(),
+        declared_mime="application/pdf",
+        filename="test.pdf",
     )
     assert result.upload_status == UploadStatus.FIT
     assert result.upload_issue_code is None

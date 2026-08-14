@@ -89,7 +89,9 @@ async def validate_upload(
         )
     ).one_or_none()
 
-    if policy_row is None or not policy_row[0]:
+    # Empty policy list [] means "no rules configured" → accept all (FIT)
+    # Only treat as CORRUPT if the row itself is missing (NULL settings row)
+    if policy_row is None:
         return ValidatorResult(
             upload_status=UploadStatus.CORRUPT,
             upload_issue_code="QUALITY_POLICY_NOT_CONFIGURED",
@@ -97,7 +99,7 @@ async def validate_upload(
             detected_mime=detected_mime,
         )
 
-    quality_policy: list[dict[str, Any]] = policy_row[0]
+    quality_policy: list[dict[str, Any]] = policy_row[0] or []
 
     # ── Quality: load implementation keys from catalog ────────────────────────
     rule_rows = (
