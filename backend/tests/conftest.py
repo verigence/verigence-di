@@ -325,8 +325,18 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
     engine = create_async_engine(_async_db_url(neon_url), echo=False, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
-            # Delete in FK-safe order (children first). Smoke subject access
-            # auto-provisions Tenant settings, retention policy, document types and actors.
+            sql = __import__("sqlalchemy", fromlist=["text"]).text
+            # tenant_settings and retention_policies form a deliberate FK cycle:
+            # retention_policies.tenant_id -> tenant_settings and
+            # tenant_settings.active_retention_policy_id -> retention_policies.
+            # Clear the active pointer before deleting either side.
+            await conn.execute(
+                sql(
+                    "UPDATE docintel.tenant_settings "
+                    "SET active_retention_policy_id = NULL WHERE tenant_id = :tid"
+                ),
+                {"tid": test_tenant_id},
+            )
             for table in [
                 "docintel.processing_jobs",
                 "docintel.document_artifacts",
@@ -334,13 +344,11 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
                 "docintel.subjects",
                 "docintel.tenant_document_types",
                 "docintel.actors",
-                "docintel.tenant_settings",
                 "docintel.retention_policies",
+                "docintel.tenant_settings",
             ]:
                 await conn.execute(
-                    __import__("sqlalchemy", fromlist=["text"]).text(
-                        f"DELETE FROM {table} WHERE tenant_id = :tid"  # noqa: S608
-                    ),
+                    sql(f"DELETE FROM {table} WHERE tenant_id = :tid"),  # noqa: S608
                     {"tid": test_tenant_id},
                 )
     finally:
