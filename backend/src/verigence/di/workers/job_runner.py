@@ -46,6 +46,7 @@ from verigence.di.domain.enums import (
     FoundStatus,
 )
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
+from verigence.di.repositories.search_index import upsert_search_index
 from verigence.di.rules.runner import ExtractedFieldInput, normalize_and_validate
 
 logger = structlog.get_logger(__name__)
@@ -243,7 +244,7 @@ async def _execute_steps(
     await session.execute(
         text("""
             UPDATE docintel.processing_runs
-            SET classification_candidate_set = :cs::jsonb
+            SET classification_candidate_set = CAST(:cs AS jsonb)
             WHERE tenant_id = :tid AND processing_run_id = :run_id
         """),
         {
@@ -410,7 +411,7 @@ async def _execute_steps(
                 VALUES
                     (:tid, :fact_id, :run_id, :doc_id,
                      :pf_id, :cf_id, :found_status,
-                     :raw_value, :confidence, :page_no, :evidence_region::jsonb,
+                     :raw_value, :confidence, :page_no, CAST(:evidence_region AS jsonb),
                      :inv_id, :now)
             """),
             {
@@ -472,7 +473,7 @@ async def _execute_steps(
                      version_no, is_current, created_at_utc)
                 VALUES
                     (:tid, :dfv_id, :doc_id, :cf_id,
-                     :cur_val::jsonb, 'MACHINE', :fact_id,
+                     CAST(:cur_val AS jsonb), 'MACHINE', :fact_id,
                      :conf, :actor_id, :now,
                      1, true, :now)
                 ON CONFLICT DO NOTHING
@@ -535,6 +536,25 @@ async def _execute_steps(
             "hvs": hvs.value,
             "now": now,
         },
+    )
+
+    # ── Step 17b: Upsert document_search_index (D14) ─────────────────────────
+    indexed_fields: dict[str, object] = {
+        pf["canonical_field_key"]: (
+            field_result_map[pf["canonical_field_key"]].normalized_value
+            if pf["canonical_field_key"] in field_result_map
+            else None
+        )
+        for pf in profile_fields
+    }
+    await upsert_search_index(
+        session=session,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        subject_id=subject_id,
+        document_type_key=accepted_document_type_key,
+        indexed_fields=indexed_fields,
+        schema_version=PIPELINE_VERSION,
     )
 
     # Mark Processing Run COMPLETED
@@ -938,7 +958,7 @@ async def _update_invocation(
             SET outcome = :outcome,
                 completed_at_utc = :now,
                 provider_request_id = :prid,
-                usage_metrics = :metrics::jsonb,
+                usage_metrics = CAST(:metrics AS jsonb),
                 error_detail = :error_detail
             WHERE tenant_id = :tid AND invocation_id = :inv_id
         """),
