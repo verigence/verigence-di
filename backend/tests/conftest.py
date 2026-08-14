@@ -36,6 +36,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 # ── Env defaults needed before any app import ────────────────────────────────
 os.environ.setdefault("DI_SECRET_KEY", "test-secret-key-32-chars-minimum!!")
@@ -249,20 +250,18 @@ def test_tenant_id() -> str:
 async def api_client(_patch_jwks_cache) -> AsyncGenerator[AsyncClient, None]:  # type: ignore[no-untyped-def]
     """AsyncClient over ASGITransport wired to Neon DB + real R2 + real JWTs.
 
-    Reads connection config from environment (set by CI or developer .env.local).
-    Worker is disabled (DI_WORKER_ENABLED=false) to keep tests synchronous.
+    A fresh NullPool engine/session factory is bound for each test event loop so
+    asyncpg connections are never reused across pytest-asyncio loops.
     """
     neon_url = os.environ.get("DI_DATABASE_URL", "")
     if not neon_url or "localhost" in neon_url:
         pytest.skip("Neon DI_DATABASE_URL not set — skipping integration test")
 
-    # Override env for integration test
     env_overrides = {
         "DI_DATABASE_URL": neon_url,
         "DI_ENV": "dev",
         "DI_DOCAI_MOCK": "true",
         "DI_WORKER_ENABLED": "false",
-        # Storage — use test R2 bucket if configured, else skip
         "DI_STORAGE_PROVIDER": os.environ.get("DI_STORAGE_PROVIDER", "minio"),
         "DI_STORAGE_BUCKET": os.environ.get("DI_STORAGE_BUCKET", "verigence-di-test"),
         "DI_STORAGE_ENDPOINT": os.environ.get("DI_STORAGE_ENDPOINT", "http://localhost:9000"),
@@ -277,27 +276,42 @@ async def api_client(_patch_jwks_cache) -> AsyncGenerator[AsyncClient, None]:  #
     from verigence.di.settings import get_settings
     get_settings.cache_clear()
 
-    # Reset DB engine singleton so it picks up the new URL
     import verigence.di.repositories.database as _db_mod
-    if hasattr(_db_mod, "_engine") and _db_mod._engine is not None:
-        await _db_mod._engine.dispose()
-        _db_mod._engine = None
+    old_engine = _db_mod._engine
+    try:
+        await old_engine.dispose()
+    except Exception:  # noqa: BLE001
+        pass
+
+    test_engine = create_async_engine(
+        _async_db_url(neon_url),
+        poolclass=NullPool,
+        echo=False,
+    )
+    _db_mod._engine = test_engine
+    _db_mod.AsyncSessionFactory = async_sessionmaker(
+        test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
     from verigence.di.main import create_app
     app = create_app()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        yield c
-
-    # Restore env
-    for k, v in original.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
-    get_settings.cache_clear()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            yield c
+    finally:
+        await test_engine.dispose()
+        for k, v in original.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        get_settings.cache_clear()
 
 
 @pytest_asyncio.fixture
@@ -309,20 +323,22 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
     if not neon_url or "localhost" in neon_url:
         return
 
-    engine = create_async_engine(_async_db_url(neon_url), echo=False)
+    engine = create_async_engine(_async_db_url(neon_url), echo=False, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
-            # Delete in FK-safe order (children first)
+            # Delete in FK-safe order (children first). Smoke subject access
+            # auto-provisions Tenant settings, retention policy and document types.
             for table in [
                 "docintel.processing_jobs",
                 "docintel.document_artifacts",
                 "docintel.documents",
                 "docintel.subjects",
+                "docintel.tenant_document_types",
                 "docintel.tenant_settings",
+                "docintel.retention_policies",
                 "docintel.actors",
             ]:
                 await conn.execute(
-                    # sqlalchemy text not imported here — use raw execute
                     __import__("sqlalchemy", fromlist=["text"]).text(
                         f"DELETE FROM {table} WHERE tenant_id = :tid"  # noqa: S608
                     ),
