@@ -57,6 +57,15 @@ git push origin dev && sleep 90 && echo "ready"
 ### Rule 7 — Read full schema before writing any provisioning SQL
 Columns + constraints + indexes. Three bugs in one function because this was skipped.
 
+### Rule 8 — When renaming anything in schemas.py, grep every importer first
+```bash
+grep -r "OldName" backend/src backend/tests
+```
+Rename ALL occurrences in one commit. Never rename in one file and leave dependants for later.
+`compileall` catches syntax errors but NOT `ImportError` from a renamed symbol.
+The CI import smoke check (`create_app()`) now catches this — but grep first to avoid the
+deploy → crash → hotfix cycle entirely.
+
 > Full detail with examples: `docs/debugging-lessons.md`
 
 ---
@@ -426,9 +435,16 @@ DI auth layer migrated from Clerk-direct to Security module token model.
 
 ## Known bugs
 
-| File | Bug | Severity | Affects |
+| File | Bug | Severity | Status |
 |---|---|---|---|
-| `quality/validator.py` | Returns CORRUPT instead of FIT when quality policy is empty | Low — only manifests for tenants with no quality rules configured | `test_empty_policy_no_rules_returns_fit` |
+| `quality/validator.py` | Returns CORRUPT instead of FIT when quality policy is empty | Low | ✅ Fixed 2026-08-17 |
+| `api/v1/subjects.py` | `ImportError: SubjectListResponse` — Railway crashed on startup after schemas.py rename | Critical | ✅ Fixed 2026-08-18 commit `2772426` |
+
+**Post-mortem — 2026-08-18 ImportError:**
+- Root cause: `schemas.py` rewrite renamed `SubjectListResponse` → `SubjectListData` but `subjects.py` import was not updated in the same commit
+- Why tests didn't catch it: `compileall` was already in CI but unit tests mock the router layer and never fully import the FastAPI app
+- Fix applied: added **Import smoke check** step to CI (`from verigence.di.main import create_app; create_app()`) — this instantiates the full app and will catch any `ImportError` at startup before Railway deploys
+- Prevention rule added to `PROGRESS.md` mandatory rules section
 
 ---
 

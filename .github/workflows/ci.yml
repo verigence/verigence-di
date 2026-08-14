@@ -47,6 +47,14 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src tests
 
+      - name: Import smoke check (catches ImportError at app startup)
+        env:
+          DI_SECRET_KEY: "ci-import-check-key-32-characters!!"
+          DI_DATABASE_URL: "postgresql+asyncpg://user:pass@localhost/db"
+          DI_DOCAI_MOCK: "true"
+          DI_ENV: local
+        run: PYTHONPATH=src python -c "from verigence.di.main import create_app; create_app()"
+
       - name: Ruff
         run: ruff check .
 
