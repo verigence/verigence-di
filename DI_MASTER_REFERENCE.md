@@ -28,25 +28,24 @@
 
 ## 2. Authoritative design documents (always read these first)
 
-| Document | File (workspace root) | What it governs |
+All design documents now live in `verigence-di/design/`. See `design/README.md` for the full index.
+
+| Document | File | What it governs |
 |---|---|---|
-| Architecture | `DI_ARCHITECTURE_v2.2.md` | Fixed principles, component boundaries, core flow, WhatsApp flow |
-| Low-Level Design | `DI_LLD_v2.2.md` | Component contracts, intake steps, worker steps, scoring, error handling |
-| Data Model | `DI_DATA_MODEL_v2.2.md` | Every DB entity, relationships, state machines |
-| PostgreSQL Schema | `DI_POSTGRESQL_SCHEMA_v2.2.sql` | Canonical DDL — single source of truth for table/column names |
-| OpenAPI Spec | `DI_OPENAPI_v2.2.yaml` | All 54 operations, request/response schemas, `x-required-permissions` |
-| RBAC / JWT | `DI_SECURITY_RBAC_v2.2.md` + `DI_RBAC_v2.2.yaml` | 27 permissions, 8 role bundles, JWT claim contract |
-| Error Catalog | `DI_ERROR_CATALOG_v2.2.md` + `DI_ERROR_CATALOG_v2.2.yaml` | 38 stable problem codes, HTTP status, retryability |
-| Classification | `DI_CLASSIFICATION_v2.2.md` | Deterministic candidate-set formation rules |
-| Audit Model | `DI_AUDIT_MODEL_v2.2.md` | Entity-scoped hash-chain audit design |
-| Baseline Audit Report | `DI_BASELINE_AUDIT_REPORT_v2.2.md` | Confirmed: 39/39 checks passed, 54 OAS ops, 38 error codes |
+| Architecture | `design/DI_ARCHITECTURE_v2.2.md` | Fixed principles, component boundaries, core flow, WhatsApp flow |
+| Low-Level Design | `design/DI_LLD_v2.2.md` | Component contracts, intake steps, worker steps, scoring, error handling |
+| Data Model | `design/DI_DATA_MODEL_v2.2.md` | Every DB entity, relationships, state machines |
+| PostgreSQL Schema | `design/DI_POSTGRESQL_SCHEMA_v2.2.sql` | Canonical DDL — single source of truth for table/column names |
+| OpenAPI Spec | `design/DI_OPENAPI_v2.2.yaml` | All 54 operations, request/response schemas, `x-required-permissions` |
+| RBAC / JWT | `design/DI_SECURITY_RBAC_v2.2.md` + `design/DI_RBAC_v2.2.yaml` | 27 permissions, 8 role bundles, JWT claim contract |
+| Error Catalog | `design/DI_ERROR_CATALOG_v2.2.md` + `design/DI_ERROR_CATALOG_v2.2.yaml` | 38 stable problem codes, HTTP status, retryability |
+| Classification | `design/DI_CLASSIFICATION_v2.2.md` | Deterministic candidate-set formation rules |
+| Audit Model | `design/DI_AUDIT_MODEL_v2.2.md` | Entity-scoped hash-chain audit design |
+| Baseline Audit Report | `design/DI_BASELINE_AUDIT_REPORT_v2.2.md` | Confirmed: 39/39 checks passed, 54 OAS ops, 38 error codes |
 
 ### Superseded — do not use
 
-`DI_ARCHITECTURE_v2.0.md`, `DI_ARCHITECTURE_v2.1.md`, `DI_LLD_v2.0.md`, `DI_LLD_v2.1.md`,
-`DI_DATA_MODEL_v2.1.md`, `DI_OPENAPI_v2.0.yaml`, `DI_OPENAPI_v2.1.yaml`,
-`DI_POSTGRESQL_SCHEMA_v2.0.sql`, `DI_POSTGRESQL_SCHEMA_v2.1.sql`,
-`DI_TECHNOLOGY_v2.0.md`, `DI_CONFIGURATION_MODEL_v2.0.md`, `BASELINE_MANIFEST.md`.
+Superseded documents are in `design/archive/`. See `design/archive/README.md`.
 
 ---
 

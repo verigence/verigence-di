@@ -1,0 +1,3802 @@
+openapi: 3.1.0
+info:
+  title: Verigence Document Intelligence API
+  version: 2.2.0
+  description: 'Baselined Phase-1 vendor-neutral REST API.
+
+
+    Verigence Document Intelligence is standalone and owns a lightweight Subject Registry.
+
+    Primary business lookup is tenantId + subjectId. Machine lifecycle is Upload -> Process -> Confirm.
+
+    Each successfully extracted document has confidenceScore 0-100.
+
+    confidenceScore > 90.00 => humanVerificationStatus OPTIONAL; confidenceScore <= 90.00 => MANDATORY.
+
+    verificationState separately records NOT_VERIFIED or VERIFIED.
+
+    One vendor-neutral X-Correlation-ID is used end-to-end; no vendor tracing product or outbound event API is required in
+    Phase 1.
+
+
+    Baseline 2.2 adds a normative Problem Code catalogue, canonical JWT/RBAC contract, deterministic classification candidate
+    formation, concurrency-safe verified Subject identifiers, and entity-scoped audit-chain design.'
+servers:
+- url: https://{host}
+  variables:
+    host:
+      default: document-intelligence.example
+security:
+- bearerAuth: []
+tags:
+- name: Subjects
+- name: Subject Documents
+- name: Human Verification
+- name: Operations
+- name: Requirement Configuration
+- name: Extraction Configuration
+- name: Tenant Configuration
+- name: Subject Matching
+- name: External Links
+- name: WhatsApp
+- name: Document Types
+paths:
+  /v1/tenants/{tenantId}/subjects:
+    post:
+      tags:
+      - Subjects
+      summary: Create a Verigence Subject
+      operationId: createSubject
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSubjectRequest'
+      responses:
+        '201':
+          description: Subject created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subject'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - subject:create
+    get:
+      tags:
+      - Subjects
+      summary: List/search Verigence Subjects within a Tenant
+      operationId: listSubjects
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - in: query
+        name: status
+        schema:
+          $ref: '#/components/schemas/SubjectStatus'
+      - in: query
+        name: query
+        schema:
+          type: string
+          maxLength: 240
+        description: Optional simple search over Subject display name and configured identifiers.
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - in: query
+        name: cursor
+        schema:
+          type: string
+          maxLength: 500
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Subjects.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subject'
+                  nextCursor:
+                    type:
+                    - string
+                    - 'null'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - subject:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}:
+    get:
+      tags:
+      - Subjects
+      summary: Get one Verigence Subject
+      operationId: getSubject
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Subject.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subject'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - subject:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents:
+    post:
+      tags:
+      - Subject Documents
+      summary: Upload one logical document for a Subject
+      operationId: uploadSubjectDocument
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+              - file
+              - sourceChannel
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Raw binary content. Normal upload does not use Base64.
+                sourceChannel:
+                  type: string
+                  enum:
+                  - MOBILE
+                  - WEB
+                  - API
+                documentTypeKey:
+                  type: string
+                  maxLength: 120
+                  description: Optional active supported Document Type hint. Omit it to let processing classify the document.
+                capturedAt:
+                  type: string
+                  format: date-time
+                sourceReference:
+                  type: string
+                  maxLength: 500
+                replacesDocumentId:
+                  type: string
+                  format: uuid
+                externalEntityLinks:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/ExternalEntityLinkInput'
+      responses:
+        '201':
+          description: Document resource created. Upload/quality processing state is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '415':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Caller supplies an existing active Verigence Subject UUID. Requirement-profile assignment is not required
+        for upload. A supported type outside the profile is accepted as ADDITIONAL. documentTypeKey is only a hint and never
+        bypasses machine classification/validation. The validated hint is persisted as documentTypeHintKey for classification
+        lineage. It never removes other eligible candidates.
+      x-required-permissions:
+      - document:upload
+    get:
+      tags:
+      - Subject Documents
+      summary: Get the full requirement and document state for a Subject
+      operationId: getSubjectDocuments
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Configured mandatory/optional requirements, actual documents, additional documents and verification
+            state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectDocumentView'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Primary Subject-centric enquiry. Returns configured requirements when assigned, all actual documents, confidence
+        and human-verification fields.
+      x-required-permissions:
+      - document:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/document-exceptions:
+    get:
+      tags:
+      - Subject Documents
+      summary: List active requirement and document exceptions for one Subject
+      operationId: getSubjectDocumentExceptions
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - in: query
+        name: state
+        schema:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequirementState'
+        style: form
+        explode: true
+        description: Defaults to MISSING, NOT_FIT, CORRUPT, UPLOAD_FAILED, RETRY_PENDING and FAILED.
+      - in: query
+        name: includeResolvedHistory
+        schema:
+          type: boolean
+          default: false
+        description: Include historical exceptions that have already been superseded/replaced.
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Exception list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OperationalException'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Returns missing configured requirements plus current bad/upload-failed/retry-pending/failed actual Documents
+        for the Subject. Historical bad attempts already replaced are excluded by default.
+      x-required-permissions:
+      - document:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}:
+    get:
+      tags:
+      - Subject Documents
+      summary: Get one actual document within the Tenant + Subject boundary
+      operationId: getSubjectDocument
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Document metadata/state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - document:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/content:
+    get:
+      tags:
+      - Subject Documents
+      summary: Retrieve original document bytes
+      operationId: getSubjectDocumentContent
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Original binary content.
+          headers:
+            X-Content-SHA256:
+              schema:
+                type: string
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '410':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - document:content:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/fields:
+    get:
+      tags:
+      - Subject Documents
+      summary: Retrieve machine extraction and current accepted field values
+      operationId: getSubjectDocumentFields
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Extraction result and field lineage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentExtractionResult'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - document:fields:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/verification:
+    post:
+      tags:
+      - Human Verification
+      summary: Record human verification and optional field corrections
+      operationId: verifySubjectDocument
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HumanVerificationRequest'
+      responses:
+        '201':
+          description: Verification appended and current accepted values updated where corrections were supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanVerificationResult'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Available only for a machine-CONFIRMED Document. Phase 1 allows one successful Human Verification action
+        per Document; all corrections must be supplied in that action. If verificationState is already VERIFIED, return HTTP
+        409 INVALID_DOCUMENT_STATE.
+      x-required-permissions:
+      - verification:write
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/entity-links:
+    get:
+      tags:
+      - External Links
+      summary: List generic external entity links for a document
+      operationId: getDocumentEntityLinks
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Active external links.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExternalEntityLink'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - entity_link:read
+    post:
+      tags:
+      - External Links
+      summary: Add a generic external entity link
+      operationId: addDocumentEntityLink
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExternalEntityLinkInput'
+      responses:
+        '201':
+          description: Link created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExternalEntityLink'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - entity_link:write
+  /v1/tenants/{tenantId}/verification-queue:
+    get:
+      tags:
+      - Human Verification
+      summary: List confirmed documents awaiting human verification
+      operationId: getVerificationQueue
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - in: query
+        name: humanVerificationStatus
+        schema:
+          $ref: '#/components/schemas/HumanVerificationStatus'
+        description: Defaults to MANDATORY.
+      - in: query
+        name: subjectId
+        schema:
+          type: string
+          maxLength: 240
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Verification queue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedDocuments'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - verification:read
+  /v1/tenants/{tenantId}/document-exceptions:
+    get:
+      tags:
+      - Operations
+      summary: Tenant-wide document exception list
+      operationId: getTenantDocumentExceptions
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - in: query
+        name: subjectId
+        schema:
+          type: string
+          maxLength: 240
+      - in: query
+        name: uploadedByActorId
+        schema:
+          type: string
+          maxLength: 160
+      - in: query
+        name: state
+        schema:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequirementState'
+        style: form
+        explode: true
+      - in: query
+        name: includeResolvedHistory
+        schema:
+          type: boolean
+          default: false
+        description: Include historical exceptions already superseded/replaced.
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Tenant-wide exceptions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedOperationalExceptions'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Tenant-wide active exception list covering missing configured requirements and actual Document exceptions.
+        Historical replaced attempts are excluded by default.
+      x-required-permissions:
+      - operations:read
+  /v1/tenants/{tenantId}/upload-quality:
+    get:
+      tags:
+      - Operations
+      summary: Upload-quality metrics grouped by uploader
+      operationId: getUploadQuality
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - in: query
+        name: uploadedByActorId
+        schema:
+          type: string
+          maxLength: 160
+      - in: query
+        name: from
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: to
+        schema:
+          type: string
+          format: date-time
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Upload-quality summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UploadQualitySummary'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - operations:read
+  /v1/tenants/{tenantId}/unassigned-documents:
+    get:
+      tags:
+      - WhatsApp
+      summary: List tenant-resolved documents not yet assigned to a Subject
+      operationId: getUnassignedDocuments
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Unassigned documents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedDocuments'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:read
+  /v1/tenants/{tenantId}/unassigned-documents/{documentId}/subject:
+    put:
+      tags:
+      - WhatsApp
+      summary: Assign an unassigned tenant document to a Subject
+      operationId: assignDocumentSubject
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - subjectId
+              properties:
+                subjectId:
+                  type: string
+                  maxLength: 240
+                  format: uuid
+      responses:
+        '200':
+          description: Subject assigned and requirement classification recalculated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:assign
+  /v1/tenants/{tenantId}/subjects/{subjectId}/requirement-profile:
+    put:
+      tags:
+      - Requirement Configuration
+      summary: Assign one published Requirement Profile version to a Subject
+      operationId: assignRequirementProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - requirementProfileId
+              properties:
+                requirementProfileId:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Assignment active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectRequirementAssignment'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - requirement_profile:assign
+  /v1/tenants/{tenantId}/document-requirement-profiles:
+    get:
+      tags:
+      - Requirement Configuration
+      summary: List Requirement Profile versions
+      operationId: listRequirementProfiles
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Profiles.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RequirementProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - requirement_profile:read
+    post:
+      tags:
+      - Requirement Configuration
+      summary: Create a DRAFT Requirement Profile version
+      operationId: createRequirementProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRequirementProfileRequest'
+      responses:
+        '201':
+          description: Draft created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - requirement_profile:write
+  /v1/tenants/{tenantId}/document-requirement-profiles/{profileId}/publish:
+    post:
+      tags:
+      - Requirement Configuration
+      summary: Publish an immutable Requirement Profile version
+      operationId: publishRequirementProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ProfileId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Published profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Publishes the DRAFT version and atomically retires the previously published version of the same profileKey,
+        if any. Existing Subject assignments to an older immutable version remain valid until explicitly reassigned.
+      x-required-permissions:
+      - requirement_profile:publish
+  /v1/tenants/{tenantId}/document-types:
+    get:
+      tags:
+      - Extraction Configuration
+      summary: List effective global + tenant Document Types
+      operationId: listDocumentTypes
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Document Types.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentType'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+    post:
+      tags:
+      - Extraction Configuration
+      summary: Create a tenant-owned Document Type
+      operationId: createDocumentType
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentTypeRequest'
+      responses:
+        '201':
+          description: DRAFT Document Type created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentType'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Creates a tenant-owned Document Type in DRAFT state. Publishing its first valid Extraction Profile activates
+        the Document Type atomically; no separate activation step is required.
+      x-required-permissions:
+      - extraction_config:write
+  /v1/tenants/{tenantId}/document-types/{documentTypeKey}/extraction-profiles:
+    get:
+      tags:
+      - Extraction Configuration
+      summary: List Extraction Profile versions for a Document Type
+      operationId: listExtractionProfiles
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentTypeKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Profiles.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExtractionProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+    post:
+      tags:
+      - Extraction Configuration
+      summary: Create a DRAFT Extraction Profile version
+      description: Missing field keys are created as tenant-owned canonical fields from the supplied datatype/display name;
+        incompatible existing datatype returns 409. Rule keys must exist in the platform catalogs.
+      operationId: createExtractionProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentTypeKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExtractionProfileRequest'
+      responses:
+        '201':
+          description: Draft created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractionProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:write
+  /v1/tenants/{tenantId}/document-types/{documentTypeKey}/extraction-profiles/{profileId}/publish:
+    post:
+      tags:
+      - Extraction Configuration
+      summary: Publish an immutable Extraction Profile version
+      operationId: publishExtractionProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentTypeKey'
+      - $ref: '#/components/parameters/ProfileId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Published profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractionProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Publishes the DRAFT version and atomically retires the previously published profile for the same Document
+        Type and scope, if any. Existing Processing Runs retain their historical profile reference.
+      x-required-permissions:
+      - extraction_config:publish
+  /v1/tenants/{tenantId}/settings:
+    get:
+      tags:
+      - Tenant Configuration
+      summary: Get Document Intelligence tenant settings
+      operationId: getTenantSettings
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantSettings'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - tenant_config:read
+    put:
+      tags:
+      - Tenant Configuration
+      summary: Replace Document Intelligence tenant settings
+      operationId: putTenantSettings
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutTenantSettingsRequest'
+      responses:
+        '200':
+          description: Updated settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantSettings'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - tenant_config:write
+  /v1/tenants/{tenantId}/retention-policies:
+    get:
+      tags:
+      - Tenant Configuration
+      summary: List retention policies
+      operationId: listRetentionPolicies
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Policies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RetentionPolicy'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - tenant_config:read
+    post:
+      tags:
+      - Tenant Configuration
+      summary: Create a retention policy
+      operationId: createRetentionPolicy
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRetentionPolicyRequest'
+      responses:
+        '201':
+          description: Policy created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicy'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - tenant_config:write
+  /v1/tenants/{tenantId}/retention-policies/{retentionPolicyId}:
+    put:
+      tags:
+      - Tenant Configuration
+      summary: Update an existing retention policy
+      operationId: updateRetentionPolicy
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - in: path
+        name: retentionPolicyId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRetentionPolicyRequest'
+      responses:
+        '200':
+          description: Policy updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionPolicy'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - tenant_config:write
+  /v1/tenants/{tenantId}/subjects/{subjectId}/identifiers:
+    post:
+      tags:
+      - Subject Matching
+      summary: Register a verified Subject identifier usable for deterministic WhatsApp matching
+      operationId: addSubjectIdentifier
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubjectIdentifierInput'
+      responses:
+        '201':
+          description: Identifier stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectIdentifier'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Creates a VERIFIED identifier only when no other active VERIFIED Subject in the Tenant owns the same identifier_type
+        + normalized_value. Concurrent conflicts return 409 SUBJECT_IDENTIFIER_CONFLICT.
+      x-required-permissions:
+      - subject_matching:write
+  /v1/tenants/{tenantId}/whatsapp/sender-mappings:
+    post:
+      tags:
+      - Subject Matching
+      summary: Create/update an exact WhatsApp sender-to-Subject mapping
+      operationId: putWhatsappSenderMapping
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WhatsappSenderMappingInput'
+      responses:
+        '200':
+          description: Mapping active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WhatsappSenderMapping'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - subject_matching:write
+  /v1/system/whatsapp/routes:
+    post:
+      tags:
+      - WhatsApp
+      summary: Configure a WhatsApp destination/account route to Tenant and SYSTEM actor
+      operationId: putWhatsappRoute
+      security:
+      - systemBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WhatsappRouteInput'
+      responses:
+        '200':
+          description: Route active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WhatsappRoute'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      x-required-permissions:
+      - platform:whatsapp:admin
+  /v1/integrations/whatsapp/webhook:
+    post:
+      tags:
+      - WhatsApp
+      summary: Receive inbound WhatsApp message/media webhook
+      operationId: whatsappWebhook
+      security: []
+      description: 'The adapter validates provider webhook authenticity before processing.
+
+        Tenant is resolved from configured route. Subject may remain unassigned.
+
+        Uploader actor is the configured SYSTEM actor, while sender provenance is stored separately.
+
+        '
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Provider webhook payload. It is interpreted only inside the WhatsApp adapter.
+      responses:
+        '200':
+          description: Webhook acknowledged.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '500':
+          $ref: '#/components/responses/Problem'
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      x-authentication: WhatsApp provider webhook/signature verification; no JWT.
+  /v1/system/whatsapp/quarantine:
+    get:
+      tags:
+      - WhatsApp
+      summary: List WhatsApp intake events for which Tenant routing failed
+      operationId: getWhatsappQuarantine
+      security:
+      - systemBearer: []
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quarantined intake items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                - page
+                - pageSize
+                - total
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WhatsappQuarantineItem'
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+                  total:
+                    type: integer
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - platform:whatsapp:admin
+  /v1/system/whatsapp/quarantine/{quarantineId}/replay:
+    post:
+      tags:
+      - WhatsApp
+      summary: Replay a quarantined WhatsApp intake item after Tenant routing is corrected
+      operationId: replayWhatsappQuarantine
+      security:
+      - systemBearer: []
+      parameters:
+      - in: path
+        name: quarantineId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '202':
+          description: Replay accepted for normal intake processing.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Replays the quarantined event only after its original destination/account resolves through an ACTIVE configured
+        WhatsApp route. The caller cannot supply a Tenant ID; Tenant is re-derived from the corrected route to prevent arbitrary
+        cross-Tenant assignment.
+      x-required-permissions:
+      - platform:whatsapp:admin
+  /v1/tenants/{tenantId}/unassigned-documents/{documentId}:
+    get:
+      tags:
+      - WhatsApp
+      summary: Get one tenant-resolved but Subject-unassigned document
+      operationId: getUnassignedDocument
+      parameters: &id001
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Unassigned Document metadata/state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:read
+  /v1/tenants/{tenantId}/unassigned-documents/{documentId}/content:
+    get:
+      tags:
+      - WhatsApp
+      summary: Retrieve original bytes for an unassigned document
+      operationId: getUnassignedDocumentContent
+      parameters: *id001
+      responses:
+        '200':
+          description: Original binary content.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '410':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:read
+  /v1/tenants/{tenantId}/unassigned-documents/{documentId}/fields:
+    get:
+      tags:
+      - WhatsApp
+      summary: Retrieve extraction result for an unassigned document
+      operationId: getUnassignedDocumentFields
+      parameters: *id001
+      responses:
+        '200':
+          description: Extraction result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentExtractionResult'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:read
+  /v1/tenants/{tenantId}/document-requirement-profiles/{profileId}:
+    get:
+      tags:
+      - Requirement Profiles
+      summary: Get one Requirement Profile version
+      operationId: getRequirementProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - &id002
+        in: path
+        name: profileId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Requirement Profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - requirement_profile:read
+    put:
+      tags:
+      - Requirement Profiles
+      summary: Replace the contents of a DRAFT Requirement Profile version
+      operationId: updateDraftRequirementProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - *id002
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRequirementProfileDraftRequest'
+      responses:
+        '200':
+          description: Updated DRAFT profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Updates only a DRAFT Requirement Profile. profileKey and version are immutable; published/retired versions
+        cannot be edited.
+      x-required-permissions:
+      - requirement_profile:write
+  /v1/tenants/{tenantId}/document-types/{documentTypeKey}/extraction-profiles/{profileId}:
+    get:
+      tags:
+      - Extraction Profiles
+      summary: Get one Extraction Profile version
+      operationId: getExtractionProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - &id003
+        $ref: '#/components/parameters/DocumentTypeKey'
+      - *id002
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Extraction Profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractionProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+    put:
+      tags:
+      - Extraction Profiles
+      summary: Replace the contents of a DRAFT Extraction Profile version
+      operationId: updateDraftExtractionProfile
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - *id003
+      - *id002
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateExtractionProfileDraftRequest'
+      responses:
+        '200':
+          description: Updated DRAFT profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractionProfile'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Updates only a DRAFT Extraction Profile. documentTypeKey, scope and version are immutable; published/retired
+        versions cannot be edited.
+      x-required-permissions:
+      - extraction_config:write
+  /v1/tenants/{tenantId}/document-types/{documentTypeKey}:
+    get:
+      tags:
+      - Document Types
+      summary: Get one effective Tenant Document Type
+      operationId: getDocumentType
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - *id003
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Document Type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentType'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+    put:
+      tags:
+      - Document Types
+      summary: Update a Tenant-owned Document Type
+      operationId: updateDocumentType
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - *id003
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDocumentTypeRequest'
+      responses:
+        '200':
+          description: Updated Document Type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentType'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      description: Updates mutable metadata for the existing Document Type. documentTypeKey and scope are immutable.
+      x-required-permissions:
+      - extraction_config:write
+  /v1/tenants/{tenantId}/normalization-rules:
+    get:
+      tags:
+      - Extraction Profiles
+      summary: List approved reusable rule catalog entries
+      operationId: listNormalizationRules
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Rule catalog.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RuleCatalogItem'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+  /v1/tenants/{tenantId}/validation-rules:
+    get:
+      tags:
+      - Extraction Profiles
+      summary: List approved reusable rule catalog entries
+      operationId: listValidationRules
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Rule catalog.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RuleCatalogItem'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - extraction_config:read
+  /v1/tenants/{tenantId}/quality-policy:
+    get:
+      tags:
+      - Configuration
+      summary: Get Tenant upload-quality policy
+      operationId: getQualityPolicy
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quality policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityPolicy'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - quality_config:read
+    put:
+      tags:
+      - Configuration
+      summary: Replace Tenant upload-quality policy
+      operationId: putQualityPolicy
+      description: Replaces the governed rule/parameter set used by the deterministic upload quality gate. Exact rule parameters
+        are configuration; no Python code change is required.
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutQualityPolicyRequest'
+      responses:
+        '200':
+          description: Updated quality policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityPolicy'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - quality_config:write
+  /v1/tenants/{tenantId}/quality-rules:
+    get:
+      tags:
+      - Configuration
+      summary: List approved upload-quality rule definitions
+      operationId: listQualityRules
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quality rule catalog.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QualityRuleCatalogItem'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - quality_config:read
+  /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/quality-results:
+    get:
+      tags:
+      - Documents
+      summary: Get deterministic upload-quality rule results
+      operationId: getSubjectDocumentQuality
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SubjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quality results.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentQualityResult'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - document:quality:read
+  /v1/tenants/{tenantId}/unassigned-documents/{documentId}/quality-results:
+    get:
+      tags:
+      - Documents
+      summary: Get deterministic upload-quality rule results
+      operationId: getUnassignedDocumentQuality
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quality results.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentQualityResult'
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - unassigned_document:read
+  /v1/system/whatsapp/quarantine/{quarantineId}/discard:
+    post:
+      tags:
+      - WhatsApp
+      summary: Discard a quarantined WhatsApp intake item
+      operationId: discardWhatsappQuarantine
+      security:
+      - systemBearer: []
+      description: Marks an unresolved quarantine item DISCARDED, deletes its temporary media through the system StorageAdapter,
+        and appends a system audit event. A RESOLVED/DISCARDED item cannot be discarded again.
+      parameters:
+      - in: path
+        name: quarantineId
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '204':
+          description: Quarantine item discarded.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+      x-required-permissions:
+      - platform:whatsapp:admin
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Tenant-scoped OIDC JWT. Audience verigence-document-intelligence. Required claims: iss, sub, aud, exp,
+        iat, tenant_id, actor_id, actor_type, roles[], permissions[]. device_id is required for actor_type=USER. Endpoint
+        authorization checks x-required-permissions.'
+    systemBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Platform-scoped OIDC JWT. Audience verigence-document-intelligence-system. Required claims: iss, sub,
+        aud, exp, iat, actor_id, actor_type, roles[], permissions[]. tenant_id must be absent. System WhatsApp operations
+        require platform:whatsapp:admin.'
+  parameters:
+    TenantId:
+      in: path
+      name: tenantId
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    SubjectId:
+      in: path
+      name: subjectId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DocumentId:
+      in: path
+      name: documentId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProfileId:
+      in: path
+      name: profileId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DocumentTypeKey:
+      in: path
+      name: documentTypeKey
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 120
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 240
+    DeviceId:
+      in: header
+      name: X-Device-Id
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: Required by policy for MOBILE/WEB user uploads where registered-device control is enabled.
+    Page:
+      in: query
+      name: page
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      in: query
+      name: pageSize
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    CorrelationId:
+      in: header
+      name: X-Correlation-ID
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: ^[A-Za-z0-9._:-]+$
+      description: End-to-end execution correlation token. Verigence validates and propagates a supplied value; if absent
+        it generates a UUID. The same value is returned in the response and propagated through the initial processing chain.
+  schemas:
+    UploadStatus:
+      type: string
+      enum:
+      - RECEIVING
+      - VALIDATING
+      - FIT
+      - NOT_FIT
+      - CORRUPT
+      - UPLOAD_FAILED
+    ProcessingStatus:
+      type: string
+      enum:
+      - NOT_STARTED
+      - PROCESSING
+      - RETRY_PENDING
+      - PROCESSED
+      - FAILED
+    ConfirmationStatus:
+      type: string
+      enum:
+      - PENDING
+      - CONFIRMED
+      - NOT_CONFIRMED
+    RequirementClassification:
+      type: string
+      enum:
+      - MANDATORY
+      - OPTIONAL
+      - ADDITIONAL
+    RequirementState:
+      type: string
+      enum:
+      - MISSING
+      - UPLOADED
+      - NOT_FIT
+      - CORRUPT
+      - UPLOAD_FAILED
+      - PROCESSING
+      - RETRY_PENDING
+      - FAILED
+      - CONFIRMED
+    Document:
+      type: object
+      required:
+      - tenantId
+      - documentId
+      - sourceChannel
+      - uploadedByActorType
+      - uploadedByActorId
+      - uploadStatus
+      - processingStatus
+      - confirmationStatus
+      - verificationState
+      - registeredAtUtc
+      properties:
+        tenantId:
+          type: string
+        subjectId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        originalStorageId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: Provider-neutral logical storage identity for the immutable ORIGINAL artifact. Null until original
+            storage finalization completes.
+        documentTypeKey:
+          type:
+          - string
+          - 'null'
+        requirementClassification:
+          oneOf:
+          - $ref: '#/components/schemas/RequirementClassification'
+          - type: 'null'
+          description: Derived from the Subject's active Requirement Profile at enquiry time; not authoritative stored Document
+            state.
+        sourceChannel:
+          type: string
+          enum:
+          - MOBILE
+          - WEB
+          - API
+          - WHATSAPP
+        uploadedByActorType:
+          type: string
+          enum:
+          - USER
+          - SYSTEM
+          - SERVICE
+        uploadedByActorId:
+          type: string
+        sourceDeviceId:
+          type:
+          - string
+          - 'null'
+        capturedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        sourceEventAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        registeredAtUtc:
+          type: string
+          format: date-time
+        originalFilename:
+          type:
+          - string
+          - 'null'
+        declaredMimeType:
+          type:
+          - string
+          - 'null'
+        detectedMimeType:
+          type:
+          - string
+          - 'null'
+        fileSizeBytes:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+        contentHashSha256:
+          type:
+          - string
+          - 'null'
+          minLength: 64
+          maxLength: 64
+        duplicateOfDocumentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        uploadStatus:
+          $ref: '#/components/schemas/UploadStatus'
+        uploadIssueCode:
+          type:
+          - string
+          - 'null'
+        processingStatus:
+          $ref: '#/components/schemas/ProcessingStatus'
+        processingFailureCode:
+          type:
+          - string
+          - 'null'
+        confirmationStatus:
+          $ref: '#/components/schemas/ConfirmationStatus'
+        confidenceScore:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          maximum: 100
+          description: 0-100 machine extraction confidence. Null until successful extraction/confirmation.
+        verificationThresholdApplied:
+          type:
+          - number
+          - 'null'
+          minimum: 90.0
+          maximum: 90.0
+          description: Fixed Phase-1 product threshold. 90.00 when CONFIRMED; null before confirmation.
+        humanVerificationStatus:
+          oneOf:
+          - $ref: '#/components/schemas/HumanVerificationStatus'
+          - type: 'null'
+          description: 'Product-facing verification status derived from confidence threshold: OPTIONAL or MANDATORY. Null
+            until confirmation.'
+        verificationState:
+          $ref: '#/components/schemas/VerificationState'
+          description: Whether human verification has actually been completed.
+        replacesDocumentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        replacedByDocumentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        contentState:
+          type: string
+          enum:
+          - AVAILABLE
+          - PURGED
+        retentionUntilUtc:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        retentionDisposition:
+          type: string
+          enum:
+          - PURGE_CONTENT
+          - KEEP_CONTENT
+        documentTypeHintKey:
+          type:
+          - string
+          - 'null'
+          maxLength: 120
+          description: Validated non-authoritative upload hint persisted for classification lineage.
+    RequirementItem:
+      type: object
+      required:
+      - documentTypeKey
+      - requirementClassification
+      - minimumCount
+      - state
+      - documents
+      properties:
+        documentTypeKey:
+          type: string
+        displayName:
+          type: string
+        requirementClassification:
+          type: string
+          enum:
+          - MANDATORY
+          - OPTIONAL
+        minimumCount:
+          type: integer
+          minimum: 1
+        state:
+          $ref: '#/components/schemas/RequirementState'
+        confirmedCount:
+          type: integer
+          minimum: 0
+        verifiedCount:
+          type: integer
+          minimum: 0
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+    SubjectDocumentSummary:
+      type: object
+      properties:
+        mandatoryTotal:
+          type: integer
+          minimum: 0
+        mandatoryConfirmed:
+          type: integer
+          minimum: 0
+        mandatoryVerified:
+          type: integer
+          minimum: 0
+        mandatoryOutstanding:
+          type: integer
+          minimum: 0
+        mandatoryVerificationPending:
+          type: integer
+          minimum: 0
+        optionalTotal:
+          type: integer
+          minimum: 0
+        additionalDocumentCount:
+          type: integer
+          minimum: 0
+        unclassifiedDocumentCount:
+          type: integer
+          minimum: 0
+    SubjectDocumentView:
+      type: object
+      required:
+      - tenantId
+      - subjectId
+      - configurationStatus
+      - requirementProfile
+      - summary
+      - requirements
+      - additionalDocuments
+      - unclassifiedDocuments
+      properties:
+        tenantId:
+          type: string
+        subjectId:
+          type: string
+          format: uuid
+        requirementProfile:
+          oneOf:
+          - $ref: '#/components/schemas/RequirementProfileReference'
+          - type: 'null'
+        summary:
+          $ref: '#/components/schemas/SubjectDocumentSummary'
+        requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequirementItem'
+        additionalDocuments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+        unclassifiedDocuments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+        configurationStatus:
+          $ref: '#/components/schemas/SubjectConfigurationStatus'
+    ExtractedField:
+      type: object
+      required:
+      - fieldKey
+      - foundStatus
+      - humanCorrected
+      properties:
+        fieldKey:
+          type: string
+        displayName:
+          type: string
+        foundStatus:
+          type: string
+          enum:
+          - FOUND
+          - NOT_FOUND
+          - AMBIGUOUS
+          - ERROR
+        rawValue: {}
+        normalizedValue: {}
+        machineConfidenceScore:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          maximum: 100
+        currentAcceptedValue: {}
+        currentValueSource:
+          type:
+          - string
+          - 'null'
+          enum:
+          - MACHINE
+          - HUMAN
+          - EXTERNAL
+          - null
+        pageNo:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+        evidenceRegion:
+          type:
+          - object
+          - 'null'
+        humanCorrected:
+          type: boolean
+        sourceExtractedFactId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        sourceVerificationId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: Present when the current accepted value comes from a Human Verification correction.
+    DocumentExtractionResult:
+      type: object
+      required:
+      - documentId
+      - confirmationStatus
+      - verificationState
+      - fields
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        processingRunId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: Current successful Processing Run used for this extraction result.
+        extractionProfileId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        extractionProfileVersion:
+          type:
+          - integer
+          - 'null'
+        confidenceScore:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          maximum: 100
+        verificationThresholdApplied:
+          type:
+          - number
+          - 'null'
+          minimum: 90.0
+          maximum: 90.0
+          description: Fixed Phase-1 product threshold. 90.00 when CONFIRMED; null before confirmation.
+        humanVerificationStatus:
+          oneOf:
+          - $ref: '#/components/schemas/HumanVerificationStatus'
+          - type: 'null'
+          description: OPTIONAL or MANDATORY. Null until machine confirmation.
+        verificationState:
+          $ref: '#/components/schemas/VerificationState'
+          description: NOT_VERIFIED or VERIFIED.
+        confirmationStatus:
+          $ref: '#/components/schemas/ConfirmationStatus'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractedField'
+    FieldCorrection:
+      type: object
+      required:
+      - fieldKey
+      - correctedValue
+      properties:
+        fieldKey:
+          type: string
+        correctedValue: {}
+    HumanVerificationRequest:
+      type: object
+      properties:
+        remarks:
+          type: string
+        fieldCorrections:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldCorrection'
+    HumanVerificationResult:
+      type: object
+      required:
+      - verificationId
+      - documentId
+      - humanVerificationStatus
+      - verificationState
+      - verifiedByActorId
+      - verifiedAtUtc
+      properties:
+        verificationId:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        machineConfidenceScore:
+          type: number
+          minimum: 0
+          maximum: 100
+        humanVerificationStatus:
+          $ref: '#/components/schemas/HumanVerificationStatus'
+          description: OPTIONAL or MANDATORY as determined at machine confirmation.
+        verificationState:
+          $ref: '#/components/schemas/VerificationState'
+          description: VERIFIED after this action.
+        verifiedByActorId:
+          type: string
+        verifiedAtUtc:
+          type: string
+          format: date-time
+    RequirementProfileItemInput:
+      type: object
+      required:
+      - documentTypeKey
+      - requirementClassification
+      properties:
+        documentTypeKey:
+          type: string
+        requirementClassification:
+          type: string
+          enum:
+          - MANDATORY
+          - OPTIONAL
+        minimumCount:
+          type: integer
+          minimum: 1
+          default: 1
+        displaySequence:
+          type: integer
+          default: 100
+    CreateRequirementProfileRequest:
+      type: object
+      required:
+      - profileKey
+      - items
+      properties:
+        profileKey:
+          type: string
+          maxLength: 120
+        description:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RequirementProfileItemInput'
+    RequirementProfile:
+      type: object
+      required:
+      - requirementProfileId
+      - profileKey
+      - version
+      - status
+      - items
+      properties:
+        requirementProfileId:
+          type: string
+          format: uuid
+        profileKey:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+          enum:
+          - DRAFT
+          - PUBLISHED
+          - RETIRED
+        description:
+          type:
+          - string
+          - 'null'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequirementProfileItemInput'
+    RequirementProfileReference:
+      type: object
+      required:
+      - requirementProfileId
+      - profileKey
+      - version
+      properties:
+        requirementProfileId:
+          type: string
+          format: uuid
+        profileKey:
+          type: string
+        version:
+          type: integer
+    SubjectRequirementAssignment:
+      type: object
+      required:
+      - tenantId
+      - subjectId
+      - requirementProfile
+      properties:
+        tenantId:
+          type: string
+        subjectId:
+          type: string
+          format: uuid
+        requirementProfile:
+          $ref: '#/components/schemas/RequirementProfileReference'
+    DocumentType:
+      type: object
+      required:
+      - documentTypeId
+      - documentTypeKey
+      - displayName
+      - status
+      properties:
+        documentTypeId:
+          type: string
+          format: uuid
+        documentTypeKey:
+          type: string
+        displayName:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        category:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+          enum:
+          - DRAFT
+          - ACTIVE
+          - RETIRED
+        scope:
+          type: string
+          enum:
+          - GLOBAL
+          - TENANT
+    CreateDocumentTypeRequest:
+      type: object
+      required:
+      - documentTypeKey
+      - displayName
+      properties:
+        documentTypeKey:
+          type: string
+          maxLength: 120
+        displayName:
+          type: string
+          maxLength: 240
+        description:
+          type: string
+        category:
+          type: string
+    ExtractionProfileFieldInput:
+      type: object
+      required:
+      - fieldKey
+      - dataType
+      properties:
+        fieldKey:
+          type: string
+        displayName:
+          type: string
+        dataType:
+          type: string
+          enum:
+          - STRING
+          - INTEGER
+          - DECIMAL
+          - BOOLEAN
+          - DATE
+          - DATETIME
+          - CURRENCY
+          - IDENTIFIER
+          - PHONE
+          - EMAIL
+          - JSON
+        enabled:
+          type: boolean
+          default: true
+        expected:
+          type: boolean
+          default: true
+        aliases:
+          type: array
+          items:
+            type: string
+        extractionInstruction:
+          type: string
+        normalizationRules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleReference'
+        validationRules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleReference'
+        scoreIncluded:
+          type: boolean
+          default: true
+        scoreWeight:
+          type: number
+          minimum: 0
+          default: 1.0
+        useForSubjectMatching:
+          type: boolean
+          default: false
+        subjectIdentifierType:
+          type:
+          - string
+          - 'null'
+        manualCorrectionAllowed:
+          type: boolean
+          default: true
+        displaySequence:
+          type: integer
+          default: 100
+    RuleReference:
+      type: object
+      required:
+      - ruleKey
+      properties:
+        ruleKey:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+    CreateExtractionProfileRequest:
+      type: object
+      required:
+      - profileName
+      - fields
+      properties:
+        profileName:
+          type: string
+        classificationHint:
+          type: string
+        fields:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ExtractionProfileFieldInput'
+    ExtractionProfile:
+      type: object
+      required:
+      - profileId
+      - documentTypeKey
+      - version
+      - profileName
+      - status
+      - fields
+      properties:
+        profileId:
+          type: string
+          format: uuid
+        documentTypeKey:
+          type: string
+        version:
+          type: integer
+        profileName:
+          type: string
+        status:
+          type: string
+          enum:
+          - DRAFT
+          - PUBLISHED
+          - RETIRED
+        scope:
+          type: string
+          enum:
+          - GLOBAL
+          - TENANT
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractionProfileFieldInput'
+    TenantSettings:
+      type: object
+      required:
+      - tenantId
+      - timezoneName
+      - eodRetryLocalTime
+      - eodRetryEnabled
+      - uploadTimeoutMinutes
+      - maxUploadBytes
+      - allowedMimeTypes
+      - whatsappSubjectReferencePrefix
+      - classificationAcceptanceScore
+      - subjectMatchingMinConfidence
+      properties:
+        tenantId:
+          type: string
+        timezoneName:
+          type: string
+        eodRetryLocalTime:
+          type: string
+          pattern: ^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$
+        eodRetryEnabled:
+          type: boolean
+        uploadTimeoutMinutes:
+          type: integer
+          minimum: 1
+        maxUploadBytes:
+          type: integer
+          minimum: 1
+        allowedMimeTypes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        activeRetentionPolicyId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        whatsappSubjectReferencePrefix:
+          type: string
+          minLength: 1
+        classificationAcceptanceScore:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Tenant calibration for automatic document-type classification acceptance. Must be explicitly configured
+            before activation.
+        subjectMatchingMinConfidence:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Minimum field confidence allowed for automatic WhatsApp Subject matching from an extracted identifier.
+            Must be explicitly configured before activation.
+    PutTenantSettingsRequest:
+      type: object
+      required:
+      - timezoneName
+      - eodRetryLocalTime
+      - eodRetryEnabled
+      - uploadTimeoutMinutes
+      - maxUploadBytes
+      - allowedMimeTypes
+      - whatsappSubjectReferencePrefix
+      - classificationAcceptanceScore
+      - subjectMatchingMinConfidence
+      properties:
+        timezoneName:
+          type: string
+        eodRetryLocalTime:
+          type: string
+          pattern: ^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$
+        eodRetryEnabled:
+          type: boolean
+        uploadTimeoutMinutes:
+          type: integer
+          minimum: 1
+        maxUploadBytes:
+          type: integer
+          minimum: 1
+        allowedMimeTypes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        activeRetentionPolicyId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        whatsappSubjectReferencePrefix:
+          type: string
+          minLength: 1
+        classificationAcceptanceScore:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Tenant calibration for automatic document-type classification acceptance. Must be explicitly configured
+            before activation.
+        subjectMatchingMinConfidence:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Minimum field confidence allowed for automatic WhatsApp Subject matching from an extracted identifier.
+            Must be explicitly configured before activation.
+    RetentionPolicy:
+      type: object
+      required:
+      - retentionPolicyId
+      - policyKey
+      - retentionDays
+      - disposition
+      - status
+      properties:
+        retentionPolicyId:
+          type: string
+          format: uuid
+        policyKey:
+          type: string
+        displayName:
+          type: string
+        retentionDays:
+          type: integer
+          minimum: 0
+        disposition:
+          type: string
+          enum:
+          - PURGE_CONTENT
+          - KEEP_CONTENT
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - INACTIVE
+    CreateRetentionPolicyRequest:
+      type: object
+      required:
+      - policyKey
+      - displayName
+      - retentionDays
+      - disposition
+      properties:
+        policyKey:
+          type: string
+        displayName:
+          type: string
+        retentionDays:
+          type: integer
+          minimum: 0
+        disposition:
+          type: string
+          enum:
+          - PURGE_CONTENT
+          - KEEP_CONTENT
+    SubjectIdentifierInput:
+      type: object
+      required:
+      - identifierType
+      - normalizedValue
+      properties:
+        identifierType:
+          type: string
+        normalizedValue:
+          type: string
+        source:
+          type: string
+          enum:
+          - EXTERNAL
+          - DOCUMENT
+          - MANUAL
+          default: EXTERNAL
+    SubjectIdentifier:
+      allOf:
+      - $ref: '#/components/schemas/SubjectIdentifierInput'
+      - type: object
+        properties:
+          subjectIdentifierId:
+            type: string
+            format: uuid
+          subjectId:
+            type: string
+            format: uuid
+          verificationStatus:
+            type: string
+            enum:
+            - VERIFIED
+            - UNVERIFIED
+    WhatsappSenderMappingInput:
+      type: object
+      required:
+      - senderRef
+      - subjectId
+      properties:
+        senderRef:
+          type: string
+        subjectId:
+          type: string
+          format: uuid
+    WhatsappSenderMapping:
+      allOf:
+      - $ref: '#/components/schemas/WhatsappSenderMappingInput'
+      - type: object
+        properties:
+          status:
+            type: string
+            enum:
+            - ACTIVE
+            - INACTIVE
+    WhatsappRouteInput:
+      type: object
+      required:
+      - destinationRef
+      - tenantId
+      - systemActorId
+      properties:
+        destinationRef:
+          type: string
+        tenantId:
+          type: string
+        systemActorId:
+          type: string
+    WhatsappRoute:
+      allOf:
+      - $ref: '#/components/schemas/WhatsappRouteInput'
+      - type: object
+        properties:
+          routeId:
+            type: string
+            format: uuid
+          status:
+            type: string
+            enum:
+            - ACTIVE
+            - INACTIVE
+    ExternalEntityLinkInput:
+      type: object
+      required:
+      - sourceSystem
+      - entityType
+      - entityId
+      properties:
+        sourceSystem:
+          type: string
+        entityType:
+          type: string
+        entityId:
+          type: string
+        linkStatus:
+          type: string
+          enum:
+          - SUGGESTED
+          - CONFIRMED
+          default: CONFIRMED
+        linkConfidence:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          maximum: 100
+        matchReasons:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+    ExternalEntityLink:
+      type: object
+      required:
+      - entityLinkId
+      - sourceSystem
+      - entityType
+      - entityId
+      - linkStatus
+      - linkMethod
+      - linkedAtUtc
+      properties:
+        entityLinkId:
+          type: string
+          format: uuid
+        sourceSystem:
+          type: string
+        entityType:
+          type: string
+        entityId:
+          type: string
+        linkStatus:
+          type: string
+          enum:
+          - SUGGESTED
+          - CONFIRMED
+          - REJECTED
+          - REMOVED
+        linkConfidence:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          maximum: 100
+        matchReasons:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        linkMethod:
+          type: string
+          enum:
+          - CALLER
+          - SYSTEM
+          - HUMAN
+        linkedAtUtc:
+          type: string
+          format: date-time
+    UploadQualitySummary:
+      type: object
+      required:
+      - uploadedByActorId
+      - totalUploads
+      - fitUploads
+      - notFitUploads
+      - corruptUploads
+      - uploadFailedUploads
+      - firstPassFitPercentage
+      properties:
+        uploadedByActorId:
+          type: string
+        totalUploads:
+          type: integer
+          minimum: 0
+        fitUploads:
+          type: integer
+          minimum: 0
+        notFitUploads:
+          type: integer
+          minimum: 0
+        corruptUploads:
+          type: integer
+          minimum: 0
+        uploadFailedUploads:
+          type: integer
+          minimum: 0
+        replacementUploads:
+          type: integer
+          minimum: 0
+        firstPassFitPercentage:
+          type: number
+          minimum: 0
+          maximum: 100
+    OperationalException:
+      type: object
+      required:
+      - tenantId
+      - exceptionScope
+      - state
+      properties:
+        tenantId:
+          type: string
+        subjectId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        exceptionScope:
+          type: string
+          enum:
+          - REQUIREMENT
+          - DOCUMENT
+        documentTypeKey:
+          type:
+          - string
+          - 'null'
+        requirementClassification:
+          oneOf:
+          - $ref: '#/components/schemas/RequirementClassification'
+          - type: 'null'
+          description: MANDATORY/OPTIONAL for requirement exceptions, ADDITIONAL where derivable for an actual document, or
+            null when no Requirement Profile/classification applies.
+        state:
+          $ref: '#/components/schemas/RequirementState'
+        documentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        sourceChannel:
+          type:
+          - string
+          - 'null'
+          enum:
+          - MOBILE
+          - WEB
+          - API
+          - WHATSAPP
+          - null
+        uploadedByActorId:
+          type:
+          - string
+          - 'null'
+        issueCode:
+          type:
+          - string
+          - 'null'
+        registeredAtUtc:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    PagedOperationalExceptions:
+      type: object
+      required:
+      - items
+      - page
+      - pageSize
+      - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationalException'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+    PagedDocuments:
+      type: object
+      required:
+      - items
+      - page
+      - pageSize
+      - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+    WhatsappQuarantineItem:
+      type: object
+      required:
+      - quarantineId
+      - sourceEventId
+      - reasonCode
+      - status
+      - receivedAtUtc
+      properties:
+        quarantineId:
+          type: string
+          format: uuid
+        sourceEventId:
+          type: string
+        sourceSenderRef:
+          type:
+          - string
+          - 'null'
+        sourceDestinationRef:
+          type:
+          - string
+          - 'null'
+        sourceMediaRef:
+          type:
+          - string
+          - 'null'
+        reasonCode:
+          type: string
+        status:
+          type: string
+          enum:
+          - OPEN
+          - RESOLVED
+          - DISCARDED
+        receivedAtUtc:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      required:
+      - status
+      - code
+      - title
+      - retryable
+      - correlationId
+      properties:
+        status:
+          type: integer
+        code:
+          $ref: '#/components/schemas/ProblemCode'
+        title:
+          type: string
+        detail:
+          type: string
+        correlationId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        retryable:
+          type: boolean
+          description: Normative retryability flag from DI_ERROR_CATALOG_v2.2. Operation idempotency rules still apply.
+      description: Stable client error contract. Branch on code; title/detail are human-readable only. Canonical status/retryability
+        are defined in DI_ERROR_CATALOG_v2.2.
+    HumanVerificationStatus:
+      type: string
+      enum:
+      - MANDATORY
+      - OPTIONAL
+    VerificationState:
+      type: string
+      enum:
+      - NOT_VERIFIED
+      - VERIFIED
+    SubjectConfigurationStatus:
+      type: string
+      enum:
+      - READY
+      - REQUIREMENT_PROFILE_NOT_ASSIGNED
+    RuleCatalogItem:
+      type: object
+      required:
+      - ruleKey
+      - displayName
+      - status
+      properties:
+        ruleKey:
+          type: string
+        displayName:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - INACTIVE
+    UpdateDocumentTypeRequest:
+      type: object
+      required:
+      - displayName
+      properties:
+        displayName:
+          type: string
+          maxLength: 240
+        description:
+          type:
+          - string
+          - 'null'
+        category:
+          type:
+          - string
+          - 'null'
+    UpdateRequirementProfileDraftRequest:
+      type: object
+      required:
+      - items
+      properties:
+        description:
+          type:
+          - string
+          - 'null'
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RequirementProfileItemInput'
+    UpdateExtractionProfileDraftRequest:
+      type: object
+      required:
+      - profileName
+      - fields
+      properties:
+        profileName:
+          type: string
+        classificationHint:
+          type:
+          - string
+          - 'null'
+        fields:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ExtractionProfileFieldInput'
+    QualityRuleReference:
+      type: object
+      required:
+      - ruleKey
+      - enabled
+      properties:
+        ruleKey:
+          type: string
+          maxLength: 120
+        enabled:
+          type: boolean
+        parameters:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+    QualityPolicy:
+      type: object
+      required:
+      - tenantId
+      - rules
+      properties:
+        tenantId:
+          type: string
+        rules:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/QualityRuleReference'
+    PutQualityPolicyRequest:
+      type: object
+      required:
+      - rules
+      properties:
+        rules:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/QualityRuleReference'
+    QualityRuleCatalogItem:
+      type: object
+      required:
+      - ruleKey
+      - description
+      - parameterSchema
+      - status
+      properties:
+        ruleKey:
+          type: string
+        description:
+          type: string
+        parameterSchema:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - RETIRED
+    DocumentQualityResult:
+      type: object
+      required:
+      - ruleKey
+      - outcome
+      - evaluatedAtUtc
+      properties:
+        ruleKey:
+          type: string
+        outcome:
+          type: string
+          enum:
+          - PASS
+          - FAIL
+          - SKIP
+          - ERROR
+        parametersApplied:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        measurement: {}
+        message:
+          type:
+          - string
+          - 'null'
+        evaluatedAtUtc:
+          type: string
+          format: date-time
+    SubjectType:
+      type: string
+      enum:
+      - PERSON
+      - ORGANIZATION
+      - OTHER
+    SubjectStatus:
+      type: string
+      enum:
+      - ACTIVE
+      - INACTIVE
+    CreateSubjectRequest:
+      type: object
+      required:
+      - subjectType
+      properties:
+        subjectType:
+          $ref: '#/components/schemas/SubjectType'
+        displayName:
+          type:
+          - string
+          - 'null'
+          maxLength: 240
+    Subject:
+      type: object
+      required:
+      - tenantId
+      - subjectId
+      - subjectType
+      - status
+      - createdAtUtc
+      - updatedAtUtc
+      properties:
+        tenantId:
+          type: string
+        subjectId:
+          type: string
+          format: uuid
+        subjectType:
+          $ref: '#/components/schemas/SubjectType'
+        displayName:
+          type:
+          - string
+          - 'null'
+        status:
+          $ref: '#/components/schemas/SubjectStatus'
+        createdAtUtc:
+          type: string
+          format: date-time
+        updatedAtUtc:
+          type: string
+          format: date-time
+    ProblemCode:
+      type: string
+      enum:
+      - INVALID_REQUEST
+      - UNAUTHORIZED
+      - FORBIDDEN
+      - TENANT_NOT_FOUND
+      - TENANT_NOT_READY
+      - RETENTION_POLICY_NOT_CONFIGURED
+      - DEVICE_NOT_REGISTERED
+      - REQUIREMENT_PROFILE_NOT_ASSIGNED
+      - REQUIREMENT_PROFILE_NOT_PUBLISHED
+      - DOCUMENT_TYPE_NOT_FOUND
+      - EXTRACTION_PROFILE_NOT_FOUND
+      - SUBJECT_DOCUMENT_NOT_FOUND
+      - DOCUMENT_NOT_CONFIRMED
+      - DOCUMENT_CONTENT_PURGED
+      - IDEMPOTENCY_CONFLICT
+      - FILE_EMPTY
+      - FILE_TOO_LARGE
+      - MIME_TYPE_NOT_ALLOWED
+      - INVALID_FILE_CONTENT
+      - INVALID_CONFIGURATION
+      - DOCUMENT_NOT_FOUND
+      - UNASSIGNED_DOCUMENT_NOT_FOUND
+      - SUBJECT_DOCUMENT_MISMATCH
+      - INVALID_DOCUMENT_STATE
+      - DOCUMENT_REPLACEMENT_NOT_ALLOWED
+      - DOCUMENT_ALREADY_ASSIGNED
+      - PROFILE_IMMUTABLE
+      - PROFILE_NOT_DRAFT
+      - WHATSAPP_ROUTE_NOT_FOUND
+      - QUARANTINE_ITEM_NOT_FOUND
+      - STORAGE_WRITE_FAILED
+      - STORAGE_READ_FAILED
+      - QUALITY_POLICY_NOT_CONFIGURED
+      - CLASSIFICATION_NO_CANDIDATES
+      - CLASSIFICATION_AMBIGUOUS
+      - SUBJECT_MATCH_AMBIGUOUS
+      - SUBJECT_IDENTIFIER_CONFLICT
+      - INTERNAL_ERROR
+      x-verigence-error-catalog:
+        INVALID_REQUEST:
+          httpStatus: 400
+          retryable: false
+          category: REQUEST
+        UNAUTHORIZED:
+          httpStatus: 401
+          retryable: false
+          category: AUTHENTICATION
+        FORBIDDEN:
+          httpStatus: 403
+          retryable: false
+          category: AUTHORIZATION
+        TENANT_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: TENANT
+        TENANT_NOT_READY:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        RETENTION_POLICY_NOT_CONFIGURED:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        DEVICE_NOT_REGISTERED:
+          httpStatus: 403
+          retryable: false
+          category: AUTHORIZATION
+        REQUIREMENT_PROFILE_NOT_ASSIGNED:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        REQUIREMENT_PROFILE_NOT_PUBLISHED:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        DOCUMENT_TYPE_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: CONFIGURATION
+        EXTRACTION_PROFILE_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: CONFIGURATION
+        SUBJECT_DOCUMENT_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: RESOURCE
+        DOCUMENT_NOT_CONFIRMED:
+          httpStatus: 409
+          retryable: false
+          category: STATE
+        DOCUMENT_CONTENT_PURGED:
+          httpStatus: 410
+          retryable: false
+          category: RETENTION
+        IDEMPOTENCY_CONFLICT:
+          httpStatus: 409
+          retryable: false
+          category: IDEMPOTENCY
+        FILE_EMPTY:
+          httpStatus: 422
+          retryable: false
+          category: UPLOAD
+        FILE_TOO_LARGE:
+          httpStatus: 413
+          retryable: false
+          category: UPLOAD
+        MIME_TYPE_NOT_ALLOWED:
+          httpStatus: 415
+          retryable: false
+          category: UPLOAD
+        INVALID_FILE_CONTENT:
+          httpStatus: 422
+          retryable: false
+          category: UPLOAD
+        INVALID_CONFIGURATION:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        DOCUMENT_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: RESOURCE
+        UNASSIGNED_DOCUMENT_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: RESOURCE
+        SUBJECT_DOCUMENT_MISMATCH:
+          httpStatus: 404
+          retryable: false
+          category: RESOURCE
+        INVALID_DOCUMENT_STATE:
+          httpStatus: 409
+          retryable: false
+          category: STATE
+        DOCUMENT_REPLACEMENT_NOT_ALLOWED:
+          httpStatus: 409
+          retryable: false
+          category: STATE
+        DOCUMENT_ALREADY_ASSIGNED:
+          httpStatus: 409
+          retryable: false
+          category: STATE
+        PROFILE_IMMUTABLE:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        PROFILE_NOT_DRAFT:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        WHATSAPP_ROUTE_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: INTEGRATION
+        QUARANTINE_ITEM_NOT_FOUND:
+          httpStatus: 404
+          retryable: false
+          category: INTEGRATION
+        STORAGE_WRITE_FAILED:
+          httpStatus: 503
+          retryable: true
+          category: DEPENDENCY
+        STORAGE_READ_FAILED:
+          httpStatus: 503
+          retryable: true
+          category: DEPENDENCY
+        QUALITY_POLICY_NOT_CONFIGURED:
+          httpStatus: 409
+          retryable: false
+          category: CONFIGURATION
+        CLASSIFICATION_NO_CANDIDATES:
+          httpStatus: 409
+          retryable: false
+          category: CLASSIFICATION
+        CLASSIFICATION_AMBIGUOUS:
+          httpStatus: 422
+          retryable: false
+          category: CLASSIFICATION
+        SUBJECT_MATCH_AMBIGUOUS:
+          httpStatus: 409
+          retryable: false
+          category: SUBJECT_MATCHING
+        SUBJECT_IDENTIFIER_CONFLICT:
+          httpStatus: 409
+          retryable: false
+          category: SUBJECT_MATCHING
+        INTERNAL_ERROR:
+          httpStatus: 500
+          retryable: true
+          category: INTERNAL
+  responses:
+    Problem:
+      description: Standard problem response.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+  headers:
+    CorrelationId:
+      description: End-to-end execution correlation identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128

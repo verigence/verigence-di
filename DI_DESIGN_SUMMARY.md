@@ -434,14 +434,15 @@ Resolve Tenant from whatsapp_routes table
 | What you need | File |
 |---|---|
 | Where to start every session | `DI_MASTER_REFERENCE.md` |
+| Locked design decisions (read first) | `DI_DECISIONS.md` |
 | Current implementation status | `PROGRESS.md` |
-| Full architecture | `DI_ARCHITECTURE_v2.2.md` |
-| Full component contracts | `DI_LLD_v2.2.md` |
-| Database schema (DDL) | `DI_POSTGRESQL_SCHEMA_v2.2.sql` |
-| All 54 API operations | `DI_OPENAPI_v2.2.yaml` |
-| JWT claims + 27 permissions | `DI_SECURITY_RBAC_v2.2.md` + `DI_RBAC_v2.2.yaml` |
-| 38 error codes | `DI_ERROR_CATALOG_v2.2.md` + `DI_ERROR_CATALOG_v2.2.yaml` |
-| Classification algorithm | `DI_CLASSIFICATION_v2.2.md` |
-| Audit chain model | `DI_AUDIT_MODEL_v2.2.md` |
-| Data model | `DI_DATA_MODEL_v2.2.md` |
+| Full architecture | `design/DI_ARCHITECTURE_v2.2.md` |
+| Full component contracts | `design/DI_LLD_v2.2.md` |
+| Database schema (DDL) | `design/DI_POSTGRESQL_SCHEMA_v2.2.sql` |
+| All API operations | `design/DI_OPENAPI_v2.2.yaml` |
+| JWT claims + 27 permissions | `design/DI_SECURITY_RBAC_v2.2.md` + `design/DI_RBAC_v2.2.yaml` |
+| Error codes | `design/DI_ERROR_CATALOG_v2.2.md` + `design/DI_ERROR_CATALOG_v2.2.yaml` |
+| Classification algorithm | `design/DI_CLASSIFICATION_v2.2.md` |
+| Audit chain model | `design/DI_AUDIT_MODEL_v2.2.md` |
+| Data model | `design/DI_DATA_MODEL_v2.2.md` |
 | Env vars / secrets | `SECRETS_CHECKLIST.md` |
