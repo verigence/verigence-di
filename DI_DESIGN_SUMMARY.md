@@ -12,7 +12,7 @@
 
 Verigence Document Intelligence is a **standalone service** that:
 
-1. Accepts uploaded evidence (images, PDFs) from Mobile, Web, API, and WhatsApp
+1. Accepts uploaded documents (images, PDFs) via REST API and WhatsApp (Phase 2)
 2. Validates integrity and fitness (MIME, structure, quality rules)
 3. Classifies the document type using OCR/AI
 4. Extracts configured fields, normalizes and validates them deterministically
@@ -47,7 +47,7 @@ graph TD
     subgraph Processing
         H[Processing Worker\nclaim · classify · extract · score]
         I[EOD Retry Scheduler\none retry for retryable failures]
-        J[DocumentAI Adapter\nGoogle Doc AI / mock]
+        J[DocumentAI Adapter\nAzure Doc Intelligence / mock]
     end
 
     subgraph Query & Verification
@@ -204,6 +204,13 @@ document_field_values                  VERSIONED — the current accepted value 
 GET /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/fields
 ```
 
+All API responses use the universal envelope:
+```json
+{ "errorCode": "000", "errorMessage": "Success", "data": { ... } }
+```
+Error codes: `000` = success, `E001`–`E010` = typed failures (see DI_DECISIONS.md D8).
+
+
 Requires permission: `document:fields:read`
 
 Returns `DocumentExtractionResult`:
@@ -325,7 +332,7 @@ Authorization checks permissions[] — never role name strings
 | Tag group | Operations |
 |---|---|
 | Subjects | createSubject, listSubjects, getSubject |
-| Subject Documents | uploadSubjectDocument, getSubjectDocuments, getSubjectDocument, getSubjectDocumentContent, getSubjectDocumentFields, getSubjectDocumentExceptions, getSubjectDocumentQuality |
+| Subject Documents | uploadSubjectDocument, getSubjectDocuments, getSubjectDocument, **getSubjectDocumentTypes** (new), getSubjectDocumentContent, getSubjectDocumentFields, getSubjectDocumentExceptions, getSubjectDocumentQuality |
 | Human Verification | verifySubjectDocument, getVerificationQueue |
 | Operations | getTenantDocumentExceptions, getUploadQuality |
 | External Links | getDocumentEntityLinks, addDocumentEntityLink |
@@ -345,8 +352,8 @@ Authorization checks permissions[] — never role name strings
 | Backend | Python 3.12 · FastAPI · SQLAlchemy (async) · Alembic · Pydantic v2 |
 | Database | PostgreSQL 16 · `docintel` schema · Row-Level Security |
 | Object storage | Cloudflare R2 (prod) · MinIO (local) · S3-compatible via aioboto3 |
-| Auth | Clerk (OIDC/JWT) — provider-neutral; only canonical JWT claims consumed |
-| AI / OCR | Google Document AI · behind `DocumentAIAdapter` · mock in dev/CI |
+| Auth | Security module (OIDC/JWT) — provider-neutral; only canonical JWT claims consumed |
+| AI / OCR | Azure Document Intelligence · behind `DocumentAIAdapter` · mock in dev/CI |
 | Scheduling | APScheduler (in-process, no external queue in Phase 1) |
 | Operator UI | React 18 · TypeScript · Vite PWA · TanStack Query · Tailwind CSS |
 | Hosting | Railway (API + Worker) · Cloudflare Pages (ops-ui) · Neon (PostgreSQL) |
@@ -372,7 +379,7 @@ Internet ──HTTPS──▶ │  │  FastAPI API  │  │  Worker  │ │
                               │
                     ┌─────────▼───────────────────────┐
                     │       Cloudflare R2              │
-                    │  tenants/{key}/documents/{id}/   │
+                    │  {tenant_slug}/subjects/...      │
                     └─────────────────────────────────┘
 
 Cloudflare Pages ──▶  ops-ui React PWA
@@ -412,11 +419,13 @@ Resolve Tenant from whatsapp_routes table
 | Authorization input | `permissions[]` in JWT — never role name strings |
 | Primary lookup | `tenant_id + subject_id` — no global document endpoint |
 | Classification candidate set | all ACTIVE types with PUBLISHED profiles; requirement profile is context only, never a filter |
-| Caller hint (`documentTypeKey`) | persisted as non-authoritative `document_type_hint_key`; never bypasses classification |
+| Caller hint (`documentTypeKey`) | persisted as `document_type_hint_key`; used as accepted classification (no AI classifier in Phase 1) |
 | Original evidence | immutable from application perspective; content state → PURGED only via retention |
 | Human correction | creates new HUMAN field value version; never overwrites machine facts or confidence |
 | Phase 1 verification limit | one successful verification action per document |
-| Problem response client contract | branch on `code` (stable); never parse `title` or `detail` |
+| API response contract | universal envelope `{errorCode, errorMessage, data}` — `000` = success; branch on errorCode |
+| source_channel | nullable — set by WhatsApp adapter only; not supplied by REST API callers |
+| AI/OCR provider | Azure Document Intelligence (replaces Google Doc AI) — D13 |
 
 ---
 

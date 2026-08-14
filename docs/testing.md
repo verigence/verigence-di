@@ -15,7 +15,7 @@ Tier 2 — Extended tests    (Neon DB + R2 + real JWTs, triggered on demand)
 Post-deploy — Live smoke   (hits live Railway URL, runs after deploy)
 ```
 
-**Current count:** 107 unit tests, 11 smoke tests, 25+ extended tests, 8 post-deploy tests
+**Current count:** 108 unit tests, 11 smoke tests, 25+ extended tests, 8 post-deploy tests
 
 ---
 
@@ -28,7 +28,7 @@ cd backend
 PYTHONPATH=src uv run pytest -m no_docker --no-cov -q
 ```
 
-Expected: `107 passed, 1 xfailed`
+Expected: `108 passed, 0 xfailed`
 
 These tests have zero external dependencies — no DB, no network, no Docker.
 
@@ -275,12 +275,12 @@ with httpx.Client(base_url=BASE, timeout=30) as c:
     # 3. Upload valid PDF with documentTypeKey=passport
     r = c.post(f"/v1/tenants/{TENANT}/subjects/{sid}/documents",
                headers={"Authorization": f"Bearer {tok()}"},
-               data={"sourceChannel":"API","documentTypeKey":"passport"},
+               data={"documentTypeKey":"passport"},
                files={"file":("passport.pdf", VALID_PDF, "application/pdf")})
     print("upload:", r.status_code, r.json())
-    doc = r.json()
-    did = doc.get("documentId")
-    print(f"  uploadStatus={doc.get('uploadStatus')}  physicalFormType={doc.get('physicalFormType')}")
+    envelope = r.json()
+    did = envelope.get("data", {}).get("documentId") if envelope.get("data") else None
+    print(f"  errorCode={envelope.get('errorCode')}  uploadStatus={envelope.get('data', {}).get('uploadStatus')}")
 
     # 4. Download content — verify Content-Disposition header present
     r = c.get(f"/v1/tenants/{TENANT}/subjects/{sid}/documents/{did}/content",

@@ -164,9 +164,6 @@ async def test_intake_calls_validate_upload() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=__import__(
-                "verigence.di.domain.enums", fromlist=["SourceChannel"]
-            ).SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
@@ -182,7 +179,6 @@ async def test_intake_calls_validate_upload() -> None:
 @pytest.mark.asyncio
 async def test_intake_fit_result_creates_processing_job() -> None:
     """A FIT document with a known processable type must trigger create_initial_job."""
-    from verigence.di.domain.enums import SourceChannel
     from verigence.di.quality.validator import ValidatorResult
 
     # Build session mock with TDT returning GOVT_ID (requires_processing=True)
@@ -201,7 +197,6 @@ async def test_intake_fit_result_creates_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
@@ -216,7 +211,6 @@ async def test_intake_fit_result_creates_processing_job() -> None:
 @pytest.mark.asyncio
 async def test_intake_not_fit_skips_processing_job() -> None:
     """A NOT_FIT validator result must NOT create a processing job."""
-    from verigence.di.domain.enums import SourceChannel
     from verigence.di.quality.validator import ValidatorResult
 
     session = _make_session_mock()
@@ -239,7 +233,6 @@ async def test_intake_not_fit_skips_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
@@ -254,7 +247,6 @@ async def test_intake_not_fit_skips_processing_job() -> None:
 @pytest.mark.asyncio
 async def test_intake_corrupt_result_skips_processing_job() -> None:
     """A CORRUPT validator result must NOT create a processing job."""
-    from verigence.di.domain.enums import SourceChannel
     from verigence.di.quality.validator import ValidatorResult
 
     session = _make_session_mock()
@@ -277,7 +269,6 @@ async def test_intake_corrupt_result_skips_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",

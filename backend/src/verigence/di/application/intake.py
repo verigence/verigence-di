@@ -29,7 +29,6 @@ from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.domain.enums import (
-    SourceChannel,
     UploadStatus,
 )
 from verigence.di.quality.validator import validate_upload
@@ -108,16 +107,11 @@ async def intake_document(
     storage: StorageAdapter,
     tenant_id: str,
     subject_id: uuid.UUID,
-    source_channel: SourceChannel,
     uploaded_by_actor_id: str,
     uploaded_by_actor_type: str,
     correlation_id: str,
     upload: UploadFile,
-    document_type_key: str | None = None,  # v2.2: persisted as document_type_hint_key
-    captured_at: datetime | None = None,
-    source_reference: str | None = None,
-    replaces_document_id: uuid.UUID | None = None,
-    source_device_id: str | None = None,
+    document_type_key: str | None = None,
 ) -> dict:  # type: ignore[type-arg]
     """Execute the full document intake flow.
 
@@ -174,7 +168,7 @@ async def intake_document(
         session,
         tenant_id=tenant_id,
         subject_id=subject_id,
-        source_channel=source_channel,
+        source_channel=None,        # D10: no longer from caller
         uploaded_by_actor_id=uploaded_by_actor_id,
         uploaded_by_actor_type=uploaded_by_actor_type,
         correlation_id=correlation_id,
@@ -183,9 +177,6 @@ async def intake_document(
         retention_disposition=retention["disposition"],
         original_filename=upload.filename,
         declared_mime_type=upload.content_type,
-        source_device_id=source_device_id,
-        captured_at=captured_at,
-        replaces_document_id=replaces_document_id,
         document_type_hint_key=document_type_key,
         physical_form_type=physical_form_type,
         requires_processing=requires_processing,

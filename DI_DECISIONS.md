@@ -176,3 +176,226 @@ When inserting into tenant_document_types, requires_processing defaults as:
   ADDITIONAL  → false (always — no override permitted at this level)
 
 ### Status: AGREED — enforced in provision_tenant_document_types()
+
+---
+
+## D8 — Universal API Response Envelope (2026-08-18)
+
+### Decision
+Every API response (success and error) is wrapped in a universal JSON envelope:
+
+```json
+{
+  "errorCode": "000",
+  "errorMessage": "string",
+  "data": { ... } | null
+}
+```
+
+Rules:
+- `errorCode` and `errorMessage` are ALWAYS present — never absent
+- `errorCode: "000"` means success
+- `errorCode: "E001"` ... `"E010"` (and beyond) means failure
+- `data` contains the payload on success; `null` on failure
+- HTTP status codes are preserved (201 for create, 200 for get, 404 for not found etc.)
+  — Option B: correct HTTP status codes + error envelope
+
+### Error code catalogue
+
+| errorCode | Meaning                                        | HTTP status | Retryable |
+|-----------|------------------------------------------------|-------------|-----------|
+| 000       | Success                                        | 200 / 201   | —         |
+| E001      | Quality check failed — file not fit            | 200         | No        |
+| E002      | File corrupt or unreadable                     | 200         | No        |
+| E003      | Storage error — safe to retry                  | 500         | Yes       |
+| E004      | Subject not found                              | 404         | No        |
+| E005      | Document not found                             | 404         | No        |
+| E006      | Unsupported file type                          | 400         | No        |
+| E007      | File too large                                 | 400         | No        |
+| E008      | Document not yet confirmed (fields unavailable)| 409         | No        |
+| E009      | Unauthorised — missing or invalid token        | 401         | No        |
+| E010      | Forbidden — insufficient permissions           | 403         | No        |
+
+### errorMessage for success
+- Upload success: `"File Uploaded Successfully"`
+- All other success: `"Success"`
+
+### Status: AGREED — to be implemented
+
+---
+
+## D9 — Upload API request simplification (2026-08-18)
+
+### Decision
+Upload request form fields reduced to the minimum:
+
+**Kept:**
+- `file` — the document bytes (required)
+- `documentTypeKey` — matches master catalogue key e.g. `"bank_statement"` (optional)
+
+**Removed from request:**
+- `sourceChannel` — system derives it internally (see D10)
+- `capturedAt` — not required for Phase 1
+- `sourceReference` — not required for Phase 1
+- `replacesDocumentId` — not required for Phase 1
+
+### Upload response (inside envelope data)
+```json
+{
+  "documentId": "uuid",
+  "uploadStatus": "ACCEPTED" | "REJECTED",
+  "processingStatus": "PENDING" | "PROCESSING" | "PROCESSED" | "FAILED" | null
+}
+```
+
+`uploadStatus` replaces the internal 4-value enum (FIT/NOT_FIT/CORRUPT/UPLOAD_FAILED):
+- `ACCEPTED` = was FIT internally
+- `REJECTED` = was NOT_FIT, CORRUPT, or UPLOAD_FAILED
+
+`processingStatus` public values:
+- `PENDING`     = internal NOT_STARTED + RECEIVING + RETRY_PENDING
+- `PROCESSING`  = internal PROCESSING
+- `PROCESSED`   = internal PROCESSED
+- `FAILED`      = internal FAILED
+- `null`        = upload was REJECTED (no processing attempted)
+
+### Internal storage
+Internal DB columns `upload_status` and `processing_status` keep their full value sets
+(FIT/NOT_FIT/CORRUPT/UPLOAD_FAILED and NOT_STARTED/PROCESSING/RETRY_PENDING/PROCESSED/FAILED).
+The public-facing simplification happens only at the API response layer.
+
+### Status: AGREED — to be implemented
+
+---
+
+## D10 — sourceChannel made nullable, derived internally (2026-08-18)
+
+### Decision
+`source_channel` on `docintel.documents` is made nullable (migration 0006).
+
+**Rationale:** The front-end application is responsible for maintaining channel context.
+The DI module does not require it for any processing logic.
+
+**Internal behaviour:**
+- Upload via REST API endpoint → `source_channel = NULL` (no longer hardcoded to 'API')
+- WhatsApp webhook intake (Phase 2) → `source_channel = 'WHATSAPP'` (set by whatsapp adapter)
+- `source_channel` is never returned in any public API response
+
+### Migration required
+Migration 0006: `ALTER TABLE docintel.documents ALTER COLUMN source_channel DROP NOT NULL`
+
+### Status: AGREED — to be implemented in migration 0006
+
+---
+
+## D11 — Document GET response shape (2026-08-18)
+
+### Decision
+All document GET responses (single + list) return the same slim document object
+inside the universal envelope:
+
+```json
+{
+  "documentId": "uuid",
+  "documentTypeKey": "bank_statement" | null,
+  "uploadStatus": "ACCEPTED" | "REJECTED",
+  "processingStatus": "PENDING" | "PROCESSING" | "PROCESSED" | "FAILED" | null,
+  "confirmationStatus": "CONFIRMED" | "PENDING" | "NOT_CONFIRMED" | null,
+  "confidenceScore": 94.5 | null,
+  "registeredAtUtc": "ISO8601"
+}
+```
+
+**Fields deliberately excluded from public response:**
+- `sourceChannel` — not relevant to caller
+- `verificationState`, `contentState`, `humanVerificationStatus`, `verificationThresholdApplied`
+- `originalFilename`, `declaredMimeType`, `detectedMimeType`, `fileSizeBytes`, `contentHashSha256`, `pageCount`
+- `correlationId`, `processedAtUtc`, `confirmedAtUtc`
+- `uploadIssueCode`, `uploadIssueDetail`, `processingFailureCode`
+- `duplicateOfDocumentId`, `replacesDocumentId`
+
+These internal fields remain in the DB and are accessible to internal/ops tooling
+but are not exposed through the public document API.
+
+### documentTypeKey resolution
+Returned from `docintel.document_types.document_type_key` via join on `documents.document_type_id`.
+Returns `null` if document type was not resolved at upload time (ADDITIONAL/unknown).
+
+### Status: AGREED — to be implemented
+
+---
+
+## D12 — New document-types summary endpoint (2026-08-18)
+
+### Decision
+New endpoint added:
+
+```
+GET /v1/tenants/{tenantId}/subjects/{subjectId}/document-types
+```
+
+Returns count of documents per documentTypeKey for the given subject.
+Counts only ACCEPTED (FIT) uploads — REJECTED documents excluded.
+
+Response (inside envelope):
+```json
+{
+  "subjectId": "uuid",
+  "documentTypes": [
+    { "documentTypeKey": "bank_statement", "count": 3 },
+    { "documentTypeKey": "passport",       "count": 1 }
+  ]
+}
+```
+
+Documents where `document_type_id IS NULL` (uploaded as ADDITIONAL/unknown)
+are excluded from this summary — they have no documentTypeKey.
+
+### Status: AGREED — to be implemented
+
+---
+
+## D13 — OCR/AI Provider: Azure Document Intelligence (2026-08-18)
+
+### Decision
+Azure Document Intelligence replaces the originally planned Google Document AI.
+
+**Rationale:**
+- Single provider (one Azure subscription, one billing account)
+- Has prebuilt models for all document types in the catalogue
+- Best-in-class handwriting OCR (prebuilt-read) for freeform multi-style handwriting
+- 6x cheaper than Google Document AI at target volume (~12,000 docs/month)
+- `prebuilt-bankStatement` model returns structured `transactions[]` array
+- Indian document coverage (Aadhaar, PAN, bank statements) verified
+
+**Model routing by physical_form_type + document_type_key:**
+
+| Condition | Azure model |
+|-----------|-------------|
+| GOVT_ID (any) | `prebuilt-idDocument` |
+| PRINTABLE — bank_statement, loan_statement, customer_ledger | `prebuilt-bankStatement` |
+| PRINTABLE — salary_slip | `prebuilt-payStub` |
+| PRINTABLE — insurance_cover, utility_bill, booking_docket | `prebuilt-invoice` |
+| PRINTABLE — corporate_id, others | `prebuilt-layout` |
+| HANDWRITTEN (any) | `prebuilt-read` |
+
+**Classification strategy:**
+AI classification is skipped. The `documentTypeKey` supplied at upload (stored as
+`document_type_hint_key`) is treated as the accepted classification.
+The `classify()` call returns a pass-through result with the hint key at confidence 100.
+
+**Settings changes (DI_ prefix):**
+- Remove: `docai_project_id`, `docai_location`, `docai_processor_id`
+- Add: `docai_azure_endpoint` (e.g. `https://<resource>.cognitiveservices.azure.com/`)
+- Add: `docai_azure_key` (API key)
+
+**Dependency change:**
+- Remove: `google-cloud-documentai`
+- Add: `azure-ai-documentintelligence>=1.0.0`
+
+**New file:** `document_ai/azure_adapter.py`
+- Implements `DocumentAIAdapter` abstract interface
+- `classify()` → pass-through using hint key (no Azure API call)
+- `extract()` → calls Azure Document Intelligence, routes model by form type + doc type key
+
+### Status: AGREED — implementation pending (after API contract changes)

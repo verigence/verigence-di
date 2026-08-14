@@ -233,14 +233,17 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | JWT audience (tenant) | `verigence-document-intelligence` |
 | JWT audience (system) | `verigence-document-intelligence-system` |
 | Authorization check | `permissions[]` array in JWT — NOT role names |
-| Problem response field clients must branch on | `code` (stable) — never `title` |
+| API response envelope | `{errorCode, errorMessage, data}` — `000` = success; client branches on `errorCode` |
+| Upload public status | `ACCEPTED` (FIT internally) / `REJECTED` (NOT_FIT/CORRUPT/UPLOAD_FAILED) |
+| source_channel | nullable — REST API sets NULL; WhatsApp adapter sets `WHATSAPP` |
 | Max upload size (default) | 30 MB |
-| Allowed MIME types (default) | `image/jpeg`, `image/png`, `image/webp`, `image/tiff`, `application/pdf` |
+| Allowed MIME types (default) | 22 types including PDF, images, Office, CSV, ZIP |
 | Processing job locking | `SELECT … FOR UPDATE SKIP LOCKED` |
 | Retry policy | 1 EOD retry for retryable failures; non-retryable → FAILED immediately |
 | Audit chain key | `(tenant_id, entity_type, entity_id)` — entity-scoped, not tenant-wide |
 | WhatsApp source channel | `WHATSAPP` — subject_id nullable until assigned |
 | Mock token format (dev/CI) | `mock.<tenant_id>.<actor_id>.<ROLE>[.<ROLE>...]` |
+| AI/OCR provider | Azure Document Intelligence (D13 — replaces Google Doc AI) |
 
 ---
 
@@ -269,19 +272,20 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current: Step 12 — React PWA ops-ui** ❌ NOT STARTED
+**Current: Step 9 — Azure Document Intelligence adapter** ❌ NOT STARTED
+(API contract changes D8–D12 complete. Azure account + resource creation pending — manual step.)
 
 ---
 
-### Infrastructure status — 2026-08-17 (current)
+### Infrastructure status — 2026-08-18 (current)
 
 | Service | Status |
 |---|---|
-| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` — commit `b93ae4e` |
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ✅ All 5 migrations at head (0001–0005) — verified 2026-08-17 |
-| Cloudflare R2 | ✅ Working — new slug-based path with 4 form-type folders |
-| Security module JWKS | ✅ Using GitHub raw test JWKS — mock tokens rejected in production |
+| Neon PostgreSQL | ✅ Migrations 0001–0005 at head — 0006 pending manual apply |
+| Cloudflare R2 | ✅ Working — slug-based path with 4 form-type folders |
+| Security module JWKS | ✅ Using GitHub raw test JWKS |
 | CI pipeline | ✅ Green — `108 passed, 0 xfailed` |
 
 ### Schema changes beyond Baseline 2.2 spec
@@ -302,6 +306,9 @@ If a design decision needs to change, the human must agree, a new baseline versi
 | Configurable verification threshold | `settings.py`, `domain/scoring.py`, `workers/job_runner.py`, `api/v1/tenant_config.py`, `0003` migration | Per-tenant threshold stored in DB; env var fallback |
 | Auth migrated to Security module | `auth/verifier.py`, `auth/jwks.py`, `auth/principal.py`, `settings.py` | Issuer `verigence-security`, audience `verigence-platform`, `DI_SECURITY_JWKS_URL` replaces Clerk vars |
 | All permissions renamed | `auth/permissions.py` | All strings now `di.*` dot-separated (was colon-separated) |
+| Tenant document types | `repositories/tenants.py`, `repositories/database.py`, `0005` migration | 15 global seed types, per-tenant physical_form_type + requires_processing |
+| R2 path redesign | `storage/adapter.py`, `application/intake.py` | Slug-based path: `{tenant_slug}/subjects/{slug}-{id_short}/documents/{form_folder}/...` |
+| API contract redesign (D8–D12) | `api/v1/documents.py`, `api/v1/schemas.py`, `application/intake.py`, `repositories/documents.py`, `0006` migration | Universal envelope, ACCEPTED/REJECTED upload status, sourceChannel nullable, document-types summary endpoint |
 
 ### Railway deployment method (no CLI token needed)
 

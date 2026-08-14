@@ -81,6 +81,7 @@ ignore = [
     "TC003",   # move stdlib import into TYPE_CHECKING — breaks Pydantic/FastAPI runtime annotation
     "F841",    # local variable assigned but never used — we clean these up manually
     "UP042",   # prefer StrEnum — str+Enum is required for Pydantic v2 serialization compat
+    "UP046",   # use type parameters — Generic[T] required for Pydantic v2 generic model compat
     "UP007",   # use X|Y union — keep Union for clarity in complex storage type hints
     "UP035",   # AsyncIterator from collections.abc — keep typing import for now
 ]

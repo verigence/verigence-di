@@ -14,7 +14,6 @@ from verigence.di.domain.enums import (
     ContentState,
     ProcessingStatus,
     RetentionDisposition,
-    SourceChannel,
     UploadStatus,
     VerificationState,
 )
@@ -22,35 +21,28 @@ from verigence.di.storage.adapter import StorageAdapter
 
 
 def _row_to_dict(row) -> dict:  # type: ignore[type-arg]
-    """Convert a SQLAlchemy mapping row to a plain dict."""
+    """Convert a SQLAlchemy mapping row to a plain dict.
+
+    D11: only fields needed for the public API response are included.
+    Internal fields (sourceChannel, hashes, MIME etc.) remain in DB but
+    are not surfaced through the public document endpoints.
+    """
     return {
         "tenant_id": row["tenant_id"],
         "document_id": row["document_id"],
         "subject_id": row["subject_id"],
-        "source_channel": SourceChannel(row["source_channel"]),
+        "document_type_key": row.get("document_type_key"),  # from LEFT JOIN on document_types
         "upload_status": UploadStatus(row["upload_status"]),
         "processing_status": ProcessingStatus(row["processing_status"]),
         "confirmation_status": ConfirmationStatus(row["confirmation_status"]),
         "confidence_score": row["confidence_score"],
-        "verification_threshold_applied": row["verification_threshold_applied"],
-        "human_verification_status": row["human_verification_status"],
         "verification_state": VerificationState(row["verification_state"]),
         "content_state": ContentState(row["content_state"]),
-        "original_filename": row["original_filename"],
-        "declared_mime_type": row["declared_mime_type"],
-        "detected_mime_type": row["detected_mime_type"],
-        "file_size_bytes": row["file_size_bytes"],
-        "content_hash_sha256": row["content_hash_sha256"],
-        "page_count": row["page_count"],
-        "correlation_id": row["correlation_id"],
         "registered_at_utc": row["registered_at_utc"],
-        "processed_at_utc": row["processed_at_utc"],
-        "confirmed_at_utc": row["confirmed_at_utc"],
-        "upload_issue_code": row["upload_issue_code"],
-        "upload_issue_detail": row["upload_issue_detail"],
-        "processing_failure_code": row["processing_failure_code"],
-        "duplicate_of_document_id": row["duplicate_of_document_id"],
-        "replaces_document_id": row["replaces_document_id"],
+        # Keep internal fields for delete eligibility checks and worker access
+        "upload_issue_code": row.get("upload_issue_code"),
+        "upload_issue_detail": row.get("upload_issue_detail"),
+        "processing_failure_code": row.get("processing_failure_code"),
     }
 
 
@@ -59,7 +51,7 @@ async def create_document_receiving(
     *,
     tenant_id: str,
     subject_id: uuid.UUID,
-    source_channel: SourceChannel,
+    source_channel: str | None = None,   # D10: nullable — caller no longer required
     uploaded_by_actor_id: str,
     uploaded_by_actor_type: str,
     correlation_id: str,
@@ -131,7 +123,7 @@ async def create_document_receiving(
             "retention_policy_id": retention_policy_id,
             "retention_until": retention_until,
             "retention_disposition": retention_disposition.value,
-            "source_channel": source_channel.value,
+            "source_channel": source_channel,
             "actor_id": uploaded_by_actor_id,
             "actor_type": uploaded_by_actor_type,
             "device_id": source_device_id,
@@ -148,30 +140,17 @@ async def create_document_receiving(
         "tenant_id": tenant_id,
         "document_id": document_id,
         "subject_id": subject_id,
-        "source_channel": source_channel,
+        "document_type_key": None,  # resolved after processing; None at upload time
         "upload_status": UploadStatus.RECEIVING,
         "processing_status": ProcessingStatus.NOT_STARTED,
         "confirmation_status": ConfirmationStatus.PENDING,
         "confidence_score": None,
-        "verification_threshold_applied": None,
-        "human_verification_status": None,
         "verification_state": VerificationState.NOT_VERIFIED,
         "content_state": ContentState.AVAILABLE,
-        "original_filename": original_filename,
-        "declared_mime_type": declared_mime_type,
-        "detected_mime_type": None,
-        "file_size_bytes": None,
-        "content_hash_sha256": None,
-        "page_count": None,
-        "correlation_id": correlation_id,
         "registered_at_utc": now,
-        "processed_at_utc": None,
-        "confirmed_at_utc": None,
         "upload_issue_code": None,
         "upload_issue_detail": None,
         "processing_failure_code": None,
-        "duplicate_of_document_id": None,
-        "replaces_document_id": replaces_document_id,
     }
 
 
@@ -222,27 +201,30 @@ async def get_document(
     document_id: uuid.UUID,
     subject_id: uuid.UUID | None = None,
 ) -> dict | None:  # type: ignore[type-arg]
-    """Fetch a single Document.  Optionally scope to subject_id."""
-    conditions = "tenant_id = :tenant_id AND document_id = :document_id"
+    """Fetch a single Document. Optionally scope to subject_id.
+
+    Joins document_types to return document_type_key (D11).
+    """
+    conditions = "d.tenant_id = :tenant_id AND d.document_id = :document_id"
     params: dict = {"tenant_id": tenant_id, "document_id": document_id}  # type: ignore[type-arg]
     if subject_id is not None:
-        conditions += " AND subject_id = :subject_id"
+        conditions += " AND d.subject_id = :subject_id"
         params["subject_id"] = subject_id
 
     row = (
         await session.execute(
             text(f"""
-                SELECT tenant_id, document_id, subject_id,
-                       source_channel, upload_status, processing_status,
-                       confirmation_status, confidence_score,
-                       verification_threshold_applied, human_verification_status,
-                       verification_state, content_state,
-                       original_filename, declared_mime_type, detected_mime_type,
-                       file_size_bytes, content_hash_sha256, page_count,
-                       correlation_id, registered_at_utc, processed_at_utc, confirmed_at_utc,
-                       upload_issue_code, upload_issue_detail, processing_failure_code,
-                       duplicate_of_document_id, replaces_document_id
-                FROM docintel.documents
+                SELECT d.tenant_id, d.document_id, d.subject_id,
+                       dt.document_type_key,
+                       d.upload_status, d.processing_status,
+                       d.confirmation_status, d.confidence_score,
+                       d.verification_state, d.content_state,
+                       d.registered_at_utc,
+                       d.upload_issue_code, d.upload_issue_detail,
+                       d.processing_failure_code
+                FROM docintel.documents d
+                LEFT JOIN docintel.document_types dt
+                  ON dt.document_type_id = d.document_type_id
                 WHERE {conditions}
             """),
             params,
@@ -258,28 +240,58 @@ async def list_subject_documents(
     tenant_id: str,
     subject_id: uuid.UUID,
 ) -> list[dict]:  # type: ignore[type-arg]
-    """List all documents for a subject."""
+    """List all documents for a subject (D11)."""
     rows = (
         await session.execute(
             text("""
-                SELECT tenant_id, document_id, subject_id,
-                       source_channel, upload_status, processing_status,
-                       confirmation_status, confidence_score,
-                       verification_threshold_applied, human_verification_status,
-                       verification_state, content_state,
-                       original_filename, declared_mime_type, detected_mime_type,
-                       file_size_bytes, content_hash_sha256, page_count,
-                       correlation_id, registered_at_utc, processed_at_utc, confirmed_at_utc,
-                       upload_issue_code, upload_issue_detail, processing_failure_code,
-                       duplicate_of_document_id, replaces_document_id
-                FROM docintel.documents
-                WHERE tenant_id = :tenant_id AND subject_id = :subject_id
-                ORDER BY registered_at_utc DESC
+                SELECT d.tenant_id, d.document_id, d.subject_id,
+                       dt.document_type_key,
+                       d.upload_status, d.processing_status,
+                       d.confirmation_status, d.confidence_score,
+                       d.verification_state, d.content_state,
+                       d.registered_at_utc,
+                       d.upload_issue_code, d.upload_issue_detail,
+                       d.processing_failure_code
+                FROM docintel.documents d
+                LEFT JOIN docintel.document_types dt
+                  ON dt.document_type_id = d.document_type_id
+                WHERE d.tenant_id = :tenant_id AND d.subject_id = :subject_id
+                ORDER BY d.registered_at_utc DESC
             """),
             {"tenant_id": tenant_id, "subject_id": subject_id},
         )
     ).mappings().all()
     return [_row_to_dict(r) for r in rows]
+
+
+async def list_document_type_counts(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    subject_id: uuid.UUID,
+) -> list[dict]:  # type: ignore[type-arg]
+    """Count FIT documents per documentTypeKey for a subject (D12).
+
+    Excludes REJECTED (NOT_FIT, CORRUPT, UPLOAD_FAILED) and documents
+    without a resolved document_type_id (uploaded as ADDITIONAL/unknown).
+    """
+    rows = (
+        await session.execute(
+            text("""
+                SELECT dt.document_type_key, COUNT(*) AS count
+                FROM docintel.documents d
+                JOIN docintel.document_types dt
+                  ON dt.document_type_id = d.document_type_id
+                WHERE d.tenant_id = :tenant_id
+                  AND d.subject_id = :subject_id
+                  AND d.upload_status = 'FIT'
+                GROUP BY dt.document_type_key
+                ORDER BY dt.document_type_key
+            """),
+            {"tenant_id": tenant_id, "subject_id": subject_id},
+        )
+    ).mappings().all()
+    return [{"documentTypeKey": r["document_type_key"], "count": r["count"]} for r in rows]
 
 
 async def get_verification_threshold(
