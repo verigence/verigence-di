@@ -137,8 +137,8 @@ async def get_upload_quality(
                     FROM docintel.documents
                     WHERE tenant_id = :tid
                       AND (:actor_id IS NULL OR uploaded_by_actor_id = :actor_id)
-                      AND (:from_dt IS NULL OR registered_at_utc >= :from_dt::timestamptz)
-                      AND (:to_dt IS NULL OR registered_at_utc <= :to_dt::timestamptz)
+                      AND (:from_dt IS NULL OR registered_at_utc >= CAST(:from_dt AS timestamptz))
+                      AND (:to_dt IS NULL OR registered_at_utc <= CAST(:to_dt AS timestamptz))
                     GROUP BY uploaded_by_actor_id
                     ORDER BY total DESC
                 """),
