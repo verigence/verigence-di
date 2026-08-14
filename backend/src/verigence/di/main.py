@@ -171,6 +171,7 @@ def create_app() -> FastAPI:
     # ── Routers ─────────────────────────────────────────────────────────────
     # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
+    from verigence.di.api.v1.analyse import router as analyse_router  # noqa: PLC0415
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
     from verigence.di.api.v1.entity_links import router as entity_links_router  # noqa: PLC0415
     from verigence.di.api.v1.extraction_profiles import (
@@ -203,6 +204,7 @@ def create_app() -> FastAPI:
     app.include_router(subject_matching_router)
     app.include_router(unassigned_router)
     app.include_router(whatsapp_system_router)
+    app.include_router(analyse_router)
 
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
