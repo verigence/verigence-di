@@ -72,10 +72,12 @@ deploy → crash → hotfix cycle entirely.
 
 ## Current active step
 
-**Backout Queue — ✅ DESIGN + IMPLEMENTATION COMPLETE (D24)**
-121 tests passing, 0 xfailed. Migration 0008 ready to apply to Neon.
+**Steps 9c + 9d complete ✅ — 183 tests passing**
+- Step 9c: Worker upserts `document_search_index` after CONFIRMED (D14) — commit `fbe5677`
+- Step 9d: `POST /analyse` — 7 reconciliation rules (D15/D17) — commit `54c43f8`
 
-**Next: Apply migration 0008 to Neon (`alembic upgrade head`), then Step 9c**
+**Next: E2E smoke test on Railway (wait 90s after push) — expect PROCESSED + CONFIRMED**
+Then: Step 12 — React PWA ops-ui
 
 ---
 
@@ -1810,3 +1812,79 @@ Introduce `docintel.backout_jobs` as a **dead-letter table**:
 - Document state machine DB constraints — `FAILED + NOT_CONFIRMED` is already a valid combination
 
 }
+
+## Session record — current (Step 9c + 9d)
+
+### Summary
+Completed the final two sub-steps of the processing pipeline, fixed the last
+asyncpg syntax bug, and brought the test count from 121 → 183.
+
+### Commits this session (branch: dev)
+
+| Hash | What |
+|---|---|
+| `aa698d0` | fix(operations): `::timestamptz` → `CAST(:from_dt AS timestamptz)` |
+| `fbe5677` | feat(step-9c): upsert `document_search_index` after CONFIRMED (D14) |
+| `54c43f8` | feat(step-9d): `POST /analyse` — 7 reconciliation rules (D15/D17) |
+
+### Step 9c — Worker upserts document_search_index ✅
+
+**Files created:**
+- `backend/src/verigence/di/repositories/search_index.py` — `upsert_search_index()` (single SQL INSERT … ON CONFLICT UPDATE)
+- `backend/tests/test_search_index.py` — 9 no_docker tests
+
+**Files changed:**
+- `backend/src/verigence/di/workers/job_runner.py` — Step 17b: build `indexed_fields` from `field_result_map`, call `upsert_search_index()` after CONFIRMED
+
+**What it stores per document:**
+- `tenant_id`, `document_id`, `subject_id`, `document_type_key` — lookup keys
+- `indexed_fields JSONB` — flat key→value map of all extracted canonical fields (normalized_value per field)
+- `schema_version` = `PIPELINE_VERSION` ("2.2.0")
+- `created_at_utc` / `updated_at_utc`
+
+### Step 9d — POST /analyse endpoint ✅
+
+**Files created:**
+- `backend/src/verigence/di/application/reconciliation.py` — 7 deterministic reconciliation rules (D17)
+- `backend/src/verigence/di/api/v1/analyse.py` — `POST /v1/tenants/{tenantId}/analyse` (D15)
+- `backend/tests/test_reconciliation.py` — 43 no_docker tests
+
+**Files changed:**
+- `backend/src/verigence/di/main.py` — wired `analyse_router`
+
+**Rules implemented (D17):**
+
+| Rule | Key | Logic |
+|---|---|---|
+| R1 | AMOUNT_MATCH | Sum of dealer receipt amounts == booking docket total (±₹1) |
+| R2 | UTR_SUFFIX_MATCH | RTGS ref on receipt is suffix of UTR in bank statement (leading zeros stripped) |
+| R3 | DATE_PROXIMITY | Payment date within ±3 days of bank statement transaction date |
+| R4 | NAME_MATCH | Payee/payer name fuzzy-matches subject display_name (≥80% via SequenceMatcher) |
+| R5 | TOTAL_CHECK | All receipts sum to booking total ±₹1 |
+| R6 | DATE_SEQUENCE | Delivery order date ≥ latest receipt date |
+| R7 | DUPLICATE_DETECTION | No two receipts share amount + date + RTGS ref |
+
+**Summary verdicts:** RECONCILED / DISCREPANCY / INSUFFICIENT_DATA
+
+**Document type routing:**
+- Receipts → `dealer_receipt`
+- Bookings → `booking_form` or `booking_docket`
+- Bank statements → `bank_statement_extract` or `bank_statement`
+- Delivery orders → `delivery_order_cover` or `delivery_order`
+
+### Test count
+121 → 131 → 140 → 183 (183 passing, 43 deselected)
+
+### Operations.py fix
+Last remaining `::timestamptz` cast in `/upload-quality` endpoint fixed.
+All 9 `:<param>::type` asyncpg syntax bugs are now resolved across all files.
+
+### Infrastructure state
+- Railway: auto-deployed `aa698d0` → `fbe5677` → `54c43f8` on push
+- Wait 90s after last push before testing Railway
+- E2E test with mock tokens should now return PROCESSED + CONFIRMED
+
+### What's next
+1. **E2E smoke test** — `python scripts/test_worker_e2e.py` against Railway (wait 90s after `54c43f8` deploys)
+2. **Step 12** — React PWA ops-ui (❌ NOT STARTED — `ops-ui/` has README only)
+
