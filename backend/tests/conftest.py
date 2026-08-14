@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import uuid
@@ -278,10 +279,8 @@ async def api_client(_patch_jwks_cache) -> AsyncGenerator[AsyncClient, None]:  #
 
     import verigence.di.repositories.database as _db_mod
     old_engine = _db_mod._engine
-    try:
+    with contextlib.suppress(Exception):
         await old_engine.dispose()
-    except Exception:  # noqa: BLE001
-        pass
 
     test_engine = create_async_engine(
         _async_db_url(neon_url),
