@@ -334,8 +334,8 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
                 "docintel.subjects",
                 "docintel.tenant_document_types",
                 "docintel.actors",
-                "docintel.retention_policies",
                 "docintel.tenant_settings",
+                "docintel.retention_policies",
             ]:
                 await conn.execute(
                     __import__("sqlalchemy", fromlist=["text"]).text(
