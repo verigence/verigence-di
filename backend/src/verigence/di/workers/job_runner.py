@@ -524,7 +524,7 @@ async def _execute_steps(
             SET processing_status = 'PROCESSED',
                 confirmation_status = 'CONFIRMED',
                 confidence_score = :conf,
-                verification_threshold_applied = 90.00,
+                verification_threshold_applied = :threshold,
                 human_verification_status = :hvs,
                 updated_at_utc = :now
             WHERE tenant_id = :tid AND document_id = :doc_id
@@ -533,6 +533,7 @@ async def _execute_steps(
             "tid": tenant_id,
             "doc_id": document_id,
             "conf": float(confidence_score),
+            "threshold": float(effective_threshold),
             "hvs": hvs.value,
             "now": now,
         },

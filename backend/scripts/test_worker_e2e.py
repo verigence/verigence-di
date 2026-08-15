@@ -26,6 +26,7 @@ import asyncio
 import io
 import struct
 import time
+import traceback
 import uuid
 import zlib
 
@@ -206,7 +207,7 @@ async def _cleanup(
     )
     # Null the FK reference on documents before deleting processing_runs
     await conn.execute(
-        f"UPDATE docintel.documents SET current_processing_run_id = NULL WHERE tenant_id = $1 AND subject_id = $2",
+        "UPDATE docintel.documents SET current_processing_run_id = NULL WHERE tenant_id = $1 AND subject_id = $2",
         tid, sid,
     )
     await conn.execute(
@@ -355,7 +356,7 @@ async def run_test_case(
 
     except Exception as exc:
         _fail(f"Exception: {exc}")
-        import traceback; traceback.print_exc()
+        traceback.print_exc()
         passed = False
 
     finally:

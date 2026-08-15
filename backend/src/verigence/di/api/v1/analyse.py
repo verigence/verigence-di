@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
 from verigence.di.application.reconciliation import run_reconciliation
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/v1", tags=["Analysis"])
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class AnalyseRequest(BaseModel):
-    document_ids: list[str]
+    document_ids: list[str] = Field(alias="documentIds")
 
     @field_validator("document_ids")
     @classmethod
@@ -92,9 +92,16 @@ async def analyse_documents(
                 detail="No indexed documents found for the provided document IDs",
             )
 
+        # ── Enforce single subject ────────────────────────────────────────────
+        subject_ids = {str(r["subject_id"]) for r in rows if r.get("subject_id")}
+        if len(subject_ids) > 1:
+            raise HTTPException(
+                status_code=422,
+                detail="All documents must belong to the same subject for reconciliation.",
+            )
+
         # ── Resolve subject display_name from the first matched subject ───────
         subject_display_name: str | None = None
-        subject_ids = {str(r["subject_id"]) for r in rows if r.get("subject_id")}
         if subject_ids:
             first_subject_id = next(iter(subject_ids))
             subj_row = (

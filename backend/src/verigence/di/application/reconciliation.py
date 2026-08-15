@@ -222,6 +222,9 @@ def _r7_duplicate_detection(receipts: list[dict[str, Any]]) -> Finding:
         amount = _to_float(r.get("amount") or r.get("total_amount"))
         date_  = _to_date(r.get("payment_date") or r.get("date"))
         rtgs   = str(r.get("rtgs_reference") or r.get("utr_number") or "").strip()
+        # Skip receipts with no identity fields — all-null keys cannot be compared
+        if not amount and not date_ and not rtgs:
+            continue
         key    = (amount, date_, rtgs)
         if key in seen:
             return Finding("R7_DUPLICATE_DETECTION", "FAIL",
