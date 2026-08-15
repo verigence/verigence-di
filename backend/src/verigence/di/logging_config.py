@@ -193,7 +193,6 @@ def configure_logging() -> None:
     # ── Shared pre-processors (run before any output) ─────────────────────────
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         _LevelFilter(level_str),
