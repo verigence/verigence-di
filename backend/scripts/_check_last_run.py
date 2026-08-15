@@ -1,4 +1,4 @@
-"""Quick diagnostic — show Gemini invocation outcome for the last pan_card run."""
+"""Diagnostic — check latest pan_card invocation."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,6 @@ DB_URL = (
 async def main() -> None:
     conn = await asyncpg.connect(DB_URL, ssl="require")
 
-    # 1. Last 3 pan_card documents
     rows = await conn.fetch(
         """
         SELECT
@@ -22,7 +21,6 @@ async def main() -> None:
             d.processing_status,
             d.confidence_score,
             da.mime_type AS stored_mime,
-            da.logical_object_key,
             pi.capability,
             pi.adapter_key,
             pi.outcome,
@@ -38,46 +36,45 @@ async def main() -> None:
         LEFT JOIN docintel.processor_invocations pi
           ON pi.processing_run_id = pr.processing_run_id
         WHERE d.document_type_hint_key = 'pan_card'
+          AND pi.capability = 'VISION_EXTRACTION'
         ORDER BY pi.started_at_utc DESC NULLS LAST
         LIMIT 5
         """
     )
-    print("=== PROCESSOR INVOCATIONS (last 5 pan_card) ===\n")
+    print("=== VISION_EXTRACTION invocations (last 5 pan_card) ===\n")
     for r in rows:
         print(f"doc={str(r['document_id'])[:8]}  proc={r['processing_status']}"
-              f"  conf={r['confidence_score']}  mime={r['stored_mime']}")
-        print(f"  capability={r['capability']}  adapter={r['adapter_key']}"
-              f"  outcome={r['outcome']}")
+              f"  conf={r['confidence_score']}  mime={r['stored_mime']}"
+              f"  started={r['started_at_utc']}")
+        print(f"  outcome={r['outcome']}  adapter={r['adapter_key']}")
         if r['error_code']:
             print(f"  ERROR: {r['error_code']} — {r['error_detail']}")
         if r['usage_metrics']:
-            print(f"  usage={json.dumps(r['usage_metrics'], default=str)}")
+            u = r['usage_metrics']
+            if isinstance(u, str):
+                u = json.loads(u)
+            print(f"  usage={json.dumps(u, default=str)}")
         print()
 
-    # 2. extracted_facts for the most recent pan_card doc
-    print("=== EXTRACTED FACTS (most recent pan_card) ===\n")
-    facts = await conn.fetch(
-        """
-        SELECT
-            d.document_id,
-            ef.field_key,
-            ef.raw_value,
-            ef.normalized_value,
-            ef.confidence_score,
-            ef.found_status
-        FROM docintel.documents d
-        JOIN docintel.extracted_facts ef ON ef.document_id = d.document_id
-        WHERE d.document_type_hint_key = 'pan_card'
-        ORDER BY ef.created_at_utc DESC NULLS LAST
-        LIMIT 10
-        """
-    )
-    for f in facts:
-        print(f"doc={str(f['document_id'])[:8]}  key={f['field_key']:<25}"
-              f"  status={f['found_status']}  raw={str(f['raw_value'])[:40]}"
-              f"  norm={str(f['normalized_value'])[:40]}  conf={f['confidence_score']}")
-    if not facts:
-        print("  (no extracted_facts rows)")
+    # Check document_field_values for latest doc
+    if rows:
+        latest_doc_id = rows[0]['document_id']
+        print(f"=== document_field_values for doc {str(latest_doc_id)[:8]} ===\n")
+        fv = await conn.fetch(
+            """
+            SELECT cf.field_key, dfv.current_value, dfv.confidence_score
+            FROM docintel.document_field_values dfv
+            JOIN docintel.canonical_fields cf
+              ON cf.canonical_field_id = dfv.canonical_field_id
+            WHERE dfv.document_id = $1 AND dfv.is_current = true
+            ORDER BY cf.field_key
+            """,
+            latest_doc_id,
+        )
+        for f in fv:
+            print(f"  {f['field_key']:<25} value={str(f['current_value']):<30}  conf={f['confidence_score']}")
+        if not fv:
+            print("  (no rows)")
 
     await conn.close()
 

@@ -14,7 +14,7 @@ is accepted at confidence 100. No Gemini API call is made for classification.
 extract() flow:
   1. get_schema(document_type_key) → SchemaDefinition
   2. Build prompt from schema fields + system_prompt + prompt_notes
-  3. Send document bytes (image or PDF) + prompt to Gemini API
+  3. Send document bytes (image or PDF) + prompt to Gemini REST API (httpx)
   4. Parse and validate JSON response
   5. On parse failure: retry once; on second failure return NOT_FOUND for all
      fields (document reaches NEEDS_REVIEW, pipeline does not crash)
@@ -26,14 +26,18 @@ Confidence mapping (D21):
   "medium" → Decimal("70.00")
   "low"    → Decimal("40.00")
   absent   → FoundStatus.NOT_FOUND, confidence=None
+
+Uses direct REST API (httpx) — no google.generativeai SDK dependency.
 """
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from decimal import Decimal
 from typing import Any
 
+import httpx
 import structlog
 
 from verigence.di.document_ai.adapter import (
@@ -56,8 +60,12 @@ _CONFIDENCE_MAP: dict[str, Decimal] = {
     "low":    Decimal("40.00"),
 }
 
-# Gemini model to use
-_GEMINI_MODEL = "gemini-2.5-flash"
+# Gemini REST API endpoint — gemini-3-flash-preview used for this key
+_GEMINI_MODEL = "gemini-3-flash-preview"
+_GEMINI_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{_GEMINI_MODEL}:generateContent"
+)
 
 
 class GeminiDocumentAIAdapter(DocumentAIAdapter):
@@ -72,19 +80,10 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
-        self._client: Any = None  # lazy-initialised on first use
 
     @property
     def adapter_key(self) -> str:
         return "gemini_2_5_flash_v1"
-
-    def _get_client(self) -> Any:
-        """Lazy-initialise the Gemini client."""
-        if self._client is None:
-            import google.generativeai as genai  # type: ignore[import]
-            genai.configure(api_key=self._api_key)
-            self._client = genai.GenerativeModel(_GEMINI_MODEL)
-        return self._client
 
     # ── classify() ────────────────────────────────────────────────────────────
 
@@ -131,7 +130,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         """Extract fields via Gemini 2.5 Flash using schema registry.
 
         Looks up the SchemaDefinition for document_type_key, builds a
-        schema-driven prompt, calls Gemini, validates the response.
+        schema-driven prompt, calls Gemini REST API, validates the response.
         Falls back to FALLBACK_SCHEMA for unregistered types.
         """
         log = logger.bind(
@@ -148,7 +147,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         # Build the prompt — merge DB field list with schema registry metadata
         prompt = _build_prompt(schema, fields)
 
-        # Call Gemini — retry once on parse failure
+        # Call Gemini REST API — retry once on parse failure
         provider_request_id = str(uuid.uuid4())
         raw_response: str | None = None
         field_results: list[FieldResult] | None = None
@@ -157,7 +156,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         for attempt in range(2):
             try:
                 raw_response = await _call_gemini(
-                    client=self._get_client(),
+                    api_key=self._api_key,
                     artifact_bytes=artifact_bytes,
                     mime_type=mime_type,
                     prompt=prompt,
@@ -266,40 +265,54 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
     return "\n".join(lines)
 
 
-# ── Gemini API call ────────────────────────────────────────────────────────────
+# ── Gemini REST API call ───────────────────────────────────────────────────────
 
 async def _call_gemini(
-    client: Any,
+    api_key: str,
     artifact_bytes: bytes,
     mime_type: str,
     prompt: str,
 ) -> str:
-    """Send document bytes + prompt to Gemini. Returns raw text response.
+    """Send document bytes + prompt to Gemini REST API. Returns raw text response.
 
-    Gemini 2.5 Flash handles multi-page PDFs natively — full bytes sent as-is.
-    Runs the blocking SDK call in a thread pool to keep the async worker loop
-    unblocked.
+    Uses httpx directly — no google.generativeai SDK dependency.
+    Gemini accepts image/* and application/pdf inline as base64.
     """
-    import asyncio
-
-    import google.generativeai as genai  # type: ignore[import]
-
-    # Normalise MIME — Gemini accepts image/* and application/pdf directly
     effective_mime = mime_type if mime_type else "application/octet-stream"
+    image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
 
-    def _sync_call() -> str:
-        blob = genai.protos.Blob(mime_type=effective_mime, data=artifact_bytes)  # type: ignore[attr-defined]
-        response = client.generate_content(
-            [blob, prompt],
-            generation_config={
-                "temperature": 0,        # deterministic output
-                "response_mime_type": "application/json",
-            },
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"inline_data": {"mime_type": effective_mime, "data": image_b64}},
+                    {"text": prompt},
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            _GEMINI_API_URL,
+            params={"key": api_key},
+            json=payload,
         )
-        return response.text
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _sync_call)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Gemini API error {resp.status_code}: {resp.text[:500]}"
+        )
+
+    data = resp.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as exc:
+        raise ValueError(f"Unexpected Gemini response shape: {data}") from exc
 
 
 # ── Response parser ────────────────────────────────────────────────────────────
