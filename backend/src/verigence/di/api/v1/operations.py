@@ -26,7 +26,18 @@ logger = structlog.get_logger(__name__)
 
 # ── GET /v1/tenants/{tenantId}/document-exceptions ───────────────────────────
 
-@router.get("/tenants/{tenant_id}/document-exceptions")
+@router.get(
+    "/tenants/{tenant_id}/document-exceptions",
+    summary="Get Tenant Document Exceptions",
+    description=(
+        "List all exception documents across the Tenant — documents in NOT_FIT, CORRUPT, "
+        "UPLOAD_FAILED, RETRY_PENDING, or FAILED state. Filterable by subjectId and actor. "
+        "Required permission: `di.operations.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Exception document list",
+    operation_id="getTenantDocumentExceptions",
+)
 async def get_tenant_document_exceptions(
     tenant_id: str,
     subject_id: str | None = None,
@@ -118,7 +129,18 @@ async def get_tenant_document_exceptions(
 
 # ── GET /v1/tenants/{tenantId}/upload-quality ─────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/upload-quality")
+@router.get(
+    "/tenants/{tenant_id}/upload-quality",
+    summary="Get Upload Quality Metrics",
+    description=(
+        "Upload quality metrics grouped by uploader actor — total, fit, not-fit, corrupt, "
+        "upload-failed counts and first-pass fit rate. Filterable by actor and date range. "
+        "Required permission: `di.operations.read`. "
+        "Returns D8 envelope with per-actor metrics array."
+    ),
+    response_description="Upload quality metrics",
+    operation_id="getUploadQuality",
+)
 async def get_upload_quality(
     tenant_id: str,
     uploaded_by_actor_id: str | None = None,

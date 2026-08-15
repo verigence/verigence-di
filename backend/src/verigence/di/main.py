@@ -115,17 +115,52 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Verigence Document Intelligence API",
-        version="2.2.0",
+        version="2.4.0",
         description=(
-            "Standalone Document Intelligence. "
-            "Primary lookup: tenantId + subjectId. "
-            "Machine lifecycle: Upload → Process → Confirm."
+            "Verigence Document Intelligence (DI) — standalone document ingestion, "
+            "extraction, verification, and reconciliation platform. "
+            "Primary lookup key: tenantId + subjectId. "
+            "Machine document lifecycle: Upload → Process → Confirm → Verify. "
+            "All protected endpoints require a Bearer JWT issued by the Verigence Security module "
+            "(iss=verigence-security, aud=verigence-platform). "
+            "Use mock tokens (mock.<tenantId>.<actorId>.<ROLE>) for local dev and CI. "
+            "Response envelope (D8): {\"errorCode\":\"000\",\"errorMessage\":\"Success\",\"data\":{...}}. "
+            "Non-zero errorCode values indicate business errors; HTTP 4xx/5xx indicate transport errors."
         ),
         openapi_url="/openapi.json",
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+
+    # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
+    def custom_openapi() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        schema.setdefault("components", {})["securitySchemes"] = {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+                "description": (
+                    "Security-module-issued JWT. "
+                    "Claims: iss=verigence-security, aud=verigence-platform, permissions[]. "
+                    "Dev/CI mock format: mock.<tenantId>.<actorId>.<ROLE>[.<ROLE>...]"
+                ),
+            }
+        }
+        schema["security"] = [{"BearerAuth": []}]
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
 
     # ── CORS ────────────────────────────────────────────────────────────────
     app.add_middleware(

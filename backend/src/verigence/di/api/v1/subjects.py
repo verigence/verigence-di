@@ -40,7 +40,13 @@ logger = structlog.get_logger(__name__)
     "/subjects",
     response_model=ApiResponse[SubjectResponse],
     status_code=status.HTTP_201_CREATED,
-    summary="Create a Verigence Subject",
+    summary="Create Subject",
+    description=(
+        "Register a new Subject (e.g. a borrower or dealer) within a Tenant. "
+        "Required permission: `di.subject.create`. "
+        "Returns D8 envelope with the created Subject record."
+    ),
+    response_description="Created subject",
     operation_id="createSubject",
 )
 async def create_subject_endpoint(
@@ -82,7 +88,13 @@ async def create_subject_endpoint(
 @router.get(
     "/subjects",
     response_model=ApiResponse[SubjectListData],
-    summary="List/search Verigence Subjects within a Tenant",
+    summary="List Subjects",
+    description=(
+        "List and search Subjects within a Tenant with optional status filter and free-text query. "
+        "Required permission: `di.subject.read`. "
+        "Returns D8 envelope with items array and nextCursor for cursor-based pagination."
+    ),
+    response_description="Paginated subject list",
     operation_id="listSubjects",
 )
 async def list_subjects_endpoint(
@@ -131,7 +143,13 @@ async def list_subjects_endpoint(
 @router.get(
     "/subjects/{subjectId}",
     response_model=ApiResponse[SubjectResponse],
-    summary="Get one Verigence Subject",
+    summary="Get Subject",
+    description=(
+        "Fetch a single Subject by ID within the Tenant boundary. "
+        "Required permission: `di.subject.read`. "
+        "Returns D8 envelope with the Subject record, or 404 if not found."
+    ),
+    response_description="Subject record",
     operation_id="getSubject",
 )
 async def get_subject_endpoint(

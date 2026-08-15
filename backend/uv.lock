@@ -2569,6 +2569,7 @@ dependencies = [
     { name = "httpx" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
+    { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pypdf" },
@@ -2597,11 +2598,6 @@ dev = [
     { name = "types-python-dateutil" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "psycopg2-binary" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=13.0.0" },
@@ -2617,6 +2613,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "opencv-python-headless", specifier = ">=4.9.0" },
     { name = "pillow", specifier = ">=10.3.0" },
+    { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
     { name = "pypdf", specifier = ">=4.2.0" },
@@ -2638,9 +2635,6 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "psycopg2-binary", specifier = ">=2.9.12" }]
 
 [[package]]
 name = "watchfiles"

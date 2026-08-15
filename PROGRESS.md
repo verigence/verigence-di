@@ -1888,3 +1888,73 @@ All 9 `:<param>::type` asyncpg syntax bugs are now resolved across all files.
 1. **E2E smoke test** — `python scripts/test_worker_e2e.py` against Railway (wait 90s after `54c43f8` deploys)
 2. **Step 12** — React PWA ops-ui (❌ NOT STARTED — `ops-ui/` has README only)
 
+
+## DI Stabilisation Plan — Complete (revised 2026-08-15)
+
+### Goal
+Full end-to-end function: upload → worker extraction → PROCESSED+CONFIRMED → document_search_index → POST /analyse reconciliation. All API endpoints returning consistent D8 response envelope. CI green. Operators can configure from one file.
+
+### Decisions locked before code (D25 + D26)
+
+**D25 — Python schema authority:** Python `document_ai/schemas/` is authoritative for field definitions. DB profiles are seeded from schemas. A startup consistency check validates they match and logs WARNING on drift. No hard block.
+
+**D26 — Reconciliation rules are interim:** R1–R7 are collection-level and known to be imprecise. Pair-matching redesign is Phase 2. Current rules are sufficient for E2E demonstration only.
+
+---
+
+### Phase 1 — CI + Correctness bugs
+Gate: `ruff check src/ tests/ scripts/` exits 0. All 183 tests pass.
+
+| # | Problem | File / Evidence | Fix |
+|---|---|---|---|
+| 1 | CI RED — ruff violations in `scripts/` | `test_worker_e2e.py` line 209 (f-string), line 358 (inline import + semicolon); `_check_profiles.py` lines 1+36 (multi-import) | `ruff --fix` + move import to top of file |
+| 2 | `verification_threshold_applied` hardcoded 90.00 | `job_runner.py` line 527 — `effective_threshold` already computed line 505 | Replace literal with `:threshold` param = `float(effective_threshold)` |
+| 3 | `/analyse` picks first subject — unsafe | `analyse.py` lines 97–99 | After loading rows: if >1 distinct subject_id → HTTP 422. Also add `documentIds` alias on `AnalyseRequest` |
+| 4 | R7 false duplicate on all-null keys | `reconciliation.py _r7_duplicate_detection()` | Skip receipt in seen-set if all of amount, date, rtgs are None/empty |
+
+### Phase 2 — Contract + Config + Logging
+Gate: All routes return `{"errorCode":"000","errorMessage":"Success","data":{}}`. `infra/.env.example` exists. Every write route logs.
+
+| # | Problem | Files | Fix |
+|---|---|---|---|
+| 5 | API contract split — Subjects return raw objects | `subjects.py` + all 10 non-envelope route files | Wrap all success responses in `ApiResponse[T]` envelope |
+| 6 | No `.env.example` | `infra/` | Create `infra/.env.example` — every `DI_*` var, safe placeholder, one-line description, grouped by area |
+| 7 | No logging in 13/15 API route files | All `api/v1/*.py` except documents.py, verification.py | Add `logger = structlog.get_logger(__name__)` + one structured log per material write: tenant_id, actor_id, entity_id |
+| 8 | D25 startup consistency check | New function in `main.py` lifespan | For each key in `SCHEMA_REGISTRY`: query published profile fields, compare with schema field keys, log WARNING on mismatch |
+
+### Phase 3 — E2E Behaviour Correctness
+Gate: E2E test reaches PROCESSED+CONFIRMED. `document_search_index` row contains normalized values. Retryable failures use RETRY_PENDING path.
+
+| # | Problem | File | Fix |
+|---|---|---|---|
+| 9 | D18 inconsistency — new tenants get `requires_processing=false` for ADDITIONAL types | `repositories/tenants.py` line 162 | Remove CASE: always insert `requires_processing=true`. Update comment referencing D7. |
+| 10 | D24 too aggressive — retryable → FAILED immediately | `processor.py _handle_failure()` | On retryable + attempt_no=1: set `RETRY_PENDING`, use `retry_job()`, no backout row. On retryable + attempt_no≥2 OR non-retryable: FAILED + backout |
+| 11 | `document_search_index` stores raw not normalized values | `job_runner.py` Step 17b | Replace `field_result_map` with `norm_map` via `fact_id_map` join to get normalized_value per field_key |
+| 12 | Gemini `system_prompt` never sent to API | `gemini_adapter.py _build_prompt()` | Prepend `schema.system_prompt` as first section of prompt string, separated by blank line |
+| 13 | Stale RUNNING job never recovered | `scheduler/beat.py _run_eod_check()` | Add reaper: reset RUNNING jobs with `locked_at_utc < NOW() - 10min` back to PENDING. Config: `DI_WORKER_LEASE_TIMEOUT_MINUTES` (default 10) |
+
+### Phase 4 — Documentation + Governance
+Gate: /docs useful without reading source. Baseline declared v2.4. D26 locked.
+
+| # | Item | Fix |
+|---|---|---|
+| 14 | API docs sparse — no auth, no descriptions | Add `summary`, `description` (includes required permission), `responses` to every route decorator |
+| 15 | Design baseline still called v2.2, future dates | Declare v2.4 in `DI_MASTER_REFERENCE.md`. Correct migration dates. |
+| 16 | Deployment docs describe migration 0004, old provider | Update/create `docs/deployment.md` to reflect migrations 0001–0008, Gemini, Security JWKS, Railway |
+| 17 | D26 not locked | Append D26 to `DI_DECISIONS.md`: R1–R7 are interim collection-level rules, pair-matching is Phase 2 |
+
+### Genuinely out of scope for this plan
+
+| Item | Reason |
+|---|---|
+| Audit chain wiring to all routes | Separate sprint — design exists, wiring touches every state-changing route |
+| RLS / FORCE ROW LEVEL SECURITY | Manual DB verification task — check table ownership and runtime role |
+| Classification hint reversal (D21) | Product decision required first |
+| R2 opaque storage paths | Privacy improvement, does not block E2E |
+| True streaming | Scalability only |
+| React PWA ops-ui (Step 12) | Backend stabilisation first |
+
+### Rule: no new features until Phase 3 gate is passed and CI is green
+
+---
+

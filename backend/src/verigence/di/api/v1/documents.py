@@ -103,7 +103,13 @@ def _doc_data(doc: dict) -> DocumentData:
 @router.post(
     "/subjects/{subjectId}/documents",
     status_code=status.HTTP_201_CREATED,
-    summary="Upload one document for a Subject",
+    summary="Upload Document",
+    description=(
+        "Upload a binary document file for a Subject. Runs quality rules; returns ACCEPTED or REJECTED. "
+        "Required permission: `di.document.upload`. "
+        "Returns D8 envelope: errorCode=000 (ACCEPTED) or E001–E007 (REJECTED) with uploadStatus and documentId."
+    ),
+    response_description="Upload outcome",
     operation_id="uploadSubjectDocument",
 )
 async def upload_subject_document(
@@ -166,7 +172,13 @@ async def upload_subject_document(
 
 @router.get(
     "/subjects/{subjectId}/documents",
-    summary="List all documents for a Subject",
+    summary="List Subject Documents",
+    description=(
+        "List all documents for a Subject in the Tenant. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with documents array and total count."
+    ),
+    response_description="Document list",
     operation_id="getSubjectDocuments",
 )
 async def get_subject_documents(
@@ -198,7 +210,13 @@ async def get_subject_documents(
 
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}",
-    summary="Get one document within the Tenant + Subject boundary",
+    summary="Get Subject Document",
+    description=(
+        "Fetch a single document record by ID within the Tenant + Subject boundary. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with slim DocumentData (status, confidence, timestamps)."
+    ),
+    response_description="Document record",
     operation_id="getSubjectDocument",
 )
 async def get_subject_document(
@@ -229,7 +247,13 @@ async def get_subject_document(
 
 @router.get(
     "/subjects/{subjectId}/document-types",
-    summary="Count of accepted documents per document type for a Subject",
+    summary="Get Subject Document Type Summary",
+    description=(
+        "Return a count of accepted documents per document type for a Subject. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with documentTypes array keyed by documentTypeKey."
+    ),
+    response_description="Document type counts",
     operation_id="getSubjectDocumentTypes",
 )
 async def get_subject_document_types(
@@ -260,7 +284,13 @@ async def get_subject_document_types(
 @router.delete(
     "/subjects/{subjectId}/documents/{documentId}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Hard-delete an eligible document and all its data",
+    summary="Delete Subject Document",
+    description=(
+        "Hard-delete a document and all its associated data (artifacts, field values, quality results). "
+        "Only eligible when upload_status is NOT_FIT/CORRUPT/UPLOAD_FAILED, or when FIT + NOT_STARTED/FAILED. "
+        "Required permission: `di.document.delete`. "
+        "Returns 204 No Content on success, 409 if the document is in a non-deletable state."
+    ),
     operation_id="deleteSubjectDocument",
 )
 async def delete_subject_document(
@@ -322,7 +352,13 @@ async def delete_subject_document(
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}/content",
     operation_id="getSubjectDocumentContent",
-    summary="Stream original document bytes",
+    summary="Get Document Content",
+    description=(
+        "Stream the original document bytes from storage. "
+        "Required permission: `di.document.content.read`. "
+        "Returns the raw file with Content-Disposition and X-Content-SHA256 headers. "
+        "Returns 410 Gone if the document content has been purged by a retention policy."
+    ),
 )
 async def get_subject_document_content(
     tenantId: str,
@@ -377,7 +413,13 @@ async def get_subject_document_content(
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}/fields",
     operation_id="getSubjectDocumentFields",
-    summary="Return extracted field values for a confirmed document",
+    summary="Get Document Fields",
+    description=(
+        "Return all current extracted field values for a CONFIRMED document. "
+        "Required permission: `di.document.fields.read`. "
+        "Returns D8 envelope with fields array (fieldKey, currentValue, valueSource, confidenceScore). "
+        "Returns errorCode=E008 if the document has not yet been confirmed."
+    ),
 )
 async def get_subject_document_fields(
     tenantId: str,
@@ -440,7 +482,12 @@ async def get_subject_document_fields(
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}/quality",
     operation_id="getSubjectDocumentQuality",
-    summary="Return quality rule results for a document",
+    summary="Get Document Quality Results",
+    description=(
+        "Return all quality rule evaluation results for a document. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with qualityResults array (ruleKey, outcome, measurement, message)."
+    ),
 )
 async def get_subject_document_quality(
     tenantId: str,
@@ -484,7 +531,13 @@ async def get_subject_document_quality(
 @router.get(
     "/subjects/{subjectId}/document-exceptions",
     operation_id="getSubjectDocumentExceptions",
-    summary="List exception documents for a Subject",
+    summary="Get Subject Document Exceptions",
+    description=(
+        "List all exception documents for a Subject — documents in NOT_FIT, CORRUPT, UPLOAD_FAILED, "
+        "RETRY_PENDING, or FAILED state. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with exception list."
+    ),
 )
 async def get_subject_document_exceptions(
     tenantId: str,

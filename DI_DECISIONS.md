@@ -814,3 +814,39 @@ New migration `0008_backout_queue.py`:
 ### Status: AGREED — design documented; implementation is next step
 
 ---
+
+## D25 — Python schema registry is authoritative (2026-08-15)
+
+### Decision
+`document_ai/schemas/` Python files are the single source of truth for extraction
+field definitions. DB extraction profiles are seeded from these schemas.
+
+A startup consistency check (`_validate_schema_profile_consistency()` in `main.py`)
+validates that every schema field key exists in the corresponding published extraction
+profile and logs a WARNING on any mismatch. It does not block startup.
+
+### Status: AGREED — implemented 2026-08-15
+
+---
+
+## D26 — Reconciliation rules R1–R7 are interim (2026-08-15)
+
+### Decision
+The seven reconciliation rules (D17, implemented in `application/reconciliation.py`)
+are collection-level rules and are explicitly interim.
+
+Known limitations:
+- R1 and R5 are effectively the same comparison
+- R2 passes if any RTGS reference matches any UTR (not per-payment matching)
+- R3 passes if any receipt date is within 3 days of any bank statement date
+- R7 can false-positive on records with identical empty/null key fields (fixed in Phase 1)
+
+These rules are sufficient for end-to-end demonstration and smoke testing.
+
+A pair-matching redesign (explicit payment-to-payment matching) is deferred to
+Phase 2 of the stabilisation work. No production audit decisions should rely on
+these rules without that redesign.
+
+### Status: AGREED — pair-matching redesign is Phase 2
+
+---

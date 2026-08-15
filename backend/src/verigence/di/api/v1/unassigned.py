@@ -38,7 +38,17 @@ logger = structlog.get_logger(__name__)
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents ───────────────────────────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents",
+    summary="Get Unassigned Documents",
+    description=(
+        "List all documents received via WhatsApp that have not yet been assigned to a Subject. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Unassigned documents list",
+    operation_id="getUnassignedDocuments",
+)
 async def get_unassigned_documents(
     tenant_id: str,
     page: int = 1,
@@ -83,7 +93,17 @@ async def get_unassigned_documents(
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId} ──────────────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}",
+    summary="Get Unassigned Document",
+    description=(
+        "Fetch a single unassigned WhatsApp document by ID. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with the document record, or 404 if not found."
+    ),
+    response_description="Unassigned document record",
+    operation_id="getUnassignedDocument",
+)
 async def get_unassigned_document(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -100,7 +120,16 @@ async def get_unassigned_document(
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/content ──────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/content")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/content",
+    summary="Get Unassigned Document Content",
+    description=(
+        "Stream the raw bytes of an unassigned WhatsApp document from storage. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns raw file bytes. Returns 410 Gone if content has been purged."
+    ),
+    operation_id="getUnassignedDocumentContent",
+)
 async def get_unassigned_document_content(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -149,7 +178,17 @@ async def get_unassigned_document_content(
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/fields ───────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/fields")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/fields",
+    summary="Get Unassigned Document Fields",
+    description=(
+        "Return extracted field values for a CONFIRMED unassigned document. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with fields array. Returns 409 if document is not yet CONFIRMED."
+    ),
+    response_description="Extracted fields",
+    operation_id="getUnassignedDocumentFields",
+)
 async def get_unassigned_document_fields(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -176,7 +215,17 @@ async def get_unassigned_document_fields(
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/quality ──────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/quality")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/quality",
+    summary="Get Unassigned Document Quality",
+    description=(
+        "Return quality rule evaluation results for an unassigned document. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with qualityResults array."
+    ),
+    response_description="Quality results",
+    operation_id="getUnassignedDocumentQuality",
+)
 async def get_unassigned_document_quality(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -219,7 +268,18 @@ async def get_unassigned_document_quality(
 
 # ── PUT /v1/tenants/{tenantId}/unassigned-documents/{documentId}/subject ──────
 
-@router.put("/tenants/{tenant_id}/unassigned-documents/{document_id}/subject")
+@router.put(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/subject",
+    summary="Assign Document to Subject",
+    description=(
+        "Assign an unassigned WhatsApp document to an existing active Subject. "
+        "Required permission: `di.unassigned_document.assign`. "
+        "Returns D8 envelope with the updated document record. "
+        "Returns 409 if the document already has a Subject assigned."
+    ),
+    response_description="Updated document record",
+    operation_id="assignDocumentSubject",
+)
 async def assign_document_subject(
     tenant_id: str,
     document_id: uuid.UUID,

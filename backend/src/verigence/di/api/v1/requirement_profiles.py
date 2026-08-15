@@ -37,7 +37,17 @@ logger = structlog.get_logger(__name__)
 
 # ── GET /v1/tenants/{tenantId}/document-requirement-profiles ─────────────────
 
-@router.get("/tenants/{tenant_id}/document-requirement-profiles")
+@router.get(
+    "/tenants/{tenant_id}/document-requirement-profiles",
+    summary="List Requirement Profiles",
+    description=(
+        "List all Document Requirement Profile versions for the Tenant. "
+        "Required permission: `di.requirement_profile.read`. "
+        "Returns D8 envelope with profiles array (profileKey, versionNo, status)."
+    ),
+    response_description="Requirement profiles list",
+    operation_id="listRequirementProfiles",
+)
 async def list_requirement_profiles(
     tenant_id: str,
     actor: ActorPrincipal = Depends(
@@ -68,7 +78,18 @@ async def list_requirement_profiles(
 
 # ── POST /v1/tenants/{tenantId}/document-requirement-profiles ─────────────────
 
-@router.post("/tenants/{tenant_id}/document-requirement-profiles", status_code=201)
+@router.post(
+    "/tenants/{tenant_id}/document-requirement-profiles",
+    status_code=201,
+    summary="Create Requirement Profile",
+    description=(
+        "Create a new DRAFT Requirement Profile version for the Tenant. "
+        "Required permission: `di.requirement_profile.write`. "
+        "Returns D8 envelope with the created profile record."
+    ),
+    response_description="Created requirement profile",
+    operation_id="createRequirementProfile",
+)
 async def create_requirement_profile(
     tenant_id: str,
     body: dict[str, Any],
@@ -162,7 +183,17 @@ async def create_requirement_profile(
 
 # ── GET /v1/tenants/{tenantId}/document-requirement-profiles/{profileId} ──────
 
-@router.get("/tenants/{tenant_id}/document-requirement-profiles/{profile_id}")
+@router.get(
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}",
+    summary="Get Requirement Profile",
+    description=(
+        "Fetch a single Requirement Profile version by ID. "
+        "Required permission: `di.requirement_profile.read`. "
+        "Returns D8 envelope with the profile record, or 404 if not found."
+    ),
+    response_description="Requirement profile record",
+    operation_id="getRequirementProfile",
+)
 async def get_requirement_profile(
     tenant_id: str,
     profile_id: uuid.UUID,
@@ -191,7 +222,17 @@ async def get_requirement_profile(
 
 # ── PUT /v1/tenants/{tenantId}/document-requirement-profiles/{profileId} ──────
 
-@router.put("/tenants/{tenant_id}/document-requirement-profiles/{profile_id}")
+@router.put(
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}",
+    summary="Update Draft Requirement Profile",
+    description=(
+        "Replace the description of a DRAFT Requirement Profile version. "
+        "Required permission: `di.requirement_profile.write`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Updated requirement profile",
+    operation_id="updateDraftRequirementProfile",
+)
 async def update_draft_requirement_profile(
     tenant_id: str,
     profile_id: uuid.UUID,
@@ -254,7 +295,15 @@ async def update_draft_requirement_profile(
 # ── POST /v1/tenants/{tenantId}/document-requirement-profiles/{profileId}/publish
 
 @router.post(
-    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}/publish"
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}/publish",
+    summary="Publish Requirement Profile",
+    description=(
+        "Publish a DRAFT Requirement Profile; atomically retires the previous PUBLISHED version of the same profileKey. "
+        "Required permission: `di.requirement_profile.publish`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Published requirement profile",
+    operation_id="publishRequirementProfile",
 )
 async def publish_requirement_profile(
     tenant_id: str,
@@ -330,7 +379,18 @@ async def publish_requirement_profile(
 
 # ── PUT /v1/tenants/{tenantId}/subjects/{subjectId}/requirement-profile ───────
 
-@router.put("/tenants/{tenant_id}/subjects/{subject_id}/requirement-profile")
+@router.put(
+    "/tenants/{tenant_id}/subjects/{subject_id}/requirement-profile",
+    summary="Assign Requirement Profile to Subject",
+    description=(
+        "Assign one PUBLISHED Requirement Profile version to a Subject. "
+        "Supersedes any existing active assignment. "
+        "Required permission: `di.requirement_profile.assign`. "
+        "Returns D8 envelope with the assignment record."
+    ),
+    response_description="Assignment record",
+    operation_id="assignRequirementProfile",
+)
 async def assign_requirement_profile(
     tenant_id: str,
     subject_id: uuid.UUID,

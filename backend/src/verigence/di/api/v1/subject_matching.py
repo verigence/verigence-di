@@ -32,6 +32,15 @@ logger = structlog.get_logger(__name__)
 @router.post(
     "/tenants/{tenant_id}/subjects/{subject_id}/identifiers",
     status_code=201,
+    summary="Add Subject Identifier",
+    description=(
+        "Register a VERIFIED Subject identifier (e.g. phone number, PAN, Aadhaar) for deterministic matching. "
+        "Conflicts with an existing active identifier on another Subject → 409. "
+        "Required permission: `di.subject_matching.write`. "
+        "Returns D8 envelope with the created identifier record."
+    ),
+    response_description="Created subject identifier",
+    operation_id="addSubjectIdentifier",
 )
 async def add_subject_identifier(
     tenant_id: str,
@@ -140,7 +149,17 @@ async def add_subject_identifier(
 
 # ── POST /v1/tenants/{tenantId}/whatsapp/sender-mappings ─────────────────────
 
-@router.post("/tenants/{tenant_id}/whatsapp/sender-mappings")
+@router.post(
+    "/tenants/{tenant_id}/whatsapp/sender-mappings",
+    summary="Put WhatsApp Sender Mapping",
+    description=(
+        "Create or update an exact WhatsApp sender phone number to Subject mapping. "
+        "Required permission: `di.subject_matching.write`. "
+        "Returns D8 envelope with the mapping record."
+    ),
+    response_description="Sender mapping record",
+    operation_id="putWhatsappSenderMapping",
+)
 async def put_whatsapp_sender_mapping(
     tenant_id: str,
     body: dict[str, Any],

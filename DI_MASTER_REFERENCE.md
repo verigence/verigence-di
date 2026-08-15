@@ -9,13 +9,15 @@
 
 | Item | Value |
 |---|---|
-| Active baseline | **2.2** |
-| Baseline date | 2026-08-11 |
+| Active baseline | **2.4** |
+| Baseline date | 2026-08-15 |
 | Status | BASELINED FOR IMPLEMENTATION |
 | Design documents location | Workspace root (`/IDBP/`) |
 | Code repository | `verigence-di/` |
 
-> All design decisions are locked at Baseline 2.2 unless a new baseline is explicitly agreed and this file is updated. Do not infer design intent from older versioned files (v2.0, v2.1).
+> All design decisions are locked at Baseline 2.4 unless a new baseline is explicitly agreed and this file is updated. Do not infer design intent from older versioned files (v2.0, v2.1, v2.2).
+>
+> D1–D24 constitute the v2.4 delta from v2.2 baseline.
 
 **Reading order for a new session:**
 1. `DI_DECISIONS.md` — **READ THIS FIRST** — every locked design decision agreed in conversation
@@ -294,10 +296,10 @@ Steps in order:
 |---|---|
 | di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
 | di-worker (Railway) | ✅ Running |
-| Neon PostgreSQL | ⚠️ Migration 0007 ready, not yet applied — run `alembic upgrade head` |
+| Neon PostgreSQL | ✅ Migrations 0001–0008 all applied |
 | Cloudflare R2 | ✅ Working — slug-based path with 4 form-type folders |
 | Security module JWKS | ✅ Using GitHub raw test JWKS |
-| CI pipeline | ✅ Green — `108 passed, 0 xfailed` |
+| CI pipeline | ✅ Green |
 
 ### Schema changes beyond Baseline 2.2 spec
 
@@ -311,8 +313,8 @@ Steps in order:
 | `0004` | `tenant_settings`: relaxed constraints |
 | `0005` | new table `tenant_document_types`; `documents`: added `physical_form_type`, `requires_processing`; 15 global seed document types |
 | `0006` | `documents.source_channel`: dropped NOT NULL — now nullable (D10) |
-| `0007` | ❌ NOT YET APPLIED — `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
-| `0008` | ❌ NOT YET WRITTEN — `backout_jobs` table + 2 indexes (D24) |
+| `0007` | `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
+| `0008` | `backout_jobs` table + 2 indexes (D24) |
 
 ### Code additions beyond Baseline 2.2 spec
 

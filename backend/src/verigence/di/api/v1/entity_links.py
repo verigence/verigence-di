@@ -29,7 +29,17 @@ logger = structlog.get_logger(__name__)
 _PREFIX = "/tenants/{tenant_id}/subjects/{subject_id}/documents/{document_id}/entity-links"
 
 
-@router.get(_PREFIX)
+@router.get(
+    _PREFIX,
+    summary="Get Document Entity Links",
+    description=(
+        "List all active external entity links for a document. "
+        "Required permission: `di.entity_link.read`. "
+        "Returns D8 envelope with entity links array (linkType, externalEntityId, externalSystem)."
+    ),
+    response_description="Entity links list",
+    operation_id="getDocumentEntityLinks",
+)
 async def get_document_entity_links(
     tenant_id: str,
     subject_id: uuid.UUID,
@@ -69,7 +79,18 @@ async def get_document_entity_links(
     return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
-@router.post(_PREFIX, status_code=201)
+@router.post(
+    _PREFIX,
+    status_code=201,
+    summary="Add Document Entity Link",
+    description=(
+        "Add a generic external entity link to a document (e.g. link to a loan ID in a core banking system). "
+        "Required permission: `di.entity_link.write`. "
+        "Returns D8 envelope with the created entity link record."
+    ),
+    response_description="Created entity link",
+    operation_id="addDocumentEntityLink",
+)
 async def add_document_entity_link(
     tenant_id: str,
     subject_id: uuid.UUID,

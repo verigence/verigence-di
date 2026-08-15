@@ -36,7 +36,17 @@ logger = structlog.get_logger(__name__)
 
 # ── POST /v1/system/whatsapp/routes ──────────────────────────────────────────
 
-@router.post("/v1/system/whatsapp/routes")
+@router.post(
+    "/v1/system/whatsapp/routes",
+    summary="Put WhatsApp Route",
+    description=(
+        "Configure or update a WhatsApp destination/account route mapping to a Tenant. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with the route record. Phase 1: stores route only."
+    ),
+    response_description="Route record",
+    operation_id="putWhatsappRoute",
+)
 async def put_whatsapp_route(
     body: dict[str, Any],
     actor: ActorPrincipal = Depends(require_system_actor),
@@ -106,7 +116,17 @@ async def put_whatsapp_route(
 
 # ── POST /v1/integrations/whatsapp/webhook ────────────────────────────────────
 
-@router.post("/v1/integrations/whatsapp/webhook")
+@router.post(
+    "/v1/integrations/whatsapp/webhook",
+    summary="WhatsApp Webhook",
+    description=(
+        "Receive inbound WhatsApp message/media webhook events from the provider. "
+        "No JWT required — provider HMAC signature verification is used instead (Phase 2). "
+        "Phase 1: acknowledges receipt with HTTP 200. Full intake processing is Phase 2."
+    ),
+    include_in_schema=True,
+    operation_id="whatsappWebhook",
+)
 async def whatsapp_webhook(request: Request) -> Response:
     """Receive inbound WhatsApp message/media webhook.
 
@@ -119,7 +139,17 @@ async def whatsapp_webhook(request: Request) -> Response:
 
 # ── GET /v1/system/whatsapp/quarantine ────────────────────────────────────────
 
-@router.get("/v1/system/whatsapp/quarantine")
+@router.get(
+    "/v1/system/whatsapp/quarantine",
+    summary="Get WhatsApp Quarantine",
+    description=(
+        "List WhatsApp intake events for which Tenant routing failed (status=PENDING). "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with paginated quarantine items."
+    ),
+    response_description="Quarantine items list",
+    operation_id="getWhatsappQuarantine",
+)
 async def get_whatsapp_quarantine(
     page: int = 1,
     page_size: int = 50,
@@ -181,7 +211,18 @@ async def get_whatsapp_quarantine(
 
 # ── POST /v1/system/whatsapp/quarantine/{quarantineId}/replay ─────────────────
 
-@router.post("/v1/system/whatsapp/quarantine/{quarantine_id}/replay", status_code=202)
+@router.post(
+    "/v1/system/whatsapp/quarantine/{quarantine_id}/replay",
+    status_code=202,
+    summary="Replay WhatsApp Quarantine Item",
+    description=(
+        "Replay a quarantined WhatsApp intake item after correcting the route. "
+        "Sets status to REPLAYING. Full replay processing is Phase 2. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns 409 if the item is not in PENDING state."
+    ),
+    operation_id="replayWhatsappQuarantine",
+)
 async def replay_whatsapp_quarantine(
     quarantine_id: uuid.UUID,
     actor: ActorPrincipal = Depends(require_system_actor),
@@ -233,7 +274,18 @@ async def replay_whatsapp_quarantine(
 
 # ── POST /v1/system/whatsapp/quarantine/{quarantineId}/discard ────────────────
 
-@router.post("/v1/system/whatsapp/quarantine/{quarantine_id}/discard")
+@router.post(
+    "/v1/system/whatsapp/quarantine/{quarantine_id}/discard",
+    summary="Discard WhatsApp Quarantine Item",
+    description=(
+        "Discard a quarantined item — marks it DISCARDED and removes temporary media. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with quarantineId and DISCARDED status. "
+        "Returns 409 if the item is not in PENDING or REPLAYING state."
+    ),
+    response_description="Discard confirmation",
+    operation_id="discardWhatsappQuarantine",
+)
 async def discard_whatsapp_quarantine(
     quarantine_id: uuid.UUID,
     actor: ActorPrincipal = Depends(require_system_actor),

@@ -30,7 +30,17 @@ logger = structlog.get_logger(__name__)
 
 # ── GET /v1/tenants/{tenantId}/verification-queue ─────────────────────────────
 
-@router.get("/tenants/{tenant_id}/verification-queue")
+@router.get(
+    "/tenants/{tenant_id}/verification-queue",
+    summary="Get Verification Queue",
+    description=(
+        "List CONFIRMED documents awaiting human verification, filtered by verification status. "
+        "Required permission: `di.verification.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Verification queue",
+    operation_id="getVerificationQueue",
+)
 async def get_verification_queue(
     tenant_id: str,
     human_verification_status: str = "MANDATORY",
@@ -98,6 +108,16 @@ async def get_verification_queue(
 @router.post(
     "/tenants/{tenant_id}/subjects/{subject_id}/documents/{document_id}/verification",
     status_code=201,
+    summary="Verify Document",
+    description=(
+        "Record a human verification decision for a CONFIRMED document. "
+        "Optionally include fieldCorrections to override extracted field values. "
+        "Required permission: `di.verification.write`. "
+        "Returns D8 envelope with verificationId. "
+        "Returns 409 if the document is not CONFIRMED or already VERIFIED."
+    ),
+    response_description="Verification record",
+    operation_id="verifySubjectDocument",
 )
 async def verify_subject_document(
     tenant_id: str,

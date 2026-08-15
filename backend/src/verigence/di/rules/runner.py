@@ -129,7 +129,7 @@ async def normalize_and_validate(
         await session.execute(
             text("""
                 UPDATE docintel.extracted_facts
-                SET normalized_value = :nv::jsonb
+                SET normalized_value = CAST(:nv AS jsonb)
                 WHERE tenant_id = :tid
                   AND extracted_fact_id = :fact_id
             """),
@@ -185,7 +185,7 @@ async def normalize_and_validate(
                     VALUES
                         (:tid, :vrid, :run_id, :doc_id,
                          :canonical_field_id, :rule_key, :result, :severity,
-                         :message, :details::jsonb, :now)
+                         :message, CAST(:details AS jsonb), :now)
                 """),
                 {
                     "tid": tenant_id,

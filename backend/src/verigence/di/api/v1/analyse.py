@@ -46,7 +46,19 @@ class AnalyseRequest(BaseModel):
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@router.post("/tenants/{tenant_id}/analyse")
+@router.post(
+    "/tenants/{tenant_id}/analyse",
+    summary="Analyse Documents",
+    description=(
+        "Run the seven deterministic reconciliation rules (D17) against a set of confirmed documents "
+        "belonging to the same Subject. Documents must be indexed in document_search_index. "
+        "Required permission: `di.document.read`. "
+        "Returns D8 envelope with findings array and summary verdict: "
+        "RECONCILED (all rules pass), DISCREPANCY (one or more fail), or INSUFFICIENT_DATA."
+    ),
+    response_description="Reconciliation findings",
+    operation_id="analyseDocuments",
+)
 async def analyse_documents(
     tenant_id: str,
     body: AnalyseRequest,

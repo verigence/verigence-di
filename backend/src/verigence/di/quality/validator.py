@@ -208,7 +208,7 @@ async def _persist_quality_results(
                      evaluated_at_utc)
                 VALUES
                     (:tenant_id, :qid, :document_id, :rule_key,
-                     :outcome, :params::jsonb, :measurement::jsonb, :message,
+                     :outcome, CAST(:params AS jsonb), CAST(:measurement AS jsonb), :message,
                      :now)
                 ON CONFLICT DO NOTHING
             """),

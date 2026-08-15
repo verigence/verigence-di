@@ -34,7 +34,17 @@ logger = structlog.get_logger(__name__)
 
 # ── Tenant Settings ───────────────────────────────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/settings")
+@router.get(
+    "/tenants/{tenant_id}/settings",
+    summary="Get Tenant Settings",
+    description=(
+        "Fetch the current configuration settings for a Tenant. "
+        "Required permission: `di.tenant_config.read`. "
+        "Returns D8 envelope with all tenant settings (timezone, thresholds, upload limits)."
+    ),
+    response_description="Tenant settings",
+    operation_id="getTenantSettings",
+)
 async def get_tenant_settings(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
@@ -59,7 +69,17 @@ async def get_tenant_settings(
     return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_settings(row)).model_dump()
 
 
-@router.put("/tenants/{tenant_id}/settings")
+@router.put(
+    "/tenants/{tenant_id}/settings",
+    summary="Put Tenant Settings",
+    description=(
+        "Upsert tenant configuration settings. Creates the settings row on first call. "
+        "Required permission: `di.tenant_config.write`. "
+        "Returns D8 envelope with the updated settings."
+    ),
+    response_description="Updated tenant settings",
+    operation_id="putTenantSettings",
+)
 async def put_tenant_settings(
     tenant_id: str,
     body: dict[str, Any],
@@ -167,7 +187,17 @@ async def put_tenant_settings(
 
 # ── Retention Policies ────────────────────────────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/retention-policies")
+@router.get(
+    "/tenants/{tenant_id}/retention-policies",
+    summary="List Retention Policies",
+    description=(
+        "List all retention policies configured for a Tenant. "
+        "Required permission: `di.tenant_config.read`. "
+        "Returns D8 envelope with retention policies array."
+    ),
+    response_description="Retention policies list",
+    operation_id="listRetentionPolicies",
+)
 async def list_retention_policies(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
@@ -192,7 +222,18 @@ async def list_retention_policies(
     ).model_dump()
 
 
-@router.post("/tenants/{tenant_id}/retention-policies", status_code=201)
+@router.post(
+    "/tenants/{tenant_id}/retention-policies",
+    status_code=201,
+    summary="Create Retention Policy",
+    description=(
+        "Create a new data retention policy for the Tenant (retentionDays, disposition). "
+        "Required permission: `di.tenant_config.write`. "
+        "Returns D8 envelope with the created policy record."
+    ),
+    response_description="Created retention policy",
+    operation_id="createRetentionPolicy",
+)
 async def create_retention_policy(
     tenant_id: str,
     body: dict[str, Any],
@@ -238,7 +279,17 @@ async def create_retention_policy(
     return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_retention_policy(row)).model_dump()
 
 
-@router.put("/tenants/{tenant_id}/retention-policies/{retention_policy_id}")
+@router.put(
+    "/tenants/{tenant_id}/retention-policies/{retention_policy_id}",
+    summary="Update Retention Policy",
+    description=(
+        "Update an existing retention policy (name, days, disposition, active flag). "
+        "Required permission: `di.tenant_config.write`. "
+        "Returns D8 envelope with the updated policy record."
+    ),
+    response_description="Updated retention policy",
+    operation_id="updateRetentionPolicy",
+)
 async def update_retention_policy(
     tenant_id: str,
     retention_policy_id: uuid.UUID,
@@ -301,7 +352,17 @@ async def update_retention_policy(
 
 # ── Quality Policy ────────────────────────────────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/quality-policy")
+@router.get(
+    "/tenants/{tenant_id}/quality-policy",
+    summary="Get Quality Policy",
+    description=(
+        "Fetch the Tenant's active quality policy array. "
+        "Required permission: `di.tenant_config.read`. "
+        "Returns D8 envelope with qualityPolicy array."
+    ),
+    response_description="Quality policy",
+    operation_id="getQualityPolicy",
+)
 async def get_quality_policy(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
@@ -325,7 +386,17 @@ async def get_quality_policy(
     ).model_dump()
 
 
-@router.put("/tenants/{tenant_id}/quality-policy")
+@router.put(
+    "/tenants/{tenant_id}/quality-policy",
+    summary="Put Quality Policy",
+    description=(
+        "Replace the Tenant quality policy array with a new set of rule configurations. "
+        "Required permission: `di.tenant_config.write`. "
+        "Returns D8 envelope with the updated qualityPolicy."
+    ),
+    response_description="Updated quality policy",
+    operation_id="putQualityPolicy",
+)
 async def put_quality_policy(
     tenant_id: str,
     body: dict[str, Any],
@@ -357,7 +428,17 @@ async def put_quality_policy(
     ).model_dump()
 
 
-@router.get("/tenants/{tenant_id}/quality-rules")
+@router.get(
+    "/tenants/{tenant_id}/quality-rules",
+    summary="List Quality Rules",
+    description=(
+        "List all active quality rules from the platform catalog. "
+        "Required permission: `di.tenant_config.read`. "
+        "Returns D8 envelope with rules array (ruleKey, description, parameterSchema)."
+    ),
+    response_description="Quality rules catalog",
+    operation_id="listQualityRules",
+)
 async def list_quality_rules(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
