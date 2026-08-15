@@ -263,7 +263,7 @@ async def _execute_steps(
 
     # ── Step 7: Call classifier ───────────────────────────────────────────────
     artifact_bytes, mime_type = await _load_original_artifact(session, tenant_id, document_id)
-    candidate_keys = [c["document_type_key"] for c in candidate_snapshot]
+    candidate_keys = [c["document_type_key"] for c in candidates]
 
     classify_invocation_id = uuid.uuid4()
     await _insert_invocation(
@@ -298,7 +298,7 @@ async def _execute_steps(
         raise NonRetryableError(
             "CLASSIFICATION_AMBIGUOUS",
             f"No single candidate met acceptance score {acceptance_score}; "
-            f"scores: {[(c['document_type_key'], c.get('classification_score')) for c in candidate_snapshot]}",
+            f"scores: {[(c['document_type_key'], c.get('classification_score')) for c in candidates]}",
         )
 
     log.info("classification_accepted",
