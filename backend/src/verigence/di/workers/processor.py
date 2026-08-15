@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import os
 import socket
+import time
 import uuid
 
 import structlog
@@ -142,6 +143,7 @@ class ProcessingWorker:
         job_log.info("job_claimed")
 
         # Run the job in its own session/transaction
+        _job_start = time.monotonic()
         async with session_factory() as session:
             try:
                 async with session.begin():
@@ -165,9 +167,11 @@ class ProcessingWorker:
                             processing_job_id=job_id,
                             success=True,
                         )
+                    _total_ms = round((time.monotonic() - _job_start) * 1000, 1)
                     job_log.info("job_completed",
                                  confidence_score=str(result.confidence_score),
-                                 human_verification_status=result.human_verification_status)
+                                 human_verification_status=result.human_verification_status,
+                                 total_duration_ms=_total_ms)
                 else:
                     # The run_processing_job already handled its own rollback via
                     # the ProcessingError handler inside it; we need to clean up

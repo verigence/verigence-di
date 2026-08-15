@@ -35,7 +35,13 @@ class Settings(BaseSettings):
     # Application
     env: Environment = Environment.LOCAL
     secret_key: str = Field(min_length=32)
-    log_level: str = "INFO"
+
+    # Logging — D27
+    log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
+    log_stdout: bool = True            # emit structured logs to stdout
+    log_axiom: bool = False            # emit logs to Axiom (async, fire-and-forget)
+    axiom_token: str = ""              # Axiom API token (required if log_axiom=true)
+    axiom_dataset: str = "verigence-di"  # Axiom dataset name
 
     # Database
     database_url: str  # postgresql+asyncpg://...

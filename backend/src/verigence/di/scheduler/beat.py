@@ -86,13 +86,14 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
     """
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
+    log.info("eod_tick")
 
     # ── 0. Stale RUNNING job reaper ──────────────────────────────────────
     try:
         async with session_factory() as session, session.begin():
             reclaimed = await _reclaim_stale_jobs(session, now_utc)
         if reclaimed:
-            log.info("stale_jobs_reclaimed", count=reclaimed)
+            log.warning("stale_running_job_reset", count=reclaimed)
     except Exception as exc:
         log.warning("stale_job_reaper_failed", error=str(exc))
 

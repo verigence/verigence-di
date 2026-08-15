@@ -95,6 +95,8 @@ async def _validate_schema_profile_consistency() -> None:
 
 
 def create_app() -> FastAPI:
+    from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+    configure_logging()
     settings = get_settings()
 
     @asynccontextmanager

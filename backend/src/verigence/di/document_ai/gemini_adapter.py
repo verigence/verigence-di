@@ -35,7 +35,7 @@ import base64
 import json
 import uuid
 from decimal import Decimal
-from typing import Any
+from typing import Any, Tuple
 
 import httpx
 import structlog
@@ -133,6 +133,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         schema-driven prompt, calls Gemini REST API, validates the response.
         Falls back to FALLBACK_SCHEMA for unregistered types.
         """
+        import time as _t
         log = logger.bind(
             adapter=self.adapter_key,
             document_type_key=document_type_key,
@@ -141,47 +142,140 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         )
 
         schema = get_schema(document_type_key or "")
-        log.debug("gemini_extract_schema_resolved", schema_key=schema.document_type_key,
-                  schema_version=schema.schema_version)
+        required_count = sum(1 for f in schema.fields if f.required)
 
         # Build the prompt — merge DB field list with schema registry metadata
         prompt = _build_prompt(schema, fields)
+
+        log.debug("gemini_prompt", document_type_key=document_type_key, prompt=prompt)
+        log.info(
+            "gemini_request",
+            document_type_key=document_type_key,
+            physical_form_type=physical_form_type,
+            gemini_model=_GEMINI_MODEL,
+            file_bytes=len(artifact_bytes),
+            file_mime=mime_type,
+            schema_field_count=len(fields),
+            required_field_count=required_count,
+        )
 
         # Call Gemini REST API — retry once on parse failure
         provider_request_id = str(uuid.uuid4())
         raw_response: str | None = None
         field_results: list[FieldResult] | None = None
         last_error: str | None = None
+        _call_start = _t.monotonic()
+        _prompt_tokens = 0
+        _response_tokens = 0
+        _http_status = 0
 
         for attempt in range(2):
             try:
-                raw_response = await _call_gemini(
-                    api_key=self._api_key,
-                    artifact_bytes=artifact_bytes,
-                    mime_type=mime_type,
-                    prompt=prompt,
+                raw_response, _http_status, _prompt_tokens, _response_tokens = (
+                    await _call_gemini_instrumented(
+                        api_key=self._api_key,
+                        artifact_bytes=artifact_bytes,
+                        mime_type=mime_type,
+                        prompt=prompt,
+                    )
+                )
+                log.debug(
+                    "gemini_raw_response",
+                    document_type_key=document_type_key,
+                    raw_response=raw_response,
                 )
                 field_results = _parse_response(raw_response, schema, fields)
                 break
+            except json.JSONDecodeError as exc:
+                last_error = str(exc)
+                log.warning(
+                    "gemini_parse_failure",
+                    document_type_key=document_type_key,
+                    attempt=attempt + 1,
+                    parse_error=last_error,
+                    raw_snippet=(raw_response or "")[:300],
+                )
+                if attempt == 0:
+                    log.warning(
+                        "gemini_retry",
+                        document_type_key=document_type_key,
+                        attempt=attempt + 1,
+                        reason="parse_failure",
+                    )
+                    continue
+                field_results = _make_not_found_results(fields)
             except Exception as exc:
                 last_error = str(exc)
-                log.warning("gemini_extract_attempt_failed",
-                            attempt=attempt + 1, error=last_error)
+                log.error(
+                    "gemini_api_error",
+                    document_type_key=document_type_key,
+                    gemini_model=_GEMINI_MODEL,
+                    http_status=_http_status,
+                    exc_type=type(exc).__name__,
+                    exc_msg=last_error,
+                    duration_ms=round((_t.monotonic() - _call_start) * 1000, 1),
+                )
                 if attempt == 0:
+                    log.warning(
+                        "gemini_retry",
+                        document_type_key=document_type_key,
+                        attempt=attempt + 1,
+                        reason="api_error",
+                    )
                     continue
-                # Both attempts failed — return NOT_FOUND for all fields
-                log.error("gemini_extract_all_attempts_failed", error=last_error)
                 field_results = _make_not_found_results(fields)
 
         if field_results is None:
             field_results = _make_not_found_results(fields)
+
+        _duration_ms = round((_t.monotonic() - _call_start) * 1000, 1)
+        _fields_found = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
+        _fields_null  = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
+        _fields_low   = sum(
+            1 for fr in field_results
+            if fr.confidence is not None and fr.confidence <= Decimal("40.00")
+        )
+
+        log.info(
+            "gemini_response",
+            document_type_key=document_type_key,
+            gemini_model=_GEMINI_MODEL,
+            http_status=_http_status,
+            duration_ms=_duration_ms,
+            prompt_tokens=_prompt_tokens,
+            response_tokens=_response_tokens,
+            fields_extracted=_fields_found,
+            fields_null=_fields_null,
+            fields_low_confidence=_fields_low,
+        )
+
+        if _fields_found == 0 and len(fields) > 0:
+            log.warning(
+                "gemini_all_fields_null",
+                document_type_key=document_type_key,
+                gemini_model=_GEMINI_MODEL,
+                duration_ms=_duration_ms,
+                likely_cause="empty_response" if not raw_response else "parse_failed_or_all_low",
+            )
+
+        for fr in field_results:
+            log.debug(
+                "gemini_field_detail",
+                document_type_key=document_type_key,
+                field_key=fr.field_key,
+                raw_value=fr.raw_value,
+                confidence_str=str(fr.confidence) if fr.confidence is not None else None,
+            )
 
         usage: dict[str, Any] = {
             "model": _GEMINI_MODEL,
             "document_type_key": document_type_key,
             "schema_version": schema.schema_version,
             "fields_requested": len(fields),
-            "fields_found": sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND),
+            "fields_found": _fields_found,
+            "prompt_tokens": _prompt_tokens,
+            "response_tokens": _response_tokens,
+            "duration_ms": _duration_ms,
         }
 
         return AIInvocationResult(
@@ -267,21 +361,10 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
 
 # ── Gemini REST API call ───────────────────────────────────────────────────────
 
-async def _call_gemini(
-    api_key: str,
-    artifact_bytes: bytes,
-    mime_type: str,
-    prompt: str,
-) -> str:
-    """Send document bytes + prompt to Gemini REST API. Returns raw text response.
-
-    Uses httpx directly — no google.generativeai SDK dependency.
-    Gemini accepts image/* and application/pdf inline as base64.
-    """
+def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict:
     effective_mime = mime_type if mime_type else "application/octet-stream"
     image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
-
-    payload = {
+    return {
         "contents": [
             {
                 "parts": [
@@ -296,6 +379,19 @@ async def _call_gemini(
         },
     }
 
+
+async def _call_gemini_instrumented(
+    api_key: str,
+    artifact_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+) -> Tuple[str, int, int, int]:
+    """Send document bytes + prompt to Gemini. Returns (text, http_status, prompt_tokens, response_tokens).
+
+    Uses httpx directly — no google.generativeai SDK dependency.
+    """
+    payload = _build_payload(artifact_bytes, mime_type, prompt)
+
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
             _GEMINI_API_URL,
@@ -303,16 +399,34 @@ async def _call_gemini(
             json=payload,
         )
 
-    if resp.status_code != 200:
+    http_status = resp.status_code
+    if http_status != 200:
         raise RuntimeError(
-            f"Gemini API error {resp.status_code}: {resp.text[:500]}"
+            f"Gemini API error {http_status}: {resp.text[:500]}"
         )
 
     data = resp.json()
+    usage = data.get("usageMetadata", {})
+    prompt_tokens   = usage.get("promptTokenCount", 0)
+    response_tokens = usage.get("candidatesTokenCount", 0)
+
     try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as exc:
         raise ValueError(f"Unexpected Gemini response shape: {data}") from exc
+
+    return text, http_status, prompt_tokens, response_tokens
+
+
+async def _call_gemini(
+    api_key: str,
+    artifact_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+) -> str:
+    """Backward-compatible wrapper — returns text only."""
+    text, _, _, _ = await _call_gemini_instrumented(api_key, artifact_bytes, mime_type, prompt)
+    return text
 
 
 # ── Response parser ────────────────────────────────────────────────────────────

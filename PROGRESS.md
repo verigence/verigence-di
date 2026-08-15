@@ -2056,3 +2056,99 @@ extension. Doc type derived from filename stem when `--doc-type` is omitted.
 | Cloudflare R2 | ✅ Working |
 | CI pipeline | ✅ Green |
 
+
+## Session record — 2026-08-19 (Centralised Logging — D27)
+
+### Design documents updated ✅
+
+| File | Change |
+|---|---|
+| `design/DI_LLD_v2.2.md` | New §2a — Structured Logging and Centralised Observability (D27): two-channel pipeline, Axiom drain contract, master correlation key, context fields, full mandatory event catalogue by component |
+| `DI_DECISIONS.md` | D27 locked — 5 new env vars, stdout/Axiom channel spec, DEBUG restriction, Axiom-as-additive rule |
+
+### D27 — Implementation plan
+
+**New file:**
+- `backend/src/verigence/di/logging_config.py` — structlog pipeline configuration + Axiom async drain
+
+**Files to change:**
+
+| File | Change |
+|---|---|
+| `backend/src/verigence/di/settings.py` | 5 new vars: `log_level`, `log_stdout`, `log_axiom`, `axiom_token`, `axiom_dataset` |
+| `backend/src/verigence/di/main.py` | Call `configure_logging()` at startup |
+| `backend/src/verigence/di/workers/__main__.py` | Call `configure_logging()` for standalone worker |
+| `backend/src/verigence/di/application/intake.py` | Meaningful upload logging — 9 events |
+| `backend/src/verigence/di/workers/job_runner.py` | Per-step pipeline logging — 12 events |
+| `backend/src/verigence/di/document_ai/gemini_adapter.py` | Request/response/field logging — 9 events |
+| `backend/src/verigence/di/workers/processor.py` | Job lifecycle logging already mostly present — tighten context binding |
+| `backend/src/verigence/di/scheduler/beat.py` | EOD tick + stale job reset logging |
+
+### New env vars (add to Railway di-api + di-worker)
+
+| Var | Dev default | Prod recommended |
+|---|---|---|
+| `DI_LOG_LEVEL` | `DEBUG` | `INFO` |
+| `DI_LOG_STDOUT` | `true` | `true` |
+| `DI_LOG_AXIOM` | `false` | `true` (once Axiom account set up) |
+| `DI_AXIOM_TOKEN` | *(unset)* | *(from Axiom dashboard)* |
+| `DI_AXIOM_DATASET` | `verigence-di` | `verigence-di` |
+
+### Implementation status
+
+
+| File | Status |
+|---|---|
+| `logging_config.py` | ✅ structlog pipeline + Axiom drain |
+| `settings.py` | ✅ log_level, log_stdout, log_axiom, axiom_token, axiom_dataset |
+| `main.py` | ✅ configure_logging() at startup |
+| `workers/__main__.py` | ✅ configure_logging() at startup |
+| `application/intake.py` | ✅ 9 meaningful events — upload_received → quality_verdict |
+| `workers/job_runner.py` | ✅ 12 per-step events — ScoredField attribute bug fixed |
+| `document_ai/gemini_adapter.py` | ✅ request/response/field/error logging |
+| `workers/processor.py` | ✅ job_claimed, job_completed (total_duration_ms), failure paths |
+| `scheduler/beat.py` | ✅ eod_tick, stale_running_job_reset, eod_retry_jobs_inserted |
+
+## Session record — current (D27 Logging — completed)
+
+### Summary
+
+D27 Centralised Logging implementation complete and validated.
+
+### Bugs fixed this session
+
+| File | Bug |
+|---|---|
+| `workers/job_runner.py` | `ScoredField.is_mandatory` → `expected`; `.found` → `found_status == FoundStatus.FOUND` |
+| `workers/job_runner.py` | `import time as _t` / `import time as _t2` — moved to module-level `import time` |
+| `workers/job_runner.py` | `_job_start` leaked from outer function — passed as `job_start` param to `_execute_steps` |
+| `application/intake.py` | `create_initial_job` returns `uuid.UUID` not a dict — `job["processing_job_id"]` → `str(job)` |
+
+### Tests
+
+185 passed, 43 deselected (no_docker mark) — ruff clean ✓
+
+### E2E result (booking_form_test.pdf — Railway)
+
+| Field | Value | Conf |
+|---|---|---|
+| customer_name | Abhishek Khuntia | 92 |
+| dealer_name | PREMIER HYUNDAI | 92 |
+| booking_date | 2024-07-20 | 92 |
+| total_price | 1549217 | 70 |
+| vehicle_model | Creta | 92 |
+| vehicle_variant | S(O) MT | 92 |
+| vehicle_color | Black | 92 |
+| customer_phone | +917008807600 | 92 |
+| booking_reference_number | null | — |
+| **score** | **79.33** | ✅ PROCESSED + CONFIRMED |
+
+### Infrastructure state
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ All migrations at head |
+| Cloudflare R2 | ✅ Working |
+| CI pipeline | ✅ 185 tests green |

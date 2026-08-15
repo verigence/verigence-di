@@ -850,3 +850,52 @@ these rules without that redesign.
 ### Status: AGREED — pair-matching redesign is Phase 2
 
 ---
+
+## D27 — Centralised Structured Logging (2026-08-19)
+
+### Decision
+DI implements a two-channel structured logging pipeline using structlog.
+Both channels are independently configurable and neither is in the HTTP
+request path.
+
+### Configuration
+
+| Env var | Type | Default | Purpose |
+|---|---|---|---|
+| `DI_LOG_LEVEL` | `DEBUG\|INFO\|WARNING\|ERROR` | `INFO` | Gates all output — both channels |
+| `DI_LOG_STDOUT` | `bool` | `true` | Stdout channel on/off |
+| `DI_LOG_AXIOM` | `bool` | `false` | Axiom channel on/off |
+| `DI_AXIOM_TOKEN` | `str` | `""` | Axiom API token (required if DI_LOG_AXIOM=true) |
+| `DI_AXIOM_DATASET` | `str` | `verigence-di` | Axiom dataset name |
+
+### Stdout format
+- `local` / `dev`: structlog ConsoleRenderer (human-readable, coloured)
+- `production` / `uat`: JSON (one line per event, machine-parseable by Railway log viewer)
+
+### Axiom drain
+- Async background thread with a queue (capacity 10,000 entries)
+- Fire-and-forget: API response is never blocked by Axiom availability
+- On buffer overflow: oldest entries dropped silently; `axiom_buffer_dropped` WARNING emitted
+- Retry on failure: exponential back-off, max 3 attempts per batch
+- If `DI_LOG_AXIOM=true` but `DI_AXIOM_TOKEN` is absent: WARNING at startup, Axiom silently disabled
+- Pure Python + httpx: no axiom-py SDK dependency
+
+### Master correlation key
+`document_id` is the primary trace key spanning both HTTP upload context
+and async worker context. Every log line must carry it once allocated.
+See §2a of `design/DI_LLD_v2.2.md` for full context field specification
+and mandatory event catalogue by component.
+
+### DEBUG level restriction
+`DI_LOG_LEVEL=DEBUG` emits Gemini prompts, raw responses, and per-field
+values which may contain PII (PAN numbers, phone numbers, names).
+Must never be set in `production` or `uat` environments.
+
+### Axiom as additive observability
+Axiom is additive — stdout always runs independently. Railway logs remain
+the fallback. If Axiom is unavailable for any period, no logs are lost
+from the Railway log viewer.
+
+### Status: AGREED — implementation in progress 2026-08-19
+
+---

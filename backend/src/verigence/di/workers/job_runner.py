@@ -26,6 +26,7 @@ session lifecycle and calls commit / rollback / fail_job on error.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -111,6 +112,7 @@ async def run_processing_job(
         processing_job_id=str(processing_job_id),
         correlation_id=correlation_id,
     )
+    _job_start = time.monotonic()
 
     # ── Step 2: Create immutable Processing Run ───────────────────────────────
     processing_run_id = uuid.uuid4()
@@ -152,6 +154,7 @@ async def run_processing_job(
             ai_adapter=ai_adapter,
             log=log,
             started_at=now,
+            job_start=_job_start,
         )
     except ProcessingError as exc:
         # Mark the Processing Run as FAILED
@@ -211,6 +214,7 @@ async def _execute_steps(
     ai_adapter: DocumentAIAdapter,
     log: Any,
     started_at: datetime,
+    job_start: float,
 ) -> JobRunResult:
     """All 17 processing steps — raises ProcessingError on failure."""
     now = started_at
@@ -234,6 +238,12 @@ async def _execute_steps(
     hint_key = await _get_document_hint_key(session, tenant_id, document_id)
 
     candidates = await _form_candidate_set(session, tenant_id)
+    log.info(
+        "classification_candidates",
+        candidate_count=len(candidates),
+        candidate_keys=[c["document_type_key"] for c in candidates],
+        hint_key=hint_key,
+    )
 
     # ── Step 5: Persist candidate snapshot ───────────────────────────────────
     # Need requirement context for flags
@@ -295,15 +305,29 @@ async def _execute_steps(
     # ── Step 8: Accept single winner ─────────────────────────────────────────
     accepted = _accept_classification(classifications, candidates, acceptance_score)
     if accepted is None:
+        scores = [(c["document_type_key"], c.get("classification_score")) for c in candidates]
+        log.warning(
+            "classification_failed",
+            reason="AMBIGUOUS",
+            candidate_keys=[c["document_type_key"] for c in candidates],
+            scores=scores,
+        )
         raise NonRetryableError(
             "CLASSIFICATION_AMBIGUOUS",
-            f"No single candidate met acceptance score {acceptance_score}; "
-            f"scores: {[(c['document_type_key'], c.get('classification_score')) for c in candidates]}",
+            f"No single candidate met acceptance score {acceptance_score}; scores: {scores}",
         )
 
-    log.info("classification_accepted",
-             document_type_key=accepted["document_type_key"],
-             profile_id=str(accepted["profile_id"]))
+    # Find runner-up for diagnostics
+    others = [c for c in classifications if c.document_type_key != accepted["document_type_key"]]
+    runner_up = max(others, key=lambda c: float(c.confidence or 0), default=None)
+    log.info(
+        "classification_result",
+        accepted_type_key=accepted["document_type_key"],
+        acceptance_score=str(acceptance_score),
+        profile_id=str(accepted["profile_id"]),
+        runner_up_key=runner_up.document_type_key if runner_up else None,
+        runner_up_score=str(runner_up.confidence) if runner_up else None,
+    )
 
     # ── Step 9: Use the profileId from the snapshotted candidate ─────────────
     profile_id = uuid.UUID(str(accepted["profile_id"]))
@@ -355,6 +379,16 @@ async def _execute_steps(
         session, tenant_id, document_type_id,
     )
 
+    log.info(
+        "extraction_request",
+        document_type_key=accepted_document_type_key,
+        physical_form_type=physical_form_type_for_extract,
+        schema_field_count=len(extract_fields),
+        file_bytes=len(artifact_bytes),
+        file_mime=mime_type,
+    )
+    _extract_start = time.monotonic()
+
     extract_invocation_id = uuid.uuid4()
     await _insert_invocation(
         session, tenant_id, extract_invocation_id, processing_run_id,
@@ -382,6 +416,30 @@ async def _execute_steps(
     )
 
     field_results: list[FieldResult] = extract_result.results  # type: ignore[assignment]
+    _extract_ms = round((time.monotonic() - _extract_start) * 1000, 1)
+    _fields_found  = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
+    _fields_null   = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
+    _fields_low    = sum(1 for fr in field_results
+                        if fr.confidence is not None and fr.confidence <= Decimal("40.00"))
+    log.info(
+        "extraction_result",
+        document_type_key=accepted_document_type_key,
+        physical_form_type=physical_form_type_for_extract,
+        fields_extracted=_fields_found,
+        fields_null=_fields_null,
+        fields_low_confidence=_fields_low,
+        duration_ms=_extract_ms,
+    )
+    for fr in field_results:
+        log.debug(
+            "extraction_field_detail",
+            document_type_key=accepted_document_type_key,
+            field_key=fr.field_key,
+            raw_value=fr.raw_value,
+            normalized_value=fr.normalized_value,
+            found_status=fr.found_status.value,
+            confidence=str(fr.confidence) if fr.confidence is not None else None,
+        )
 
     # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
     # First persist the raw extracted_facts, then normalize them
@@ -491,6 +549,21 @@ async def _execute_steps(
             },
         )
 
+    # ── Steps 11+12: Log normalization + validation summaries ────────────────
+    _norm_errors = [n for n in runner_output.normalized if getattr(n, "error", None)]
+    _val_failed  = [v for v in runner_output.validated if not getattr(v, "passed", True)]
+    log.info(
+        "normalization_summary",
+        fields_normalized=len(runner_output.normalized),
+        normalization_errors=len(_norm_errors),
+    )
+    log.info(
+        "validation_summary",
+        fields_valid=len(runner_output.validated) - len(_val_failed),
+        fields_failed=len(_val_failed),
+        failed_field_keys=[getattr(v, "field_key", "?") for v in _val_failed],
+    )
+
     # ── Steps 14–16: Score + verify ───────────────────────────────────────────
     scored_fields = _build_scored_fields(profile_fields, field_result_map)
 
@@ -513,9 +586,24 @@ async def _execute_steps(
     confidence_score = conf_result.confidence_score
     hvs = conf_result.human_verification_status
 
-    log.info("document_scored",
-             confidence_score=str(confidence_score),
-             human_verification_status=hvs.value)
+    _required_present = sum(1 for sf in scored_fields if sf.expected and sf.found_status == FoundStatus.FOUND)
+    _required_missing = sum(1 for sf in scored_fields if sf.expected and sf.found_status != FoundStatus.FOUND)
+    log.info(
+        "score_calculated",
+        document_type_key=accepted_document_type_key,
+        confidence_score=str(confidence_score),
+        threshold_applied=str(effective_threshold),
+        required_present=_required_present,
+        required_missing=_required_missing,
+    )
+    log.info(
+        "hvs_derived",
+        document_type_key=accepted_document_type_key,
+        confidence_score=str(confidence_score),
+        threshold=str(effective_threshold),
+        human_verification_status=hvs.value,
+        reason="AUTO_CONFIRMED" if hvs.value == "NOT_REQUIRED" else "NEEDS_REVIEW",
+    )
 
     # ── Step 17: Set PROCESSED + CONFIRMED ───────────────────────────────────
     await session.execute(
@@ -578,9 +666,18 @@ async def _execute_steps(
         {"tid": tenant_id, "run_id": processing_run_id, "now": now},
     )
 
-    log.info("processing_run_completed",
-             confidence_score=str(confidence_score),
-             human_verification_status=hvs.value)
+    _total_ms = round((time.monotonic() - job_start) * 1000, 1)
+    indexed_keys = sorted(indexed_fields.keys())
+    log.info(
+        "pipeline_confirmed",
+        document_type_key=accepted_document_type_key,
+        processing_run_id=str(processing_run_id),
+        confirmation_status="CONFIRMED",
+        confidence_score=str(confidence_score),
+        human_verification_status=hvs.value,
+        indexed_field_keys=indexed_keys,
+        total_duration_ms=_total_ms,
+    )
 
     return JobRunResult(
         success=True,

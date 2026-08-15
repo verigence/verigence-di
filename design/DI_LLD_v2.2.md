@@ -22,6 +22,164 @@ Phase 1 uses one vendor-neutral technical token: `X-Correlation-ID`.
 9. EOD retry receives a new correlation ID because it is a new execution chain.
 10. No vendor-specific distributed tracing product is mandatory. Structured logs + metrics + correlation ID are the Phase-1 observability contract.
 
+## 2a. Structured Logging and Centralised Observability (D27)
+
+### Log outputs
+
+Two independent output channels, each independently configurable:
+
+| Channel | Env var | Default | Format |
+|---|---|---|---|
+| stdout | `DI_LOG_STDOUT` | `true` | JSON (production) / pretty (local/dev) |
+| Axiom | `DI_LOG_AXIOM` | `false` | JSON over HTTPS — async, fire-and-forget |
+
+### Log level
+
+`DI_LOG_LEVEL` — one of `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO`.
+Applied once before any output channel — gates both stdout and Axiom.
+
+`DEBUG` must never be enabled in production. It emits full Gemini prompts,
+raw responses, and per-field extraction values which may contain PII.
+
+### Axiom drain contract
+
+- Async background queue — completely out of the HTTP request path.
+- Buffer size: 10,000 entries. On overflow oldest entries are dropped silently.
+- On Axiom unavailability: stdout continues unaffected; drain retries with
+  exponential back-off; no API latency impact under any circumstances.
+- Configured via `DI_AXIOM_TOKEN` + `DI_AXIOM_DATASET` (default: `verigence-di`).
+- If `DI_LOG_AXIOM=true` but `DI_AXIOM_TOKEN` is absent, a WARNING is emitted
+  at startup and the Axiom channel is silently disabled.
+
+### Master correlation key: document_id
+
+A single document spans two separate execution contexts:
+
+```
+Context 1 — Upload (HTTP, synchronous)
+    correlation_id  ← from X-Correlation-ID header or DI-generated UUID
+    tenant_id, subject_id, actor_id, actor_type
+    document_id     ← allocated at upload, carried forward everywhere
+
+Context 2 — Processing (async worker, minutes later, no HTTP)
+    document_id     ← the only link back to the upload context
+    processing_job_id, processing_run_id, attempt_no
+    correlation_id  ← job-execution UUID (new chain per D27)
+```
+
+`document_id` is the master trace key. Every log line — API and worker —
+must carry it from the moment it is allocated. A query on `document_id` in
+Axiom reconstructs the complete lifecycle without joining any other source.
+
+### Context fields bound per execution context
+
+Bound once at context entry via `structlog.bind()` and present on every
+subsequent log line automatically:
+
+**API context (bound in intake / route handler):**
+```
+tenant_id, subject_id, document_id, document_type_key,
+physical_form_type, correlation_id, actor_id, actor_type
+```
+
+**Worker context (bound when job is claimed):**
+```
+tenant_id, document_id, document_type_key, physical_form_type,
+processing_job_id, processing_run_id, attempt_no, correlation_id
+```
+
+### Mandatory log events by component
+
+#### HTTP layer (main.py middleware)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `http_request` | INFO | `method`, `path`, `status`, `duration_ms` |
+| `request_validation_error` | WARNING | `errors` |
+| `unhandled_exception` | ERROR | `exc_type`, `exc_msg`, `traceback` |
+
+#### Document Intake (intake.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `upload_received` | INFO | `filename`, `declared_mime`, `bytes` |
+| `mime_detected` | INFO | `detected_mime`, `match` (vs declared) |
+| `type_resolved` | INFO | `document_type_key`, `physical_form_type`, `requires_processing` |
+| `storage_written` | INFO | `r2_key`, `bytes_written`, `sha256`, `duration_ms` |
+| `quality_rule_result` | DEBUG | `rule_key`, `result`, `measured_value`, `threshold` |
+| `quality_verdict` | INFO | `upload_status`, `rules_run`, `rules_failed`, `failed_rule_keys` |
+| `processing_job_created` | INFO | `processing_job_id`, `job_type` |
+| `upload_rejected` | WARNING | `upload_status`, `reason`, `failed_rule_keys` |
+| `intake_error` | ERROR | `step`, `exc_type`, `exc_msg` |
+
+#### Processing Worker — poll loop (processor.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `job_claimed` | INFO | `job_type`, `attempt_no` |
+| `job_completed` | INFO | `confidence_score`, `confirmation_status`, `hvs`, `total_duration_ms` |
+| `job_retry_pending` | WARNING | `attempt_no`, `error_code`, `error_detail` |
+| `job_failed_backout` | ERROR | `error_class`, `error_code`, `error_detail`, `backout_expires_at` |
+| `job_runner_unexpected_escape` | ERROR | `exc_type`, `exc_msg`, `traceback` |
+
+#### Processing Pipeline — job runner (job_runner.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `classification_candidates` | INFO | `candidate_count`, `candidate_keys` |
+| `classification_result` | INFO | `accepted_type_key`, `acceptance_score`, `profile_id`, `runner_up_key`, `runner_up_score` |
+| `classification_failed` | WARNING | `reason`, `candidate_keys`, `scores` |
+| `extraction_request` | INFO | `gemini_model`, `schema_field_count`, `file_bytes` |
+| `extraction_result` | INFO | `fields_extracted`, `fields_null`, `fields_low_confidence`, `duration_ms` |
+| `extraction_field_detail` | DEBUG | `field_key`, `raw_value`, `confidence_str`, `normalized_value` |
+| `normalization_summary` | INFO | `fields_normalized`, `normalization_errors` |
+| `validation_summary` | INFO | `fields_valid`, `fields_failed`, `failed_field_keys` |
+| `score_calculated` | INFO | `confidence_score`, `threshold_applied`, `required_present`, `required_missing` |
+| `hvs_derived` | INFO | `confidence_score`, `human_verification_status`, `reason` |
+| `pipeline_confirmed` | INFO | `processing_run_id`, `confirmation_status`, `indexed_field_keys` |
+| `pipeline_error` | ERROR | `step_name`, `error_code`, `error_detail`, `retryable` |
+
+#### Gemini Adapter (gemini_adapter.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `gemini_request` | INFO | `gemini_model`, `file_bytes`, `file_mime`, `schema_field_count`, `required_field_count` |
+| `gemini_response` | INFO | `gemini_model`, `http_status`, `duration_ms`, `prompt_tokens`, `response_tokens`, `fields_extracted`, `fields_null`, `fields_low_confidence` |
+| `gemini_field_detail` | DEBUG | `field_key`, `raw_value`, `confidence_str` |
+| `gemini_parse_failure` | WARNING | `attempt`, `parse_error`, `raw_snippet` (first 300 chars) |
+| `gemini_retry` | WARNING | `attempt`, `reason` |
+| `gemini_all_fields_null` | WARNING | `gemini_model`, `duration_ms`, `likely_cause` |
+| `gemini_api_error` | ERROR | `gemini_model`, `http_status`, `response_snippet`, `duration_ms` |
+| `gemini_prompt` | DEBUG | `prompt` — **DEBUG only, never INFO; may contain PII** |
+| `gemini_raw_response` | DEBUG | `raw_response` — **DEBUG only, never INFO** |
+
+#### Auth layer (verifier.py, jwks.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `jwks_refreshed` | INFO | `key_ids`, `key_count`, `duration_ms` |
+| `jwks_unknown_kid_refresh` | WARNING | `kid` |
+| `mock_token_used` | WARNING | `tenant_id`, `actor_id`, `roles`, `env` |
+| `mock_token_rejected` | ERROR | `tenant_id`, `env` |
+| `jwt_verification_failed` | WARNING | `reason` — no token content logged |
+
+#### EOD Scheduler (beat.py)
+| Event | Level | Key fields beyond context |
+|---|---|---|
+| `eod_tick` | INFO | `retry_jobs_created`, `backout_rows_swept`, `stale_running_reset`, `duration_ms` |
+| `eod_retry_job_created` | INFO | `tenant_id`, `document_id`, `original_error_code` |
+| `stale_running_job_reset` | WARNING | `tenant_id`, `document_id`, `processing_job_id`, `locked_minutes` |
+
+#### Axiom drain (logging_config.py)
+| Event | Level | Key fields |
+|---|---|---|
+| `axiom_drain_started` | INFO | `dataset`, `endpoint` |
+| `axiom_ship_failed` | WARNING | `attempt`, `http_status`, `error` |
+| `axiom_buffer_dropped` | WARNING | `dropped_count` |
+| `axiom_drain_error` | ERROR | `exc_msg` |
+
+### What is never logged at INFO or above
+- JWT token strings or credentials
+- Full document bytes or file content
+- Gemini API key or any secret
+- DB connection strings
+- Full Gemini prompt or raw response (DEBUG only)
+- PII field values such as PAN number, phone, name (DEBUG only)
+
 ## 3. JWT / RBAC contract
 
 The normative security contract is `docs/DI_SECURITY_RBAC_v2.2.md` / `security/DI_RBAC_v2.2.yaml`.

@@ -117,6 +117,23 @@ async def intake_document(
 
     Returns the final Document data dict (with upload_status populated).
     """
+    import time as _time
+    _intake_start = _time.monotonic()
+
+    log = logger.bind(
+        tenant_id=tenant_id,
+        subject_id=str(subject_id),
+        actor_id=uploaded_by_actor_id,
+        actor_type=uploaded_by_actor_type,
+        correlation_id=correlation_id,
+        document_type_key=document_type_key or "unknown",
+    )
+    log.info(
+        "upload_received",
+        filename=upload.filename,
+        declared_mime=upload.content_type,
+    )
+
     # ── Step 1: Fetch tenant retention policy ────────────────────────────────
     retention = await get_active_retention_policy(session, tenant_id=tenant_id)
     if retention is None:
@@ -150,6 +167,20 @@ async def intake_document(
             physical_form_type = tdt_row[0]
             requires_processing = tdt_row[1]
             resolved_document_type_id = tdt_row[2]
+            log.info(
+                "type_resolved",
+                document_type_key=document_type_key,
+                physical_form_type=physical_form_type,
+                requires_processing=requires_processing,
+            )
+        else:
+            log.info(
+                "type_resolved",
+                document_type_key=document_type_key,
+                physical_form_type="ADDITIONAL",
+                requires_processing=False,
+                note="unrecognised_type_key",
+            )
 
     # ── Step 3: Fetch subject display_name for path building (D5) ────────────
     subject_row = (
@@ -221,6 +252,13 @@ async def intake_document(
 
     # Detect MIME from bytes
     detected_mime = _detect_mime(raw_bytes, upload.filename or "")
+    log.info(
+        "mime_detected",
+        declared_mime=upload.content_type,
+        detected_mime=detected_mime,
+        match=(detected_mime == upload.content_type),
+        bytes=byte_count,
+    )
 
     # ── Step 6: MIME/integrity check ─────────────────────────────────────────
     if detected_mime not in _DEFAULT_ALLOWED_MIME:
@@ -254,8 +292,22 @@ async def intake_document(
             },
         )
         storage_id = storage_meta.storage_id
+        import time as _time2
+        log.info(
+            "storage_written",
+            document_id=str(document_id),
+            r2_key=logical_key,
+            bytes_written=byte_count,
+            sha256=sha256_hex[:16] + "…",
+        )
     except Exception as exc:
-        logger.error("storage_put_failed", error=str(exc), document_id=str(document_id))
+        log.error(
+            "intake_error",
+            step="storage_write",
+            document_id=str(document_id) if "document_id" in dir() else "unknown",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+        )
         await update_document_upload_complete(
             session,
             tenant_id=tenant_id,
@@ -324,11 +376,17 @@ async def intake_document(
     # ── Step 10: For FIT documents — create processing job if required ────────
     # requires_processing=False (ADDITIONAL) → skip Document AI entirely (D4)
     if validator_result.upload_status == UploadStatus.FIT and requires_processing:
-        await create_initial_job(
+        job = await create_initial_job(
             session,
             tenant_id=tenant_id,
             document_id=document_id,
             correlation_id=correlation_id,
+        )
+        log.info(
+            "processing_job_created",
+            document_id=str(document_id),
+            processing_job_id=str(job),
+            job_type="INITIAL",
         )
 
     await session.commit()
@@ -343,15 +401,31 @@ async def intake_document(
         "upload_issue_detail": validator_result.upload_issue_detail,
     })
 
-    logger.info(
-        "document_intake_complete",
-        document_id=str(document_id),
-        tenant_id=tenant_id,
-        subject_id=str(subject_id),
-        bytes=byte_count,
-        upload_status=validator_result.upload_status.value,
-        quality_results=len(validator_result.quality_results),
-    )
+    import time as _time3
+    _duration_ms = round((_time3.monotonic() - _intake_start) * 1000, 1)
+    failed_rules = [
+        r.rule_key for r in (validator_result.quality_results or [])
+        if not r.passed
+    ] if hasattr(validator_result, "quality_results") else []
+
+    if validator_result.upload_status == UploadStatus.FIT:
+        log.info(
+            "quality_verdict",
+            document_id=str(document_id),
+            upload_status=validator_result.upload_status.value,
+            rules_run=len(validator_result.quality_results or []),
+            rules_failed=len(failed_rules),
+            failed_rule_keys=failed_rules,
+            total_duration_ms=_duration_ms,
+        )
+    else:
+        log.warning(
+            "upload_rejected",
+            document_id=str(document_id),
+            upload_status=validator_result.upload_status.value,
+            failed_rule_keys=failed_rules,
+            total_duration_ms=_duration_ms,
+        )
     return doc
 
 

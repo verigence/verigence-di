@@ -14,6 +14,9 @@ logger = structlog.get_logger(__name__)
 
 
 async def _main() -> None:
+    from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+    configure_logging()
+
     from verigence.di.scheduler.beat import EODRetryScheduler
     from verigence.di.workers.processor import ProcessingWorker
 
