@@ -35,6 +35,7 @@ from verigence.di.repositories.processing_jobs import (
     claim_next_job,
     complete_job,
     fail_job,
+    retry_job,
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.job_runner import run_processing_job
@@ -180,6 +181,7 @@ class ProcessingWorker:
                         error_code=result.error_code,
                         error_detail=result.error_detail,
                         retryable=result.retryable,
+                        attempt_no=job["attempt_no"],
                         job_log=job_log,
                     )
 
@@ -196,6 +198,7 @@ class ProcessingWorker:
                     error_code="WORKER_INTERNAL_ERROR",
                     error_detail=str(exc),
                     retryable=True,
+                    attempt_no=job["attempt_no"],
                     job_log=job_log,
                 )
 
@@ -212,26 +215,44 @@ async def _handle_failure(
     error_code: str | None,
     error_detail: str | None,
     retryable: bool,
+    attempt_no: int,
     job_log,
 ) -> None:
-    """D24 backout path — write FAILED state + insert backout_jobs row.
+    """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path.
 
-    All failures (retryable or non-retryable) follow the same path:
-      1. Mark the processing job FAILED + set document FAILED/NOT_CONFIRMED
-      2. Insert a backout_jobs row with a TTL (default 12 h)
-
-    The RETRY_PENDING document state is no longer used here. The EOD Retry
-    Scheduler path remains intact for any document explicitly left in that
-    state through other mechanisms, but under normal operation all failures
-    go to backout immediately.
+    - retryable=True, attempt_no==1: mark job FAILED + set document RETRY_PENDING
+      (EOD Scheduler will pick this up and create an EOD_RETRY job at attempt_no=2)
+    - retryable=True, attempt_no>=2: D24 backout (EOD retry also failed)
+    - retryable=False (any attempt): D24 backout immediately
     """
     from datetime import UTC, datetime
 
     from sqlalchemy import text
 
+    error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
+
+    if retryable and attempt_no == 1:
+        # Retry budget path: mark job FAILED and document RETRY_PENDING
+        async with session_factory() as session, session.begin():
+            await retry_job(
+                session,
+                tenant_id=tenant_id,
+                processing_job_id=job_id,
+                document_id=document_id,
+                error_code=error_code,
+                error_detail=error_detail,
+            )
+        job_log.info(
+            "job_retry_pending",
+            error_class=error_class,
+            error_code=error_code,
+            error_detail=error_detail,
+        )
+        return
+
+    # D24 backout path — retryable attempt>=2 or non-retryable
     settings = get_settings()
     ttl_hours: int = settings.backout_ttl_hours
-    error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
 
     async with session_factory() as session, session.begin():
         # 1a. Mark job FAILED

@@ -205,7 +205,12 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
     # Build a lookup from schema fields by key
     schema_field_map: dict[str, FieldSpec] = {f.key: f for f in schema.fields}
 
-    lines: list[str] = [
+    lines: list[str] = []
+    if schema.system_prompt:
+        lines.append(schema.system_prompt)
+        lines.append("")
+
+    lines += [
         f"Document type: {schema.display_name}",
         "",
         "Extract the following fields from this document.",

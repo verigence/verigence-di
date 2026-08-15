@@ -7,8 +7,10 @@ Coverage:
 - insert_backout_job() upserts on conflict (same document_id)
 - sweep_expired_backout_jobs() deletes expired rows and returns count
 - sweep_expired_backout_jobs() does not delete non-expired rows
-- _handle_failure() in processor.py calls fail_job + insert_backout_job
-  for BOTH retryable and non-retryable failures
+- _handle_failure() in processor.py:
+  - retryable=True, attempt_no=1  → RETRY_PENDING path (retry_job called, no backout)
+  - retryable=True, attempt_no=2  → D24 backout path (fail_job + insert_backout_job)
+  - retryable=False, any attempt  → D24 backout path immediately
 - settings backout_ttl_hours default is 12
 """
 from __future__ import annotations
@@ -203,9 +205,9 @@ class TestBackoutTtlHoursSetting:
 # ── _handle_failure integration ───────────────────────────────────────────────
 
 class TestHandleFailure:
-    """Verify that _handle_failure always takes the backout path.
+    """Verify that _handle_failure routes to RETRY_PENDING or D24 backout correctly.
 
-    Patches fail_job and insert_backout_job to avoid real DB calls.
+    Patches fail_job, retry_job and insert_backout_job to avoid real DB calls.
     """
 
     def _make_session_factory(self) -> MagicMock:
@@ -229,8 +231,79 @@ class TestHandleFailure:
         factory = MagicMock(return_value=outer_cm)
         return factory
 
+    # ── New retry-path tests (Phase 3 #10) ────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_retryable_attempt1_calls_retry_job_not_backout(self) -> None:
+        """retryable=True, attempt_no=1 → retry_job called; no backout row inserted."""
+        from verigence.di.workers.processor import _handle_failure
+
+        factory = self._make_session_factory()
+        job_log = MagicMock()
+        job_log.info = MagicMock()
+
+        with (
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+            patch("verigence.di.workers.processor.insert_backout_job", new_callable=AsyncMock) as mock_backout,
+        ):
+            await _handle_failure(
+                session_factory=factory,
+                tenant_id="t1",
+                job_id=uuid.uuid4(),
+                document_id=uuid.uuid4(),
+                processing_run_id=uuid.uuid4(),
+                error_code="CLASSIFICATION_PROVIDER_ERROR",
+                error_detail="timeout",
+                retryable=True,
+                attempt_no=1,
+                job_log=job_log,
+            )
+
+        mock_retry.assert_called_once()
+        mock_fail.assert_not_called()
+        mock_backout.assert_not_called()
+        job_log.info.assert_called_once()
+        assert job_log.info.call_args[0][0] == "job_retry_pending"
+
+    @pytest.mark.asyncio
+    async def test_retryable_attempt2_calls_backout_not_retry(self) -> None:
+        """retryable=True, attempt_no=2 → D24 backout; retry_job NOT called."""
+        from verigence.di.workers.processor import _handle_failure
+
+        factory = self._make_session_factory()
+        job_log = MagicMock()
+        job_log.warning = MagicMock()
+
+        with (
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+            patch("verigence.di.workers.processor.insert_backout_job", new_callable=AsyncMock) as mock_backout,
+        ):
+            await _handle_failure(
+                session_factory=factory,
+                tenant_id="t1",
+                job_id=uuid.uuid4(),
+                document_id=uuid.uuid4(),
+                processing_run_id=uuid.uuid4(),
+                error_code="CLASSIFICATION_PROVIDER_ERROR",
+                error_detail="timeout",
+                retryable=True,
+                attempt_no=2,
+                job_log=job_log,
+            )
+
+        mock_retry.assert_not_called()
+        mock_fail.assert_called_once()
+        mock_backout.assert_called_once()
+        call_kwargs = mock_backout.call_args.kwargs
+        assert call_kwargs["error_class"] == "RETRYABLE"
+
+    # ── Existing backout-path tests (updated to pass attempt_no) ──────────────
+
     @pytest.mark.asyncio
     async def test_retryable_failure_calls_backout(self) -> None:
+        """retryable=True, attempt_no=2 → backout with error_class=RETRYABLE."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -250,6 +323,7 @@ class TestHandleFailure:
                 error_code="CLASSIFICATION_PROVIDER_ERROR",
                 error_detail="timeout",
                 retryable=True,
+                attempt_no=2,
                 job_log=job_log,
             )
 
@@ -261,6 +335,7 @@ class TestHandleFailure:
 
     @pytest.mark.asyncio
     async def test_non_retryable_failure_calls_backout(self) -> None:
+        """retryable=False → backout immediately regardless of attempt_no."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -280,6 +355,7 @@ class TestHandleFailure:
                 error_code="CLASSIFICATION_NO_CANDIDATES",
                 error_detail="no profiles",
                 retryable=False,
+                attempt_no=1,
                 job_log=job_log,
             )
 
@@ -290,6 +366,7 @@ class TestHandleFailure:
 
     @pytest.mark.asyncio
     async def test_logs_job_failed_backout(self) -> None:
+        """Backout path logs job_failed_backout via job_log.warning."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -309,6 +386,7 @@ class TestHandleFailure:
                 error_code="EXTRACTION_PROVIDER_ERROR",
                 error_detail="gemini 429",
                 retryable=True,
+                attempt_no=2,
                 job_log=job_log,
             )
 

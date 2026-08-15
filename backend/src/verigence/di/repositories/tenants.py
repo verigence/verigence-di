@@ -146,7 +146,7 @@ async def provision_tenant_document_types(
     (ON CONFLICT DO NOTHING). Tenant inherits all global document types
     with their default physical_form_type (stored in document_types.category).
 
-    ADDITIONAL types always get requires_processing = false (D7).
+    D18 supersedes D7: all new tenant document types get requires_processing = true.
     """
     now = datetime.now(UTC)
     await session.execute(
@@ -159,8 +159,7 @@ async def provision_tenant_document_types(
                 :tenant_id,
                 dt.document_type_id,
                 COALESCE(dt.category, 'ADDITIONAL'),
-                CASE WHEN COALESCE(dt.category, 'ADDITIONAL') = 'ADDITIONAL'
-                     THEN false ELSE true END,
+                true,
                 true,
                 100,
                 :now,

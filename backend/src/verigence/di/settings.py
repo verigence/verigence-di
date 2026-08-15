@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24)
     backout_ttl_hours: int = 12
 
+    # Worker lease timeout — RUNNING jobs older than this are reclaimed by the stale job reaper
+    worker_lease_timeout_minutes: int = 10
+
     # Verification threshold — system-wide default; per-tenant value in DB overrides this
     verification_threshold: float = 90.00
 

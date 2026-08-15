@@ -540,12 +540,21 @@ async def _execute_steps(
     )
 
     # ── Step 17b: Upsert document_search_index (D14) ─────────────────────────
+    # Build a map from field_key → normalized value, preferring norm_map (rules
+    # runner output) over the raw provider normalized_value.
+    field_key_to_norm_value: dict[str, object] = {}
+    for fkey, fact_id in fact_id_map.items():
+        norm = norm_map.get(fact_id)
+        if norm is not None:
+            field_key_to_norm_value[fkey] = norm.normalized_value
+        elif fkey in field_result_map:
+            # fallback to raw normalized_value if rules runner didn't process this field
+            field_key_to_norm_value[fkey] = field_result_map[fkey].normalized_value
+        else:
+            field_key_to_norm_value[fkey] = None
+
     indexed_fields: dict[str, object] = {
-        pf["canonical_field_key"]: (
-            field_result_map[pf["canonical_field_key"]].normalized_value
-            if pf["canonical_field_key"] in field_result_map
-            else None
-        )
+        pf["canonical_field_key"]: field_key_to_norm_value.get(pf["canonical_field_key"])
         for pf in profile_fields
     }
     await upsert_search_index(

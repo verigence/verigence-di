@@ -25,7 +25,7 @@ Lifecycle:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
@@ -80,11 +80,21 @@ class EODRetryScheduler:
 
 async def _run_eod_check(session_factory: async_sessionmaker) -> None:
     """Periodic check (every 60 s):
+    0. Reclaim stale RUNNING jobs (lease timeout exceeded).
     1. Sweep expired backout_jobs rows (D24) — runs on every tick.
     2. For every enabled Tenant, insert EOD_RETRY jobs if EOD just passed.
     """
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
+
+    # ── 0. Stale RUNNING job reaper ──────────────────────────────────────
+    try:
+        async with session_factory() as session, session.begin():
+            reclaimed = await _reclaim_stale_jobs(session, now_utc)
+        if reclaimed:
+            log.info("stale_jobs_reclaimed", count=reclaimed)
+    except Exception as exc:
+        log.warning("stale_job_reaper_failed", error=str(exc))
 
     # ── 1. Backout sweep — runs on every tick regardless of EOD window ────────
     try:
@@ -232,6 +242,28 @@ async def _insert_eod_retry_jobs(
                            error=str(exc))
 
     return count
+
+
+async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
+    """Reset RUNNING jobs whose lease has expired back to PENDING.
+
+    Uses worker_lease_timeout_minutes from settings (default 10).
+    Returns the number of rows updated.
+    """
+    from verigence.di.settings import get_settings
+    lease_minutes = getattr(get_settings(), "worker_lease_timeout_minutes", 10)
+    result = await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'PENDING',
+                locked_by = NULL,
+                locked_at_utc = NULL
+            WHERE job_status = 'RUNNING'
+              AND locked_at_utc < :cutoff
+        """),
+        {"cutoff": now_utc - timedelta(minutes=lease_minutes)},
+    )
+    return result.rowcount
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
