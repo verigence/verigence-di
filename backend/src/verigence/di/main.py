@@ -32,6 +32,68 @@ def _is_valid_correlation_id(value: str) -> bool:
     return 1 <= len(value) <= 128 and all(c in _CORRELATION_SAFE for c in value)
 
 
+async def _validate_schema_profile_consistency() -> None:
+    """D25 — startup check: warn if published extraction profile fields diverge from SCHEMA_REGISTRY.
+
+    Runs once at startup after the worker starts. Never blocks startup.
+    DB unavailability → warning only.
+    """
+    try:
+        from sqlalchemy import text  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: PLC0415
+
+        from verigence.di.document_ai.schemas import SCHEMA_REGISTRY  # noqa: PLC0415
+        from verigence.di.repositories.database import get_engine  # noqa: PLC0415
+
+        engine = get_engine()
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async with factory() as session:
+            for dtkey, schema in SCHEMA_REGISTRY.items():
+                schema_keys = {f.key for f in schema.fields}
+
+                rows = (
+                    await session.execute(
+                        text("""
+                            SELECT cf.field_key
+                            FROM docintel.extraction_profile_fields epf
+                            JOIN docintel.extraction_profiles ep
+                              ON ep.profile_id = epf.profile_id
+                            JOIN docintel.document_types dt
+                              ON dt.document_type_id = ep.document_type_id
+                            JOIN docintel.canonical_fields cf
+                              ON cf.canonical_field_id = epf.canonical_field_id
+                            WHERE dt.document_type_key = :dtkey
+                              AND ep.status = 'PUBLISHED'
+                              AND epf.enabled = true
+                        """),
+                        {"dtkey": dtkey},
+                    )
+                ).mappings().all()
+
+                if not rows:
+                    # No published profile for this schema key — not an error
+                    continue
+
+                profile_keys = {r["field_key"] for r in rows}
+                schema_only = sorted(schema_keys - profile_keys)
+                profile_only = sorted(profile_keys - schema_keys)
+
+                if schema_only or profile_only:
+                    logger.warning(
+                        "schema_profile_mismatch",
+                        document_type_key=dtkey,
+                        schema_only=schema_only,
+                        profile_only=profile_only,
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "schema_profile_consistency_check_failed",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc),
+        )
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -45,6 +107,7 @@ def create_app() -> FastAPI:
         if settings.worker_enabled:
             worker.start()
             scheduler.start()
+        await _validate_schema_profile_consistency()
         yield
         if settings.worker_enabled:
             await worker.stop()

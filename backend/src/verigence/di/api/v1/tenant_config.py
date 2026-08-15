@@ -17,9 +17,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -27,6 +29,7 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Tenant Configuration"])
+logger = structlog.get_logger(__name__)
 
 
 # ── Tenant Settings ───────────────────────────────────────────────────────────
@@ -53,7 +56,7 @@ async def get_tenant_settings(
         ).mappings().one_or_none()
     if row is None:
         raise problem(404, "Tenant not found", ErrorCode.TENANT_NOT_FOUND)
-    return _fmt_settings(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_settings(row)).model_dump()
 
 
 @router.put("/tenants/{tenant_id}/settings")
@@ -83,7 +86,7 @@ async def put_tenant_settings(
                         subject_matching_min_confidence = COALESCE(:smc, subject_matching_min_confidence),
                         upload_timeout_minutes = COALESCE(:utm, upload_timeout_minutes),
                         max_upload_bytes = COALESCE(:mub, max_upload_bytes),
-                        allowed_mime_types = COALESCE(:amt::jsonb, allowed_mime_types),
+                        allowed_mime_types = COALESCE(CAST(:amt AS jsonb), allowed_mime_types),
                         whatsapp_subject_reference_prefix = COALESCE(:wsp, whatsapp_subject_reference_prefix),
                         verification_threshold = COALESCE(:vt, verification_threshold),
                         updated_at_utc = :now
@@ -118,7 +121,7 @@ async def put_tenant_settings(
                          status, created_at_utc, updated_at_utc)
                     VALUES
                         (:tid, :sk, :tz, :eod, :eod_en, :cas, :smc,
-                         :utm, :mub, :amt::jsonb,
+                         :utm, :mub, CAST(:amt AS jsonb),
                          '[]'::jsonb, :wsp,
                          'ACTIVE', :now, :now)
                 """),
@@ -153,7 +156,13 @@ async def put_tenant_settings(
                 {"tid": tenant_id},
             )
         ).mappings().one()
-    return _fmt_settings(row)
+
+    logger.info(
+        "tenant_settings_updated",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_settings(row)).model_dump()
 
 
 # ── Retention Policies ────────────────────────────────────────────────────────
@@ -162,7 +171,7 @@ async def put_tenant_settings(
 async def list_retention_policies(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -176,7 +185,11 @@ async def list_retention_policies(
                 {"tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_retention_policy(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_retention_policy(r) for r in rows],
+    ).model_dump()
 
 
 @router.post("/tenants/{tenant_id}/retention-policies", status_code=201)
@@ -215,7 +228,14 @@ async def create_retention_policy(
                 {"pid": policy_id},
             )
         ).mappings().one()
-    return _fmt_retention_policy(row)
+
+    logger.info(
+        "retention_policy_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        retention_policy_id=str(policy_id),
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_retention_policy(row)).model_dump()
 
 
 @router.put("/tenants/{tenant_id}/retention-policies/{retention_policy_id}")
@@ -269,7 +289,14 @@ async def update_retention_policy(
                 {"pid": retention_policy_id},
             )
         ).mappings().one()
-    return _fmt_retention_policy(row)
+
+    logger.info(
+        "retention_policy_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        retention_policy_id=str(retention_policy_id),
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_retention_policy(row)).model_dump()
 
 
 # ── Quality Policy ────────────────────────────────────────────────────────────
@@ -291,7 +318,11 @@ async def get_quality_policy(
         ).one_or_none()
     if row is None:
         raise problem(404, "Tenant not found", ErrorCode.TENANT_NOT_FOUND)
-    return {"tenantId": tenant_id, "qualityPolicy": row[0] or []}
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data={"tenantId": tenant_id, "qualityPolicy": row[0] or []},
+    ).model_dump()
 
 
 @router.put("/tenants/{tenant_id}/quality-policy")
@@ -307,20 +338,30 @@ async def put_quality_policy(
         await session.execute(
             text("""
                 UPDATE docintel.tenant_settings
-                SET quality_policy = :qp::jsonb, updated_at_utc = :now
+                SET quality_policy = CAST(:qp AS jsonb), updated_at_utc = :now
                 WHERE tenant_id = :tid
             """),
             {"tid": tenant_id, "qp": json.dumps(rules), "now": now},
         )
         await session.commit()
-    return {"tenantId": tenant_id, "qualityPolicy": rules}
+
+    logger.info(
+        "quality_policy_updated",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+    )
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data={"tenantId": tenant_id, "qualityPolicy": rules},
+    ).model_dump()
 
 
 @router.get("/tenants/{tenant_id}/quality-rules")
 async def list_quality_rules(
     tenant_id: str,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_READ)),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List all active quality rules from the platform catalog."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -334,7 +375,7 @@ async def list_quality_rules(
                 """),
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "ruleKey": r["rule_key"],
             "description": r["description"],
@@ -344,6 +385,7 @@ async def list_quality_rules(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

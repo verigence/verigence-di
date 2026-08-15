@@ -20,15 +20,18 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_system_actor
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.errors import ErrorCode, problem
 
 router = APIRouter(tags=["WhatsApp"])
+logger = structlog.get_logger(__name__)
 
 
 # ── POST /v1/system/whatsapp/routes ──────────────────────────────────────────
@@ -84,13 +87,21 @@ async def put_whatsapp_route(
             },
         )
 
-    return {
+    logger.info(
+        "whatsapp_sender_mapped",
+        actor_id=actor.actor_id,
+        destination_id=destination_id,
+        tenant_id=tenant_id,
+    )
+
+    payload = {
         "routeId": str(route_id),
         "destinationId": destination_id,
         "tenantId": tenant_id,
         "systemActorId": system_actor_id or None,
         "status": "ACTIVE",
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/integrations/whatsapp/webhook ────────────────────────────────────
@@ -150,7 +161,7 @@ async def get_whatsapp_quarantine(
             )
         ).scalar()
 
-    return {
+    payload = {
         "items": [
             {
                 "quarantineId": str(r["quarantine_id"]),
@@ -165,6 +176,7 @@ async def get_whatsapp_quarantine(
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/system/whatsapp/quarantine/{quarantineId}/replay ─────────────────
@@ -265,4 +277,5 @@ async def discard_whatsapp_quarantine(
             {"qid": quarantine_id, "now": now},
         )
 
-    return {"quarantineId": str(quarantine_id), "status": "DISCARDED"}
+    payload = {"quarantineId": str(quarantine_id), "status": "DISCARDED"}
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()

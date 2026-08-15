@@ -10,15 +10,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Operations"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/document-exceptions ───────────────────────────
@@ -92,7 +95,7 @@ async def get_tenant_document_exceptions(
             )
         ).scalar()
 
-    return {
+    payload = {
         "items": [
             {
                 "documentId": str(r["document_id"]),
@@ -110,6 +113,7 @@ async def get_tenant_document_exceptions(
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/upload-quality ─────────────────────────────────
@@ -121,7 +125,7 @@ async def get_upload_quality(
     from_: str | None = None,
     to: str | None = None,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.OPERATIONS_READ)),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Upload-quality metrics grouped by uploader."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -151,7 +155,7 @@ async def get_upload_quality(
             )
         ).mappings().all()
 
-    return [
+    items = [
         {
             "uploadedByActorId": r["uploaded_by_actor_id"],
             "total": r["total"],
@@ -163,3 +167,4 @@ async def get_upload_quality(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()

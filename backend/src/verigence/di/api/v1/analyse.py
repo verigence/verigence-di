@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.application.reconciliation import run_reconciliation
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
@@ -22,6 +24,7 @@ from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Analysis"])
+logger = structlog.get_logger(__name__)
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -133,7 +136,15 @@ async def analyse_documents(
         subject_display_name=subject_display_name,
     )
 
-    return {
+    logger.info(
+        "documents_analysed",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_count=len(body.document_ids),
+        summary=result.summary,
+    )
+
+    payload = {
         "analysedDocuments": result.analysed_documents,
         "findings": [
             {
@@ -145,3 +156,4 @@ async def analyse_documents(
         ],
         "summary": result.summary,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()

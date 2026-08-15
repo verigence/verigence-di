@@ -12,9 +12,11 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, Query, status
 
 from verigence.di.api.v1.schemas import (
+    ApiResponse,
     CreateSubjectRequest,
     SubjectListData,
     SubjectResponse,
@@ -31,11 +33,12 @@ from verigence.di.repositories.subjects import (
 )
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Subjects"])
+logger = structlog.get_logger(__name__)
 
 
 @router.post(
     "/subjects",
-    response_model=SubjectResponse,
+    response_model=ApiResponse[SubjectResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Create a Verigence Subject",
     operation_id="createSubject",
@@ -44,7 +47,7 @@ async def create_subject_endpoint(
     tenantId: str,
     body: CreateSubjectRequest,
     actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.SUBJECT_CREATE))],
-) -> SubjectResponse:
+) -> ApiResponse[SubjectResponse]:
     async with tenant_session(actor.tenant_id) as session:
         subject = await create_subject(
             session,
@@ -54,20 +57,31 @@ async def create_subject_endpoint(
             created_by_actor_id=actor.actor_id,
         )
 
-    return SubjectResponse(
-        tenantId=subject["tenant_id"],
-        subjectId=subject["subject_id"],
-        subjectType=subject["subject_type"],
-        displayName=subject["display_name"],
-        status=subject["status"],
-        createdAtUtc=subject["created_at_utc"],
-        updatedAtUtc=subject["updated_at_utc"],
+    logger.info(
+        "subject_created",
+        tenant_id=actor.tenant_id,
+        actor_id=actor.actor_id,
+        subject_id=str(subject["subject_id"]),
+    )
+
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=SubjectResponse(
+            tenantId=subject["tenant_id"],
+            subjectId=subject["subject_id"],
+            subjectType=subject["subject_type"],
+            displayName=subject["display_name"],
+            status=subject["status"],
+            createdAtUtc=subject["created_at_utc"],
+            updatedAtUtc=subject["updated_at_utc"],
+        ),
     )
 
 
 @router.get(
     "/subjects",
-    response_model=SubjectListData,
+    response_model=ApiResponse[SubjectListData],
     summary="List/search Verigence Subjects within a Tenant",
     operation_id="listSubjects",
 )
@@ -78,7 +92,7 @@ async def list_subjects_endpoint(
     query: Annotated[str | None, Query(max_length=240)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query(max_length=500)] = None,
-) -> SubjectListData:
+) -> ApiResponse[SubjectListData]:
     async with tenant_session(actor.tenant_id) as session:
         subjects = await list_subjects(
             session,
@@ -93,26 +107,30 @@ async def list_subjects_endpoint(
     page = subjects[:limit]
     next_cursor = str(page[-1]["subject_id"]) if has_next and page else None
 
-    return SubjectListData(
-        items=[
-            SubjectResponse(
-                tenantId=s["tenant_id"],
-                subjectId=s["subject_id"],
-                subjectType=s["subject_type"],
-                displayName=s["display_name"],
-                status=s["status"],
-                createdAtUtc=s["created_at_utc"],
-                updatedAtUtc=s["updated_at_utc"],
-            )
-            for s in page
-        ],
-        nextCursor=next_cursor,
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=SubjectListData(
+            items=[
+                SubjectResponse(
+                    tenantId=s["tenant_id"],
+                    subjectId=s["subject_id"],
+                    subjectType=s["subject_type"],
+                    displayName=s["display_name"],
+                    status=s["status"],
+                    createdAtUtc=s["created_at_utc"],
+                    updatedAtUtc=s["updated_at_utc"],
+                )
+                for s in page
+            ],
+            nextCursor=next_cursor,
+        ),
     )
 
 
 @router.get(
     "/subjects/{subjectId}",
-    response_model=SubjectResponse,
+    response_model=ApiResponse[SubjectResponse],
     summary="Get one Verigence Subject",
     operation_id="getSubject",
 )
@@ -120,7 +138,7 @@ async def get_subject_endpoint(
     tenantId: str,
     subjectId: uuid.UUID,
     actor: Annotated[ActorPrincipal, Depends(require_tenant_permission(Permission.SUBJECT_READ))],
-) -> SubjectResponse:
+) -> ApiResponse[SubjectResponse]:
     async with tenant_session(actor.tenant_id) as session:
         subject = await get_subject(
             session, tenant_id=actor.tenant_id, subject_id=subjectId
@@ -131,12 +149,16 @@ async def get_subject_endpoint(
 
         raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
 
-    return SubjectResponse(
-        tenantId=subject["tenant_id"],
-        subjectId=subject["subject_id"],
-        subjectType=subject["subject_type"],
-        displayName=subject["display_name"],
-        status=subject["status"],
-        createdAtUtc=subject["created_at_utc"],
-        updatedAtUtc=subject["updated_at_utc"],
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=SubjectResponse(
+            tenantId=subject["tenant_id"],
+            subjectId=subject["subject_id"],
+            subjectType=subject["subject_type"],
+            displayName=subject["display_name"],
+            status=subject["status"],
+            createdAtUtc=subject["created_at_utc"],
+            updatedAtUtc=subject["updated_at_utc"],
+        ),
     )

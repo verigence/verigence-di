@@ -22,9 +22,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -32,6 +34,7 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Extraction Configuration"])
+logger = structlog.get_logger(__name__)
 
 
 # ── Document Types ────────────────────────────────────────────────────────────
@@ -42,7 +45,7 @@ async def list_document_types(
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List effective global + tenant Document Types."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -61,7 +64,11 @@ async def list_document_types(
                 {"tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_doc_type(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_doc_type(r) for r in rows],
+    ).model_dump()
 
 
 @router.post("/tenants/{tenant_id}/document-types", status_code=201)
@@ -119,7 +126,14 @@ async def create_document_type(
                 {"dt_id": dt_id},
             )
         ).mappings().one()
-    return _fmt_doc_type(row)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_type_key=key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(row)).model_dump()
 
 
 @router.get("/tenants/{tenant_id}/document-types/{document_type_key}")
@@ -149,7 +163,7 @@ async def get_document_type(
         ).mappings().one_or_none()
     if row is None:
         raise problem(404, "Document Type not found", ErrorCode.DOCUMENT_TYPE_NOT_FOUND)
-    return _fmt_doc_type(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(row)).model_dump()
 
 
 @router.put("/tenants/{tenant_id}/document-types/{document_type_key}")
@@ -204,7 +218,14 @@ async def update_document_type(
                 {"dt_id": row[0]},
             )
         ).mappings().one()
-    return _fmt_doc_type(updated)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(updated)).model_dump()
 
 
 # ── Extraction Profiles ───────────────────────────────────────────────────────
@@ -218,7 +239,7 @@ async def list_extraction_profiles(
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -236,7 +257,11 @@ async def list_extraction_profiles(
                 {"key": document_type_key, "tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_extraction_profile(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_extraction_profile(r) for r in rows],
+    ).model_dump()
 
 
 @router.post(
@@ -314,7 +339,15 @@ async def create_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(row)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(row)).model_dump()
 
 
 @router.get(
@@ -348,7 +381,7 @@ async def get_extraction_profile(
     if row is None:
         raise problem(404, "Extraction Profile not found",
                       ErrorCode.EXTRACTION_PROFILE_NOT_FOUND)
-    return _fmt_extraction_profile(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(row)).model_dump()
 
 
 @router.put(
@@ -405,7 +438,15 @@ async def update_draft_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(updated)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(updated)).model_dump()
 
 
 @router.post(
@@ -487,7 +528,15 @@ async def publish_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(updated)
+
+    logger.info(
+        "extraction_profile_published",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(updated)).model_dump()
 
 
 # ── Rule Catalogs ─────────────────────────────────────────────────────────────
@@ -498,7 +547,7 @@ async def list_normalization_rules(
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -511,7 +560,7 @@ async def list_normalization_rules(
                 """),
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "ruleKey": r["rule_key"],
             "description": r["description"],
@@ -521,6 +570,7 @@ async def list_normalization_rules(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
 @router.get("/tenants/{tenant_id}/validation-rules")
@@ -529,7 +579,7 @@ async def list_validation_rules(
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -542,7 +592,7 @@ async def list_validation_rules(
                 """),
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "ruleKey": r["rule_key"],
             "description": r["description"],
@@ -553,6 +603,7 @@ async def list_validation_rules(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

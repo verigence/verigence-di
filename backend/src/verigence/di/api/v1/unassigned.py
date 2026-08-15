@@ -20,9 +20,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -31,6 +33,7 @@ from verigence.di.repositories.database import tenant_session
 from verigence.di.storage.adapter import get_storage_adapter
 
 router = APIRouter(prefix="/v1", tags=["WhatsApp"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents ───────────────────────────
@@ -69,12 +72,13 @@ async def get_unassigned_documents(
                 {"tid": tenant_id},
             )
         ).scalar()
-    return {
+    payload = {
         "items": [_fmt_doc(r) for r in rows],
         "page": page,
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId} ──────────────
@@ -91,7 +95,7 @@ async def get_unassigned_document(
         row = await _fetch_unassigned_doc(session, tenant_id, document_id)
     if not row:
         raise problem(404, "Unassigned document not found", ErrorCode.DOCUMENT_NOT_FOUND)
-    return _fmt_doc(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc(row)).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/content ──────
@@ -163,10 +167,11 @@ async def get_unassigned_document_fields(
                           ErrorCode.INVALID_DOCUMENT_STATE)
 
         fields = await _fetch_field_values(session, tenant_id, document_id)
-    return {
+    payload = {
         "documentId": str(document_id),
         "fields": fields,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/quality ──────
@@ -195,7 +200,7 @@ async def get_unassigned_document_quality(
                 {"tid": tenant_id, "doc_id": document_id},
             )
         ).mappings().all()
-    return {
+    payload = {
         "documentId": str(document_id),
         "qualityResults": [
             {
@@ -209,6 +214,7 @@ async def get_unassigned_document_quality(
             for r in rows
         ],
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── PUT /v1/tenants/{tenantId}/unassigned-documents/{documentId}/subject ──────
@@ -269,7 +275,15 @@ async def assign_document_subject(
                 {"tid": tenant_id, "doc_id": document_id},
             )
         ).mappings().one()
-    return _fmt_doc(updated)
+
+    logger.info(
+        "subject_identifier_added",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_id=str(document_id),
+        subject_id=str(subject_id),
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc(updated)).model_dump()
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
