@@ -1958,3 +1958,101 @@ Gate: /docs useful without reading source. Baseline declared v2.4. D26 locked.
 
 ---
 
+
+## Session record — 2026-08-19 (Booking Form schema v1.1 + Generic E2E tool)
+
+### booking_form schema v1.1 ✅
+
+Five fields promoted to `required=True` in the Python schema and in the DB
+extraction profile (retired v1, published v2):
+
+| Field | Was | Now |
+|---|---|---|
+| `vehicle_model` | required | required (unchanged) |
+| `vehicle_variant` | optional | **required** |
+| `vehicle_color` | optional | **required** |
+| `booking_reference_number` | optional | **required** |
+| `customer_phone` | optional | **required** |
+
+- `schema_version` bumped `1.0` → `1.1` in `booking_form.py`
+- DB: old profile `3ce92c33` RETIRED → new profile `eb518cb7` PUBLISHED (version 2, 9 fields)
+- Commit: `5cd2e21`
+
+### Rule 9 — Extraction profile fields are immutable once PUBLISHED ✅ added
+
+> To add or change fields on a published extraction profile:
+> 1. `UPDATE extraction_profiles SET status = 'RETIRED'` on the old profile
+> 2. `INSERT` a new DRAFT profile (bump `version_no`)
+> 3. Add all fields (old + new) to the DRAFT via `extraction_profile_fields`
+> 4. `UPDATE` the DRAFT to `PUBLISHED`
+>
+> The DB trigger `extraction_profile_fields_guard` blocks INSERT/UPDATE/DELETE
+> on fields belonging to any PUBLISHED or RETIRED profile. There is no in-place
+> edit path.
+
+### Generic E2E test tool ✅
+
+New script `backend/scripts/e2e.py` — CLI-driven, works with any file and any
+document type. No code changes needed to test new document types.
+
+```bash
+# Minimal — doc type derived from filename
+uv run python scripts/e2e.py scripts/booking_form_test.pdf
+
+# Explicit doc type
+uv run python scripts/e2e.py scripts/booking-form2.pdf --doc-type booking_form
+
+# Assert specific fields
+uv run python scripts/e2e.py scripts/booking_form_test.pdf \
+    --expect customer_name="Abhishek Khuntia" --expect vehicle_model=Creta
+
+# Keep subject in DB for inspection
+uv run python scripts/e2e.py scripts/booking_form_test.pdf --no-cleanup
+
+# Different tenant / API
+uv run python scripts/e2e.py doc.pdf --tenant ACME --api http://localhost:8000
+```
+
+Supports: PDF, JPEG, PNG, TIFF, WEBP, DOCX, XLSX. MIME auto-detected from
+extension. Doc type derived from filename stem when `--doc-type` is omitted.
+
+### E2E results (booking_form_test.pdf — schema v1.1)
+
+| Field | Value | Conf |
+|---|---|---|
+| customer_name | Abhishek Khuntia | 92 |
+| dealer_name | PREMIER HYUNDAI | 92 |
+| booking_date | 2026-07-20 | 92 |
+| total_price | 1,549,217 | 70 |
+| vehicle_model | Creta | 92 |
+| vehicle_variant | S(O) MT | 92 |
+| vehicle_color | Black | 92 |
+| customer_phone | +917008807600 | 92 |
+| booking_reference_number | null | — |
+| **score** | **79.33** | (ref no. absent on form) |
+
+### E2E results (booking-form2.pdf — schema v1.1)
+
+| Field | Value | Conf |
+|---|---|---|
+| customer_name | DIBYENDU KUNDU | 92 |
+| dealer_name | Auto Carriage Pvt. Ltd. | 92 |
+| booking_date | 2026-03-02 | 92 |
+| total_price | 17,95,900 | 92 |
+| vehicle_model | SCORPIO N | 92 |
+| vehicle_variant | Z8S MT PETROL | 92 |
+| vehicle_color | S. BLACK | 92 |
+| customer_phone | +918274808085 | 92 |
+| booking_reference_number | OTF26G022408 | 92 |
+| **score** | **92.00** | (all fields present) |
+
+### Current infrastructure state
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — commit `5cd2e21` deploying |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ All migrations at head — booking_form profile v2 published |
+| Cloudflare R2 | ✅ Working |
+| CI pipeline | ✅ Green |
+
