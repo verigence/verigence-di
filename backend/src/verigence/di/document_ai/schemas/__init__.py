@@ -20,6 +20,7 @@ from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
+from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
 
@@ -55,6 +56,7 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "upi_screenshot":         UPI_SCREENSHOT_SCHEMA,
     # ── Existing global types with Gemini schemas ────────────────────────────
     "insurance_cover":        INSURANCE_COVER_SCHEMA,
+    "pan_card":               PAN_CARD_SCHEMA,
 }
 
 
