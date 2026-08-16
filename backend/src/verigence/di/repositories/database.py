@@ -45,10 +45,11 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set transaction-local tenant_id for PostgreSQL RLS.
 
     Must be called at the start of every tenant-scoped transaction.
-    Uses SET LOCAL so the value is cleared automatically at transaction end.
+    ``set_config(..., true)`` is the parameter-safe equivalent of ``SET LOCAL``;
+    the third argument keeps the value scoped to the current transaction.
     """
     await session.execute(
-        text("SET LOCAL app.tenant_id = :tid"),
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
         {"tid": tenant_id},
     )
 
