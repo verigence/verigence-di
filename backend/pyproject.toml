@@ -20,6 +20,7 @@ dependencies = [
     # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
+    "psycopg2-binary>=2.9.9",
     "alembic>=1.13.0",
 
     # Object storage (S3-compatible: R2 + MinIO)
