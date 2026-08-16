@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from contextlib import suppress
 
 from verigence.di.scheduler.beat import get_eod_scheduler
 from verigence.di.workers.processor import get_worker
@@ -19,10 +20,8 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with suppress(NotImplementedError):  # pragma: no cover - Windows fallback
             loop.add_signal_handler(sig, stopped.set)
-        except NotImplementedError:  # pragma: no cover - Windows fallback
-            pass
 
     worker = get_worker()
     scheduler = get_eod_scheduler()
