@@ -12,8 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml .
-RUN uv pip install --system .
-
 COPY src/ ./src/
+RUN uv pip install --system .
 
 CMD ["python", "-m", "verigence.di.workers"]
