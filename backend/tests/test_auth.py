@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.no_docker
-
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.auth.verifier import verify_token
 from verigence.di.domain.enums import ActorType
+
+pytestmark = pytest.mark.no_docker
 
 
 # ── verify_token mock-mode tests ─────────────────────────────────────────────
