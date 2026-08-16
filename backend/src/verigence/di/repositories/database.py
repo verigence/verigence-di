@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -19,7 +20,7 @@ from verigence.di.settings import get_settings
 
 
 # ── Engine (module singleton) ─────────────────────────────────────────────────
-def _make_engine():  # type: ignore[no-untyped-def]
+def _make_engine() -> AsyncEngine:
     settings = get_settings()
     return create_async_engine(
         settings.database_url,
@@ -54,7 +55,7 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     )
 
 
-def get_engine():  # type: ignore[no-untyped-def]
+def get_engine() -> AsyncEngine:
     """Return the module-level engine (for non-FastAPI use in workers/schedulers)."""
     return _engine
 
