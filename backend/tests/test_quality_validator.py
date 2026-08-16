@@ -17,10 +17,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytestmark = pytest.mark.no_docker
-
 from verigence.di.domain.enums import UploadStatus
 from verigence.di.quality.validator import validate_upload
+
+pytestmark = pytest.mark.no_docker
 
 
 # ── DB mock helpers ───────────────────────────────────────────────────────────
@@ -75,8 +75,6 @@ def _pdf_bytes() -> bytes:
     )
 
 
-# ── Zero-byte file ────────────────────────────────────────────────────────────
-
 @pytest.mark.asyncio
 async def test_zero_byte_file_returns_corrupt() -> None:
     session = AsyncMock()
@@ -92,8 +90,6 @@ async def test_zero_byte_file_returns_corrupt() -> None:
     assert result.upload_issue_code == "FILE_EMPTY"
     session.execute.assert_not_called()
 
-
-# ── Missing / empty quality policy ────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_missing_quality_policy_returns_corrupt() -> None:
@@ -126,8 +122,6 @@ async def test_empty_policy_returns_corrupt() -> None:
     assert result.quality_results == []
 
 
-# ── Rule with PASS → FIT ──────────────────────────────────────────────────────
-
 @pytest.mark.asyncio
 async def test_passing_rule_returns_fit() -> None:
     policy = [
@@ -150,8 +144,6 @@ async def test_passing_rule_returns_fit() -> None:
     assert len(result.quality_results) == 1
     assert result.quality_results[0].outcome == "PASS"
 
-
-# ── Rule with FAIL → NOT_FIT ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_failing_rule_returns_not_fit() -> None:
@@ -177,8 +169,6 @@ async def test_failing_rule_returns_not_fit() -> None:
     assert result.quality_results[0].outcome == "FAIL"
 
 
-# ── Disabled rule is skipped ──────────────────────────────────────────────────
-
 @pytest.mark.asyncio
 async def test_disabled_rule_is_skipped() -> None:
     policy = [
@@ -201,8 +191,6 @@ async def test_disabled_rule_is_skipped() -> None:
     assert result.quality_results == []
 
 
-# ── Rule_key missing from catalog → ERROR outcome, but overall FIT ───────────
-
 @pytest.mark.asyncio
 async def test_rule_key_not_in_catalog_produces_error_outcome() -> None:
     policy = [
@@ -223,8 +211,6 @@ async def test_rule_key_not_in_catalog_produces_error_outcome() -> None:
     assert len(result.quality_results) == 1
     assert result.quality_results[0].outcome == "ERROR"
 
-
-# ── Multiple rules: one FAIL makes overall NOT_FIT ────────────────────────────
 
 @pytest.mark.asyncio
 async def test_multiple_rules_one_fail_is_not_fit() -> None:
