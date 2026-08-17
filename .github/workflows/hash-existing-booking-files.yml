@@ -1,0 +1,27 @@
+name: Hash existing Booking Form files
+
+on:
+  push:
+    branches:
+      - test/dummytenant-booking-e2e
+    paths:
+      - .github/workflows/hash-existing-booking-files.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hash:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Hash existing PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in backend/booking-form2.pdf backend/scripts/booking-form2.pdf backend/scripts/booking_form_test.pdf; do
+            if [[ -f "$f" ]]; then
+              sha256sum "$f"
+            fi
+          done
