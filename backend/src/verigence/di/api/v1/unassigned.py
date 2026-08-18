@@ -162,7 +162,7 @@ async def get_unassigned_document_content(
 
     storage = get_storage_adapter()
     chunks = []
-    async for chunk in await storage.get_stream(art_row[0]):
+    async for chunk in storage.get_stream(art_row[0]):
         chunks.append(chunk)
     data = b"".join(chunks)
 
@@ -366,7 +366,7 @@ async def _fetch_unassigned_doc(session: Any, tenant_id: str, document_id: uuid.
 
 async def _fetch_field_values(
     session: Any, tenant_id: str, document_id: uuid.UUID
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     rows = (
         await session.execute(
             text("""
