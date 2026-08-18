@@ -12,9 +12,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -22,6 +24,7 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Subject Matching"])
+logger = structlog.get_logger(__name__)
 
 
 # ── POST /v1/tenants/{tenantId}/subjects/{subjectId}/identifiers ──────────────
@@ -29,6 +32,15 @@ router = APIRouter(prefix="/v1", tags=["Subject Matching"])
 @router.post(
     "/tenants/{tenant_id}/subjects/{subject_id}/identifiers",
     status_code=201,
+    summary="Add Subject Identifier",
+    description=(
+        "Register a VERIFIED Subject identifier (e.g. phone number, PAN, Aadhaar) for deterministic matching. "
+        "Conflicts with an existing active identifier on another Subject → 409. "
+        "Required permission: `di.subject_matching.write`. "
+        "Returns D8 envelope with the created identifier record."
+    ),
+    response_description="Created subject identifier",
+    operation_id="addSubjectIdentifier",
 )
 async def add_subject_identifier(
     tenant_id: str,
@@ -114,7 +126,15 @@ async def add_subject_identifier(
         )
         await session.commit()
 
-    return {
+    logger.info(
+        "subject_identifier_added",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        subject_id=str(subject_id),
+        identifier_type=identifier_type,
+    )
+
+    payload = {
         "identifierId": str(identifier_id),
         "subjectId": str(subject_id),
         "identifierType": identifier_type,
@@ -124,11 +144,22 @@ async def add_subject_identifier(
         "createdByActorId": actor.actor_id,
         "createdAt": now.isoformat(),
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/tenants/{tenantId}/whatsapp/sender-mappings ─────────────────────
 
-@router.post("/tenants/{tenant_id}/whatsapp/sender-mappings")
+@router.post(
+    "/tenants/{tenant_id}/whatsapp/sender-mappings",
+    summary="Put WhatsApp Sender Mapping",
+    description=(
+        "Create or update an exact WhatsApp sender phone number to Subject mapping. "
+        "Required permission: `di.subject_matching.write`. "
+        "Returns D8 envelope with the mapping record."
+    ),
+    response_description="Sender mapping record",
+    operation_id="putWhatsappSenderMapping",
+)
 async def put_whatsapp_sender_mapping(
     tenant_id: str,
     body: dict[str, Any],
@@ -162,7 +193,14 @@ async def put_whatsapp_sender_mapping(
         )
         await session.commit()
 
-    return {
+    logger.info(
+        "whatsapp_sender_mapped",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        sender_phone_number=sender_phone_number,
+    )
+
+    payload = {
         "tenantId": tenant_id,
         "senderPhoneNumber": sender_phone_number,
         "subjectId": subject_id_str,
@@ -170,3 +208,4 @@ async def put_whatsapp_sender_mapping(
         "createdByActorId": actor.actor_id,
         "updatedAt": now.isoformat(),
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()

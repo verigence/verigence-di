@@ -3,7 +3,7 @@
 Security JWT canonical claims consumed by DI:
   sub                → actor_id  (Verigence user UUID)
   tenant_id          → tenant_id
-  actor_type         → actor_type (USER | SERVICE | SYSTEM) — issued by Security
+  actor_type         → actor_type (USER | SYSTEM | SERVICE_INTEGRATION) — issued by Security
   roles[]            → roles  (informational)
   permissions[]      → permissions (authoritative for authz checks)
   device_id          → device_id (USER actors)
@@ -59,7 +59,7 @@ class ActorPrincipal:
 
     @property
     def is_service(self) -> bool:
-        return self.actor_type == ActorType.SERVICE
+        return self.actor_type == ActorType.SERVICE_INTEGRATION
 
     # Legacy role-name helpers — kept so existing router code still compiles.
     # New route handlers MUST use .can(Permission.XXX) instead.

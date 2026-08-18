@@ -1,17 +1,16 @@
 """auth/dependencies.py — FastAPI dependency functions (Baseline 2.2).
 
 v2.2 changes:
-- Endpoint authorization now checks permissions[] (authoritative), not role names.
+- Endpoint authorization checks permissions[] (authoritative), not role names.
 - `require_permission(*perms)` factory replaces the old `require_role()`.
-- `require_role()` is kept as an alias for backward compat.
-- `require_tenant_actor` still validates path tenantId == JWT tenant_id.
-- Device-ID check placeholder added (full enforcement in Step 6b).
+- `require_role()` is kept as an alias for backward compatibility.
+- Tenant authorization validates the route Tenant against JWT tenant_id.
 """
 from __future__ import annotations
 
 import logging
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from verigence.di.auth.permissions import Permission
@@ -22,8 +21,6 @@ logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(auto_error=True)
 _system_bearer = HTTPBearer(auto_error=True)
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _unauthorized(detail: str) -> HTTPException:
@@ -41,8 +38,6 @@ def _forbidden(detail: str) -> HTTPException:
     )
 
 
-# ── Core dependency ───────────────────────────────────────────────────────────
-
 async def require_actor(
     creds: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> ActorPrincipal:
@@ -53,17 +48,27 @@ async def require_actor(
     return principal
 
 
-# ── Tenant-scoped dependency ──────────────────────────────────────────────────
-
 class _RequireTenantActor:
-    """Validates actor.tenant_id == path tenantId."""
+    """Validate route Tenant identity against the Security JWT tenant_id.
+
+    The approved DI OpenAPI uses ``tenantId``. A few historical route modules
+    still expose ``tenant_id``; accepting both here keeps the authorization
+    gate fail-closed while those route spellings are normalized.
+    """
 
     async def __call__(
         self,
-        tenantId: str,
+        request: Request,
         actor: ActorPrincipal = Depends(require_actor),
     ) -> ActorPrincipal:
-        if actor.tenant_id != tenantId:
+        camel = request.path_params.get("tenantId")
+        snake = request.path_params.get("tenant_id")
+        if camel is not None and snake is not None and camel != snake:
+            raise _forbidden("Ambiguous tenant path")
+        route_tenant = camel or snake
+        if not route_tenant:
+            raise _forbidden("Tenant-scoped route is missing tenant path context")
+        if actor.tenant_id != str(route_tenant):
             raise _forbidden("Token tenant does not match path tenant")
         return actor
 
@@ -71,12 +76,10 @@ class _RequireTenantActor:
 require_tenant_actor = _RequireTenantActor()
 
 
-# ── System-bearer dependency ──────────────────────────────────────────────────
-
 async def require_system_actor(
     creds: HTTPAuthorizationCredentials = Depends(_system_bearer),
 ) -> ActorPrincipal:
-    """Require a SYSTEM actor with di.platform.whatsapp.admin permission."""
+    """Require a canonical SYSTEM actor with WhatsApp platform permission."""
     principal = verify_token(creds.credentials, system=True)
     if principal is None:
         raise _unauthorized("Invalid or expired system token")
@@ -85,41 +88,21 @@ async def require_system_actor(
     return principal
 
 
-# ── Permission-based dependency factory (v2.2) ────────────────────────────────
-
 def require_permission(*perms: Permission):  # type: ignore[no-untyped-def]
-    """Return a FastAPI dependency that enforces ALL listed permissions.
+    """Return a dependency that enforces all listed permissions."""
 
-    Does NOT enforce tenantId path match — use require_tenant_permission() for
-    routes that carry a {tenantId} path parameter.
-
-    Usage::
-
-        @router.post("/subjects")
-        async def create(actor = Depends(require_permission(Permission.SUBJECT_CREATE))):
-            ...
-    """
     async def _check(actor: ActorPrincipal = Depends(require_actor)) -> ActorPrincipal:
         missing = [p.value for p in perms if not actor.can(p)]
         if missing:
             raise _forbidden(f"Missing permission(s): {', '.join(missing)}")
         return actor
+
     return _check
 
 
 def require_tenant_permission(*perms: Permission):  # type: ignore[no-untyped-def]
-    """Return a FastAPI dependency that validates tenantId path match AND permissions.
+    """Validate Tenant path match and enforce all listed permissions."""
 
-    Combines require_tenant_actor (tenant_id path check) with permission enforcement.
-
-    Usage::
-
-        @router.post("/v1/tenants/{tenantId}/subjects")
-        async def create(
-            actor = Depends(require_tenant_permission(Permission.SUBJECT_CREATE)),
-        ):
-            ...
-    """
     async def _check(
         actor: ActorPrincipal = Depends(require_tenant_actor),
     ) -> ActorPrincipal:
@@ -127,20 +110,18 @@ def require_tenant_permission(*perms: Permission):  # type: ignore[no-untyped-de
         if missing:
             raise _forbidden(f"Missing permission(s): {', '.join(missing)}")
         return actor
+
     return _check
 
 
-# ── require_role kept for backward compatibility ──────────────────────────────
-
 def require_role(*roles: str):  # type: ignore[no-untyped-def]
-    """Backward-compat shim: delegates to has_role() check.
+    """Backward-compatible role check; new code must prefer permissions."""
 
-    Prefer require_permission() for new route handlers.
-    """
     async def _check(
         actor: ActorPrincipal = Depends(require_tenant_actor),
     ) -> ActorPrincipal:
         if not actor.has_role(*roles):
             raise _forbidden(f"Required role(s): {', '.join(roles)}")
         return actor
+
     return _check

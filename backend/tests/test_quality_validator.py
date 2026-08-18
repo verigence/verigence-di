@@ -5,9 +5,10 @@ no real PostgreSQL connection is needed.
 
 Tests cover:
 - Zero-byte file → CORRUPT / FILE_EMPTY
-- Missing or empty quality policy → CORRUPT / QUALITY_POLICY_NOT_CONFIGURED
-- FIT result when all configured rules pass
-- NOT_FIT result when a configured rule fails
+- Structurally corrupt image → CORRUPT / INVALID_FILE_CONTENT
+- Missing quality policy → CORRUPT / QUALITY_POLICY_NOT_CONFIGURED
+- FIT result when all rules pass
+- NOT_FIT result when a rule fails
 - Quality results are persisted (INSERT called per rule)
 """
 from __future__ import annotations
@@ -21,7 +22,6 @@ from verigence.di.domain.enums import UploadStatus
 from verigence.di.quality.validator import validate_upload
 
 pytestmark = pytest.mark.no_docker
-
 
 # ── DB mock helpers ───────────────────────────────────────────────────────────
 
@@ -38,6 +38,11 @@ def _make_session(
     """
     session = AsyncMock()
 
+    # Prepare execute side effects in call order:
+    # 1st execute → tenant quality_policy query
+    # 2nd execute → quality_rule_catalog query
+    # subsequent executes → INSERT quality_results rows (one per rule)
+
     policy_mapping = MagicMock()
     policy_mapping.__getitem__ = MagicMock(side_effect=lambda k: quality_policy)
 
@@ -46,12 +51,16 @@ def _make_session(
         policy_mapping if quality_policy is not None else None
     )
 
+    # Build catalog result mock
     catalog_result = MagicMock()
     mappings_result = MagicMock()
     mappings_result.all.return_value = catalog_rows or []
     catalog_result.mappings.return_value = mappings_result
 
+    # INSERT returns don't matter
     insert_result = MagicMock()
+
+    # execute returns: policy → catalog → inserts (unlimited)
     session.execute = AsyncMock(
         side_effect=[policy_result, catalog_result] + [insert_result] * 20
     )
@@ -75,6 +84,12 @@ def _pdf_bytes() -> bytes:
     )
 
 
+def _jpeg_bytes() -> bytes:
+    return b"\xff\xd8\xff\xe0" + b"\x00" * 16 + b"\xff\xd9"
+
+
+# ── Zero-byte file ────────────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_zero_byte_file_returns_corrupt() -> None:
     session = AsyncMock()
@@ -88,8 +103,11 @@ async def test_zero_byte_file_returns_corrupt() -> None:
     )
     assert result.upload_status == UploadStatus.CORRUPT
     assert result.upload_issue_code == "FILE_EMPTY"
+    # No DB calls needed for empty-file short-circuit
     session.execute.assert_not_called()
 
+
+# ── Missing quality policy ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_missing_quality_policy_returns_corrupt() -> None:
@@ -106,9 +124,12 @@ async def test_missing_quality_policy_returns_corrupt() -> None:
     assert result.upload_issue_code == "QUALITY_POLICY_NOT_CONFIGURED"
 
 
+# ── Empty quality policy (no rules) → FIT ────────────────────────────────────
+
 @pytest.mark.asyncio
-async def test_empty_policy_returns_corrupt() -> None:
+async def test_empty_policy_no_rules_returns_fit() -> None:
     session = _make_session(quality_policy=[], catalog_rows=[])
+    # Use structurally valid PDF — pypdf parses it, PIL not involved
     result = await validate_upload(
         session=session,
         tenant_id="t1",
@@ -117,10 +138,12 @@ async def test_empty_policy_returns_corrupt() -> None:
         declared_mime="application/pdf",
         filename="test.pdf",
     )
-    assert result.upload_status == UploadStatus.CORRUPT
-    assert result.upload_issue_code == "QUALITY_POLICY_NOT_CONFIGURED"
+    assert result.upload_status == UploadStatus.FIT
+    assert result.upload_issue_code is None
     assert result.quality_results == []
 
+
+# ── Rule with PASS → FIT ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_passing_rule_returns_fit() -> None:
@@ -145,9 +168,12 @@ async def test_passing_rule_returns_fit() -> None:
     assert result.quality_results[0].outcome == "PASS"
 
 
+# ── Rule with FAIL → NOT_FIT ──────────────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_failing_rule_returns_not_fit() -> None:
     policy = [
+        # max_bytes=1 → will FAIL for any real content
         {"rule_key": "file_size_max", "enabled": True, "parameters": {"max_bytes": 1}},
     ]
     catalog = [
@@ -169,6 +195,8 @@ async def test_failing_rule_returns_not_fit() -> None:
     assert result.quality_results[0].outcome == "FAIL"
 
 
+# ── Disabled rule is skipped ──────────────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_disabled_rule_is_skipped() -> None:
     policy = [
@@ -187,16 +215,19 @@ async def test_disabled_rule_is_skipped() -> None:
         declared_mime="application/pdf",
         filename="test.pdf",
     )
+    # Disabled rule must not run → FIT with zero quality_results
     assert result.upload_status == UploadStatus.FIT
     assert result.quality_results == []
 
+
+# ── Rule_key missing from catalog → ERROR outcome, but overall FIT ───────────
 
 @pytest.mark.asyncio
 async def test_rule_key_not_in_catalog_produces_error_outcome() -> None:
     policy = [
         {"rule_key": "ghost_rule", "enabled": True, "parameters": {}},
     ]
-    catalog: list = []
+    catalog: list = []  # empty catalog
     session = _make_session(quality_policy=policy, catalog_rows=catalog)
 
     result = await validate_upload(
@@ -207,10 +238,13 @@ async def test_rule_key_not_in_catalog_produces_error_outcome() -> None:
         declared_mime="application/pdf",
         filename="test.pdf",
     )
+    # ERROR but no FAIL → FIT
     assert result.upload_status == UploadStatus.FIT
     assert len(result.quality_results) == 1
     assert result.quality_results[0].outcome == "ERROR"
 
+
+# ── Multiple rules: one FAIL makes overall NOT_FIT ────────────────────────────
 
 @pytest.mark.asyncio
 async def test_multiple_rules_one_fail_is_not_fit() -> None:

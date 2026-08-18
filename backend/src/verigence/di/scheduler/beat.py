@@ -25,13 +25,16 @@ Lifecycle:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, time as dtime
+from datetime import UTC, datetime, timedelta
+from datetime import time as dtime
 from typing import Any
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import]
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from verigence.di.repositories.backout import sweep_expired_backout_jobs
 
 logger = structlog.get_logger(__name__)
 
@@ -76,10 +79,34 @@ class EODRetryScheduler:
 
 
 async def _run_eod_check(session_factory: async_sessionmaker) -> None:
-    """Periodic check: for every enabled Tenant, insert EOD_RETRY jobs if EOD just passed."""
+    """Periodic check (every 60 s):
+    0. Reclaim stale RUNNING jobs (lease timeout exceeded).
+    1. Sweep expired backout_jobs rows (D24) — runs on every tick.
+    2. For every enabled Tenant, insert EOD_RETRY jobs if EOD just passed.
+    """
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
+    log.info("eod_tick")
 
+    # ── 0. Stale RUNNING job reaper ──────────────────────────────────────
+    try:
+        async with session_factory() as session, session.begin():
+            reclaimed = await _reclaim_stale_jobs(session, now_utc)
+        if reclaimed:
+            log.warning("stale_running_job_reset", count=reclaimed)
+    except Exception as exc:
+        log.warning("stale_job_reaper_failed", error=str(exc))
+
+    # ── 1. Backout sweep — runs on every tick regardless of EOD window ────────
+    try:
+        async with session_factory() as session, session.begin():
+            deleted = await sweep_expired_backout_jobs(session)
+        if deleted:
+            log.info("backout_sweep_completed", rows_deleted=deleted)
+    except Exception as exc:
+        log.warning("backout_sweep_failed", error=str(exc))
+
+    # ── 2. EOD retry job injection — only when Tenant EOD window matches ──────
     async with session_factory() as session:
         tenants = await _load_enabled_tenants(session)
 
@@ -92,9 +119,8 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
             continue
 
         log.info("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
-        async with session_factory() as session:
-            async with session.begin():
-                count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
+        async with session_factory() as session, session.begin():
+            count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
         if count:
             log.info("eod_retry_jobs_inserted",
                      tenant_id=tenant_id,
@@ -217,6 +243,28 @@ async def _insert_eod_retry_jobs(
                            error=str(exc))
 
     return count
+
+
+async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
+    """Reset RUNNING jobs whose lease has expired back to PENDING.
+
+    Uses worker_lease_timeout_minutes from settings (default 10).
+    Returns the number of rows updated.
+    """
+    from verigence.di.settings import get_settings
+    lease_minutes = getattr(get_settings(), "worker_lease_timeout_minutes", 10)
+    result = await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'PENDING',
+                locked_by = NULL,
+                locked_at_utc = NULL
+            WHERE job_status = 'RUNNING'
+              AND locked_at_utc < :cutoff
+        """),
+        {"cutoff": now_utc - timedelta(minutes=lease_minutes)},
+    )
+    return result.rowcount
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

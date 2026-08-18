@@ -13,9 +13,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -23,11 +25,22 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Human Verification"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/verification-queue ─────────────────────────────
 
-@router.get("/tenants/{tenant_id}/verification-queue")
+@router.get(
+    "/tenants/{tenant_id}/verification-queue",
+    summary="Get Verification Queue",
+    description=(
+        "List CONFIRMED documents awaiting human verification, filtered by verification status. "
+        "Required permission: `di.verification.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Verification queue",
+    operation_id="getVerificationQueue",
+)
 async def get_verification_queue(
     tenant_id: str,
     human_verification_status: str = "MANDATORY",
@@ -81,12 +94,13 @@ async def get_verification_queue(
             )
         ).scalar()
 
-    return {
+    payload = {
         "items": [_format_document(r) for r in rows],
         "page": page,
         "pageSize": page_size,
         "total": total_row or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/tenants/{tenantId}/subjects/{subjectId}/documents/{documentId}/verification
@@ -94,6 +108,16 @@ async def get_verification_queue(
 @router.post(
     "/tenants/{tenant_id}/subjects/{subject_id}/documents/{document_id}/verification",
     status_code=201,
+    summary="Verify Document",
+    description=(
+        "Record a human verification decision for a CONFIRMED document. "
+        "Optionally include fieldCorrections to override extracted field values. "
+        "Required permission: `di.verification.write`. "
+        "Returns D8 envelope with verificationId. "
+        "Returns 409 if the document is not CONFIRMED or already VERIFIED."
+    ),
+    response_description="Verification record",
+    operation_id="verifySubjectDocument",
 )
 async def verify_subject_document(
     tenant_id: str,
@@ -202,7 +226,7 @@ async def verify_subject_document(
                          version_no, is_current, created_at_utc)
                     VALUES
                         (:tid, :dfv_id, :doc_id, :cf_id,
-                         :val::jsonb, 'HUMAN', :vid,
+                         CAST(:val AS jsonb), 'HUMAN', :vid,
                          :actor_id, :now,
                          :ver, true, :now)
                 """),
@@ -230,7 +254,15 @@ async def verify_subject_document(
         )
         await session.commit()
 
-    return {
+    logger.info(
+        "document_verified",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_id=str(document_id),
+        verification_id=str(verification_id),
+    )
+
+    payload = {
         "verificationId": str(verification_id),
         "documentId": str(document_id),
         "verifiedAt": now.isoformat(),
@@ -238,6 +270,7 @@ async def verify_subject_document(
         "remarks": remarks,
         "fieldCorrectionCount": len(corrections),
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 def _format_document(row: dict) -> dict[str, Any]:

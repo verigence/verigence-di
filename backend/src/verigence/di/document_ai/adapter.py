@@ -2,11 +2,15 @@
 
 The Processing Worker only calls DocumentAIAdapter.classify() and
 DocumentAIAdapter.extract(). The concrete provider implementation
-(Google Document AI, Tesseract, mock) is injected at runtime.
+(Azure Document Intelligence, mock) is injected at runtime.
+
+D13: Azure Document Intelligence is the production provider.
+D18: ALL documents are sent for OCR regardless of physical_form_type.
+     ADDITIONAL documents use prebuilt-read model.
 
 Every provider adapter MUST normalise its confidence to 0-100.
 A provider that cannot provide a documented deterministic normalisation
-is not eligible for production configuration (DI_LLD_v2.1.md §3).
+is not eligible for production configuration (DI_LLD_v2.2.md §3).
 """
 from __future__ import annotations
 
@@ -84,6 +88,8 @@ class DocumentAIAdapter(abc.ABC):
         mime_type: str,
         fields: list[ExtractionField],
         correlation_id: str | None = None,
+        physical_form_type: str = "PRINTABLE",   # D22 — routing hint for adapter
+        document_type_key: str | None = None,    # D22 — schema registry lookup key
     ) -> AIInvocationResult:
         """Extract configured fields. Returns FieldResult list."""
 
@@ -131,6 +137,8 @@ class MockDocumentAIAdapter(DocumentAIAdapter):
         mime_type: str,
         fields: list[ExtractionField],
         correlation_id: str | None = None,
+        physical_form_type: str = "PRINTABLE",   # D22 — accepted, ignored by mock
+        document_type_key: str | None = None,    # D22 — accepted, ignored by mock
     ) -> AIInvocationResult:
         import uuid
         results = [
@@ -156,13 +164,15 @@ class MockDocumentAIAdapter(DocumentAIAdapter):
 
 
 def get_document_ai_adapter() -> DocumentAIAdapter:
-    """FastAPI / worker dependency — returns configured adapter."""
+    """FastAPI / worker dependency — returns configured adapter.
+
+    DI_DOCAI_MOCK=true  → MockDocumentAIAdapter (local dev + CI)
+    DI_DOCAI_MOCK=false → GeminiDocumentAIAdapter (production — D19)
+    """
     from verigence.di.settings import get_settings
     s = get_settings()
     if s.docai_mock:
         return MockDocumentAIAdapter()
-    # Google Document AI implementation will be wired here in Step 9
-    raise NotImplementedError(
-        "Google Document AI adapter not yet implemented. "
-        "Set DI_DOCAI_MOCK=true for local development."
-    )
+    # Gemini 2.5 Flash adapter (D19) — requires DI_DOCAI_GEMINI_API_KEY to be set.
+    from verigence.di.document_ai.gemini_adapter import GeminiDocumentAIAdapter  # noqa: PLC0415
+    return GeminiDocumentAIAdapter(api_key=s.docai_gemini_api_key)

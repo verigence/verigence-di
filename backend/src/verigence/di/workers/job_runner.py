@@ -26,8 +26,9 @@ session lifecycle and calls commit / rollback / fail_job on error.
 from __future__ import annotations
 
 import json
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -44,9 +45,9 @@ from verigence.di.document_ai.adapter import (
 )
 from verigence.di.domain.enums import (
     FoundStatus,
-    HumanVerificationStatus,
 )
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
+from verigence.di.repositories.search_index import upsert_search_index
 from verigence.di.rules.runner import ExtractedFieldInput, normalize_and_validate
 
 logger = structlog.get_logger(__name__)
@@ -111,6 +112,7 @@ async def run_processing_job(
         processing_job_id=str(processing_job_id),
         correlation_id=correlation_id,
     )
+    _job_start = time.monotonic()
 
     # ── Step 2: Create immutable Processing Run ───────────────────────────────
     processing_run_id = uuid.uuid4()
@@ -152,6 +154,7 @@ async def run_processing_job(
             ai_adapter=ai_adapter,
             log=log,
             started_at=now,
+            job_start=_job_start,
         )
     except ProcessingError as exc:
         # Mark the Processing Run as FAILED
@@ -211,6 +214,7 @@ async def _execute_steps(
     ai_adapter: DocumentAIAdapter,
     log: Any,
     started_at: datetime,
+    job_start: float,
 ) -> JobRunResult:
     """All 17 processing steps — raises ProcessingError on failure."""
     now = started_at
@@ -234,6 +238,12 @@ async def _execute_steps(
     hint_key = await _get_document_hint_key(session, tenant_id, document_id)
 
     candidates = await _form_candidate_set(session, tenant_id)
+    log.info(
+        "classification_candidates",
+        candidate_count=len(candidates),
+        candidate_keys=[c["document_type_key"] for c in candidates],
+        hint_key=hint_key,
+    )
 
     # ── Step 5: Persist candidate snapshot ───────────────────────────────────
     # Need requirement context for flags
@@ -244,7 +254,7 @@ async def _execute_steps(
     await session.execute(
         text("""
             UPDATE docintel.processing_runs
-            SET classification_candidate_set = :cs::jsonb
+            SET classification_candidate_set = CAST(:cs AS jsonb)
             WHERE tenant_id = :tid AND processing_run_id = :run_id
         """),
         {
@@ -263,7 +273,7 @@ async def _execute_steps(
 
     # ── Step 7: Call classifier ───────────────────────────────────────────────
     artifact_bytes, mime_type = await _load_original_artifact(session, tenant_id, document_id)
-    candidate_keys = [c["document_type_key"] for c in candidate_snapshot]
+    candidate_keys = [c["document_type_key"] for c in candidates]
 
     classify_invocation_id = uuid.uuid4()
     await _insert_invocation(
@@ -282,7 +292,7 @@ async def _execute_steps(
     except Exception as exc:
         await _update_invocation(session, tenant_id, classify_invocation_id,
                                  "FAILED", error_detail=str(exc))
-        raise RetryableError("CLASSIFICATION_PROVIDER_ERROR", str(exc))
+        raise RetryableError("CLASSIFICATION_PROVIDER_ERROR", str(exc)) from exc
 
     await _update_invocation(
         session, tenant_id, classify_invocation_id, "SUCCESS",
@@ -295,15 +305,29 @@ async def _execute_steps(
     # ── Step 8: Accept single winner ─────────────────────────────────────────
     accepted = _accept_classification(classifications, candidates, acceptance_score)
     if accepted is None:
+        scores = [(c["document_type_key"], c.get("classification_score")) for c in candidates]
+        log.warning(
+            "classification_failed",
+            reason="AMBIGUOUS",
+            candidate_keys=[c["document_type_key"] for c in candidates],
+            scores=scores,
+        )
         raise NonRetryableError(
             "CLASSIFICATION_AMBIGUOUS",
-            f"No single candidate met acceptance score {acceptance_score}; "
-            f"scores: {[(c['document_type_key'], c.get('classification_score')) for c in candidate_snapshot]}",
+            f"No single candidate met acceptance score {acceptance_score}; scores: {scores}",
         )
 
-    log.info("classification_accepted",
-             document_type_key=accepted["document_type_key"],
-             profile_id=str(accepted["profile_id"]))
+    # Find runner-up for diagnostics
+    others = [c for c in classifications if c.document_type_key != accepted["document_type_key"]]
+    runner_up = max(others, key=lambda c: float(c.confidence or 0), default=None)
+    log.info(
+        "classification_result",
+        accepted_type_key=accepted["document_type_key"],
+        acceptance_score=str(acceptance_score),
+        profile_id=str(accepted["profile_id"]),
+        runner_up_key=runner_up.document_type_key if runner_up else None,
+        runner_up_score=str(runner_up.confidence) if runner_up else None,
+    )
 
     # ── Step 9: Use the profileId from the snapshotted candidate ─────────────
     profile_id = uuid.UUID(str(accepted["profile_id"]))
@@ -349,6 +373,22 @@ async def _execute_steps(
         for pf in profile_fields
     ]
 
+    # D22: fetch physical_form_type for the accepted document type
+    accepted_document_type_key: str = accepted["document_type_key"]
+    physical_form_type_for_extract = await _get_physical_form_type(
+        session, tenant_id, document_type_id,
+    )
+
+    log.info(
+        "extraction_request",
+        document_type_key=accepted_document_type_key,
+        physical_form_type=physical_form_type_for_extract,
+        schema_field_count=len(extract_fields),
+        file_bytes=len(artifact_bytes),
+        file_mime=mime_type,
+    )
+    _extract_start = time.monotonic()
+
     extract_invocation_id = uuid.uuid4()
     await _insert_invocation(
         session, tenant_id, extract_invocation_id, processing_run_id,
@@ -361,11 +401,13 @@ async def _execute_steps(
             mime_type=mime_type,
             fields=extract_fields,
             correlation_id=correlation_id,
+            physical_form_type=physical_form_type_for_extract,
+            document_type_key=accepted_document_type_key,
         )
     except Exception as exc:
         await _update_invocation(session, tenant_id, extract_invocation_id,
                                  "FAILED", error_detail=str(exc))
-        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc))
+        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc
 
     await _update_invocation(
         session, tenant_id, extract_invocation_id, "SUCCESS",
@@ -374,6 +416,30 @@ async def _execute_steps(
     )
 
     field_results: list[FieldResult] = extract_result.results  # type: ignore[assignment]
+    _extract_ms = round((time.monotonic() - _extract_start) * 1000, 1)
+    _fields_found  = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
+    _fields_null   = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
+    _fields_low    = sum(1 for fr in field_results
+                        if fr.confidence is not None and fr.confidence <= Decimal("40.00"))
+    log.info(
+        "extraction_result",
+        document_type_key=accepted_document_type_key,
+        physical_form_type=physical_form_type_for_extract,
+        fields_extracted=_fields_found,
+        fields_null=_fields_null,
+        fields_low_confidence=_fields_low,
+        duration_ms=_extract_ms,
+    )
+    for fr in field_results:
+        log.debug(
+            "extraction_field_detail",
+            document_type_key=accepted_document_type_key,
+            field_key=fr.field_key,
+            raw_value=fr.raw_value,
+            normalized_value=fr.normalized_value,
+            found_status=fr.found_status.value,
+            confidence=str(fr.confidence) if fr.confidence is not None else None,
+        )
 
     # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
     # First persist the raw extracted_facts, then normalize them
@@ -403,7 +469,7 @@ async def _execute_steps(
                 VALUES
                     (:tid, :fact_id, :run_id, :doc_id,
                      :pf_id, :cf_id, :found_status,
-                     :raw_value, :confidence, :page_no, :evidence_region::jsonb,
+                     :raw_value, :confidence, :page_no, CAST(:evidence_region AS jsonb),
                      :inv_id, :now)
             """),
             {
@@ -442,7 +508,7 @@ async def _execute_steps(
 
     # ── Step 13: Persist MACHINE document_field_values ────────────────────────
     # Build a system actor row if not present (worker writes as system actor)
-    system_actor_id = f"worker.system"
+    system_actor_id = "worker.system"
     await _ensure_system_actor(session, tenant_id, system_actor_id)
 
     norm_map = {n.extracted_fact_id: n for n in runner_output.normalized}
@@ -465,7 +531,7 @@ async def _execute_steps(
                      version_no, is_current, created_at_utc)
                 VALUES
                     (:tid, :dfv_id, :doc_id, :cf_id,
-                     :cur_val::jsonb, 'MACHINE', :fact_id,
+                     CAST(:cur_val AS jsonb), 'MACHINE', :fact_id,
                      :conf, :actor_id, :now,
                      1, true, :now)
                 ON CONFLICT DO NOTHING
@@ -483,11 +549,27 @@ async def _execute_steps(
             },
         )
 
+    # ── Steps 11+12: Log normalization + validation summaries ────────────────
+    _norm_errors = [n for n in runner_output.normalized if getattr(n, "error", None)]
+    _val_failed  = [v for v in runner_output.validated if not getattr(v, "passed", True)]
+    log.info(
+        "normalization_summary",
+        fields_normalized=len(runner_output.normalized),
+        normalization_errors=len(_norm_errors),
+    )
+    log.info(
+        "validation_summary",
+        fields_valid=len(runner_output.validated) - len(_val_failed),
+        fields_failed=len(_val_failed),
+        failed_field_keys=[getattr(v, "field_key", "?") for v in _val_failed],
+    )
+
     # ── Steps 14–16: Score + verify ───────────────────────────────────────────
     scored_fields = _build_scored_fields(profile_fields, field_result_map)
 
     # Resolve effective threshold: tenant DB value → system-wide default
     from decimal import Decimal as _Decimal
+
     from verigence.di.repositories.documents import get_verification_threshold
     from verigence.di.settings import get_settings
     tenant_threshold = await get_verification_threshold(session, tenant_id=tenant_id)
@@ -499,14 +581,29 @@ async def _execute_steps(
     try:
         conf_result = calculate_confidence_score(scored_fields, threshold=effective_threshold)
     except ValueError as exc:
-        raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc))
+        raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc)) from exc
 
     confidence_score = conf_result.confidence_score
     hvs = conf_result.human_verification_status
 
-    log.info("document_scored",
-             confidence_score=str(confidence_score),
-             human_verification_status=hvs.value)
+    _required_present = sum(1 for sf in scored_fields if sf.expected and sf.found_status == FoundStatus.FOUND)
+    _required_missing = sum(1 for sf in scored_fields if sf.expected and sf.found_status != FoundStatus.FOUND)
+    log.info(
+        "score_calculated",
+        document_type_key=accepted_document_type_key,
+        confidence_score=str(confidence_score),
+        threshold_applied=str(effective_threshold),
+        required_present=_required_present,
+        required_missing=_required_missing,
+    )
+    log.info(
+        "hvs_derived",
+        document_type_key=accepted_document_type_key,
+        confidence_score=str(confidence_score),
+        threshold=str(effective_threshold),
+        human_verification_status=hvs.value,
+        reason="AUTO_CONFIRMED" if hvs.value == "NOT_REQUIRED" else "NEEDS_REVIEW",
+    )
 
     # ── Step 17: Set PROCESSED + CONFIRMED ───────────────────────────────────
     await session.execute(
@@ -515,7 +612,7 @@ async def _execute_steps(
             SET processing_status = 'PROCESSED',
                 confirmation_status = 'CONFIRMED',
                 confidence_score = :conf,
-                verification_threshold_applied = 90.00,
+                verification_threshold_applied = :threshold,
                 human_verification_status = :hvs,
                 updated_at_utc = :now
             WHERE tenant_id = :tid AND document_id = :doc_id
@@ -524,9 +621,38 @@ async def _execute_steps(
             "tid": tenant_id,
             "doc_id": document_id,
             "conf": float(confidence_score),
+            "threshold": float(effective_threshold),
             "hvs": hvs.value,
             "now": now,
         },
+    )
+
+    # ── Step 17b: Upsert document_search_index (D14) ─────────────────────────
+    # Build a map from field_key → normalized value, preferring norm_map (rules
+    # runner output) over the raw provider normalized_value.
+    field_key_to_norm_value: dict[str, object] = {}
+    for fkey, fact_id in fact_id_map.items():
+        norm = norm_map.get(fact_id)
+        if norm is not None:
+            field_key_to_norm_value[fkey] = norm.normalized_value
+        elif fkey in field_result_map:
+            # fallback to raw normalized_value if rules runner didn't process this field
+            field_key_to_norm_value[fkey] = field_result_map[fkey].normalized_value
+        else:
+            field_key_to_norm_value[fkey] = None
+
+    indexed_fields: dict[str, object] = {
+        pf["canonical_field_key"]: field_key_to_norm_value.get(pf["canonical_field_key"])
+        for pf in profile_fields
+    }
+    await upsert_search_index(
+        session=session,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        subject_id=subject_id,
+        document_type_key=accepted_document_type_key,
+        indexed_fields=indexed_fields,
+        schema_version=PIPELINE_VERSION,
     )
 
     # Mark Processing Run COMPLETED
@@ -540,9 +666,18 @@ async def _execute_steps(
         {"tid": tenant_id, "run_id": processing_run_id, "now": now},
     )
 
-    log.info("processing_run_completed",
-             confidence_score=str(confidence_score),
-             human_verification_status=hvs.value)
+    _total_ms = round((time.monotonic() - job_start) * 1000, 1)
+    indexed_keys = sorted(indexed_fields.keys())
+    log.info(
+        "pipeline_confirmed",
+        document_type_key=accepted_document_type_key,
+        processing_run_id=str(processing_run_id),
+        confirmation_status="CONFIRMED",
+        confidence_score=str(confidence_score),
+        human_verification_status=hvs.value,
+        indexed_field_keys=indexed_keys,
+        total_duration_ms=_total_ms,
+    )
 
     return JobRunResult(
         success=True,
@@ -615,7 +750,7 @@ async def _get_requirement_keys(
         await session.execute(
             text("""
                 SELECT dt.document_type_key
-                FROM docintel.subject_requirement_profile_assignments srpa
+                FROM docintel.subject_requirement_assignments srpa
                 JOIN docintel.document_requirement_profile_items drpi
                   ON drpi.requirement_profile_id = srpa.requirement_profile_id
                  AND drpi.tenant_id = srpa.tenant_id
@@ -795,14 +930,12 @@ async def _load_original_artifact(
     mime_type = mime_type or "application/octet-stream"
 
     # Load bytes from storage
-    from verigence.di.document_ai.adapter import get_document_ai_adapter
     from verigence.di.storage.adapter import get_storage_adapter
     storage = get_storage_adapter()
     try:
-        stream = await storage.get_stream(logical_key)
-        data = b"".join([chunk async for chunk in stream])
+        data = b"".join([chunk async for chunk in storage.get_stream(logical_key)])
     except Exception as exc:
-        raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}")
+        raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}") from exc
 
     return data, mime_type
 
@@ -836,6 +969,32 @@ async def _load_profile_fields(
         )
     ).mappings().all()
     return [dict(r) for r in rows]
+
+
+async def _get_physical_form_type(
+    session: AsyncSession,
+    tenant_id: str,
+    document_type_id: uuid.UUID,
+) -> str:
+    """Fetch physical_form_type from tenant_document_types for the accepted type.
+
+    D22: passed to ai_adapter.extract() for schema registry routing.
+    Falls back to 'PRINTABLE' if the row is not found.
+    """
+    row = (
+        await session.execute(
+            text("""
+                SELECT physical_form_type
+                FROM docintel.tenant_document_types
+                WHERE tenant_id = :tid
+                  AND document_type_id = :dtid
+            """),
+            {"tid": tenant_id, "dtid": document_type_id},
+        )
+    ).one_or_none()
+    return row[0] if row else "PRINTABLE"
+
+
 
 
 def _build_scored_fields(
@@ -905,7 +1064,7 @@ async def _update_invocation(
             SET outcome = :outcome,
                 completed_at_utc = :now,
                 provider_request_id = :prid,
-                usage_metrics = :metrics::jsonb,
+                usage_metrics = CAST(:metrics AS jsonb),
                 error_detail = :error_detail
             WHERE tenant_id = :tid AND invocation_id = :inv_id
         """),

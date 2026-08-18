@@ -20,9 +20,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -30,17 +32,28 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Requirement Configuration"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/document-requirement-profiles ─────────────────
 
-@router.get("/tenants/{tenant_id}/document-requirement-profiles")
+@router.get(
+    "/tenants/{tenant_id}/document-requirement-profiles",
+    summary="List Requirement Profiles",
+    description=(
+        "List all Document Requirement Profile versions for the Tenant. "
+        "Required permission: `di.requirement_profile.read`. "
+        "Returns D8 envelope with profiles array (profileKey, versionNo, status)."
+    ),
+    response_description="Requirement profiles list",
+    operation_id="listRequirementProfiles",
+)
 async def list_requirement_profiles(
     tenant_id: str,
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.REQUIREMENT_PROFILE_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -56,12 +69,27 @@ async def list_requirement_profiles(
                 {"tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_profile(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_profile(r) for r in rows],
+    ).model_dump()
 
 
 # ── POST /v1/tenants/{tenantId}/document-requirement-profiles ─────────────────
 
-@router.post("/tenants/{tenant_id}/document-requirement-profiles", status_code=201)
+@router.post(
+    "/tenants/{tenant_id}/document-requirement-profiles",
+    status_code=201,
+    summary="Create Requirement Profile",
+    description=(
+        "Create a new DRAFT Requirement Profile version for the Tenant. "
+        "Required permission: `di.requirement_profile.write`. "
+        "Returns D8 envelope with the created profile record."
+    ),
+    response_description="Created requirement profile",
+    operation_id="createRequirementProfile",
+)
 async def create_requirement_profile(
     tenant_id: str,
     body: dict[str, Any],
@@ -142,12 +170,30 @@ async def create_requirement_profile(
                 {"tid": tenant_id, "pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_profile(profile_row)
+
+    logger.info(
+        "requirement_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        profile_key=profile_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_profile(profile_row)).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/document-requirement-profiles/{profileId} ──────
 
-@router.get("/tenants/{tenant_id}/document-requirement-profiles/{profile_id}")
+@router.get(
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}",
+    summary="Get Requirement Profile",
+    description=(
+        "Fetch a single Requirement Profile version by ID. "
+        "Required permission: `di.requirement_profile.read`. "
+        "Returns D8 envelope with the profile record, or 404 if not found."
+    ),
+    response_description="Requirement profile record",
+    operation_id="getRequirementProfile",
+)
 async def get_requirement_profile(
     tenant_id: str,
     profile_id: uuid.UUID,
@@ -171,12 +217,22 @@ async def get_requirement_profile(
     if row is None:
         raise problem(404, "Requirement Profile not found",
                       ErrorCode.REQUIREMENT_PROFILE_NOT_FOUND)
-    return _fmt_profile(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_profile(row)).model_dump()
 
 
 # ── PUT /v1/tenants/{tenantId}/document-requirement-profiles/{profileId} ──────
 
-@router.put("/tenants/{tenant_id}/document-requirement-profiles/{profile_id}")
+@router.put(
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}",
+    summary="Update Draft Requirement Profile",
+    description=(
+        "Replace the description of a DRAFT Requirement Profile version. "
+        "Required permission: `di.requirement_profile.write`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Updated requirement profile",
+    operation_id="updateDraftRequirementProfile",
+)
 async def update_draft_requirement_profile(
     tenant_id: str,
     profile_id: uuid.UUID,
@@ -226,13 +282,28 @@ async def update_draft_requirement_profile(
                 {"tid": tenant_id, "pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_profile(updated)
+
+    logger.info(
+        "requirement_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_profile(updated)).model_dump()
 
 
 # ── POST /v1/tenants/{tenantId}/document-requirement-profiles/{profileId}/publish
 
 @router.post(
-    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}/publish"
+    "/tenants/{tenant_id}/document-requirement-profiles/{profile_id}/publish",
+    summary="Publish Requirement Profile",
+    description=(
+        "Publish a DRAFT Requirement Profile; atomically retires the previous PUBLISHED version of the same profileKey. "
+        "Required permission: `di.requirement_profile.publish`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Published requirement profile",
+    operation_id="publishRequirementProfile",
 )
 async def publish_requirement_profile(
     tenant_id: str,
@@ -295,12 +366,31 @@ async def publish_requirement_profile(
                 {"tid": tenant_id, "pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_profile(updated)
+
+    logger.info(
+        "requirement_profile_published",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        profile_key=profile_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_profile(updated)).model_dump()
 
 
 # ── PUT /v1/tenants/{tenantId}/subjects/{subjectId}/requirement-profile ───────
 
-@router.put("/tenants/{tenant_id}/subjects/{subject_id}/requirement-profile")
+@router.put(
+    "/tenants/{tenant_id}/subjects/{subject_id}/requirement-profile",
+    summary="Assign Requirement Profile to Subject",
+    description=(
+        "Assign one PUBLISHED Requirement Profile version to a Subject. "
+        "Supersedes any existing active assignment. "
+        "Required permission: `di.requirement_profile.assign`. "
+        "Returns D8 envelope with the assignment record."
+    ),
+    response_description="Assignment record",
+    operation_id="assignRequirementProfile",
+)
 async def assign_requirement_profile(
     tenant_id: str,
     subject_id: uuid.UUID,
@@ -356,7 +446,15 @@ async def assign_requirement_profile(
         )
         await session.commit()
 
-    return {
+    logger.info(
+        "requirement_profile_assigned",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        subject_id=str(subject_id),
+        requirement_profile_id=str(req_profile_id),
+    )
+
+    payload = {
         "assignmentId": str(assignment_id),
         "subjectId": str(subject_id),
         "requirementProfileId": str(req_profile_id),
@@ -364,6 +462,7 @@ async def assign_requirement_profile(
         "status": "ACTIVE",
         "assignedAt": now.isoformat(),
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 def _fmt_profile(r: Any) -> dict[str, Any]:

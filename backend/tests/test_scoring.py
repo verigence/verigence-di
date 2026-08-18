@@ -9,10 +9,10 @@ from decimal import Decimal
 
 import pytest
 
-pytestmark = pytest.mark.no_docker  # prevents session-scoped pg_container from running
-
 from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
+
+pytestmark = pytest.mark.no_docker  # prevents session-scoped pg_container from running
 
 
 def _field(key: str, found: FoundStatus, conf: float | None, weight: float,

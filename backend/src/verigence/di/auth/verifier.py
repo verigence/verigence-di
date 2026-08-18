@@ -3,9 +3,9 @@
 Security module JWT canonical claims:
   iss                 : verigence-security
   aud                 : verigence-platform
-  sub                 : Verigence user UUID
-  tenant_id           : Tenant UUID
-  actor_type          : USER | SERVICE | SYSTEM
+  sub                 : Verigence user/principal UUID
+  tenant_id           : Tenant UUID for Tenant-scoped actors
+  actor_type          : USER | SYSTEM | SERVICE_INTEGRATION
   roles[]             : Tenant-scoped role names (informational)
   permissions[]       : Effective permissions (authoritative)
   device_id           : Registered device UUID (USER actors)
@@ -32,21 +32,21 @@ from verigence.di.domain.enums import ActorType
 logger = logging.getLogger(__name__)
 
 # ── Security JWT contract constants ───────────────────────────────────────────
-_ISSUER    = "verigence-security"
-_AUDIENCE  = "verigence-platform"
+_ISSUER = "verigence-security"
+_AUDIENCE = "verigence-platform"
 
-_CLAIM_TENANT_ID        = "tenant_id"
-_CLAIM_ACTOR_TYPE       = "actor_type"
-_CLAIM_ROLES            = "roles"
-_CLAIM_PERMISSIONS      = "permissions"
-_CLAIM_DEVICE_ID        = "device_id"
+_CLAIM_TENANT_ID = "tenant_id"
+_CLAIM_ACTOR_TYPE = "actor_type"
+_CLAIM_ROLES = "roles"
+_CLAIM_PERMISSIONS = "permissions"
+_CLAIM_DEVICE_ID = "device_id"
 _CLAIM_ACCESS_SESSION_ID = "access_session_id"
-_CLAIM_LOCATION_ID      = "location_id"
+_CLAIM_LOCATION_ID = "location_id"
 
 # Mock defaults
 _MOCK_TENANT = "mock-tenant-id"
-_MOCK_ACTOR  = "mock-actor-id"
-_MOCK_ROLE   = "TENANT_ADMIN"
+_MOCK_ACTOR = "mock-actor-id"
+_MOCK_ROLE = "TENANT_ADMIN"
 
 
 def _permissions_for_roles(roles: list[str]) -> frozenset[str]:
@@ -69,6 +69,7 @@ def verify_token(token: str, *, system: bool = False) -> ActorPrincipal | None:
 
 def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
     from verigence.di.settings import get_settings
+
     settings = get_settings()
 
     # ── Mock token — local and dev only, never production ─────────────────────
@@ -78,17 +79,21 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
             return None
         # "mock.<tenant>.<actor>.<ROLE1>[.<ROLE2>...]"
         parts = token.split(".", maxsplit=3)
-        tenant        = parts[1] if len(parts) > 1 else _MOCK_TENANT
-        actor         = parts[2] if len(parts) > 2 else _MOCK_ACTOR
+        tenant = parts[1] if len(parts) > 1 else _MOCK_TENANT
+        actor = parts[2] if len(parts) > 2 else _MOCK_ACTOR
         raw_roles_str = parts[3] if len(parts) > 3 else _MOCK_ROLE
-        roles = [r.strip().upper() for r in raw_roles_str.replace(",", ".").split(".") if r.strip()]
+        roles = [
+            r.strip().upper()
+            for r in raw_roles_str.replace(",", ".").split(".")
+            if r.strip()
+        ]
         if not roles:
             roles = [_MOCK_ROLE]
         perms = _permissions_for_roles(roles)
         if system:
             return ActorPrincipal(
                 actor_id=actor,
-                tenant_id="",
+                tenant_id=tenant,
                 actor_type=ActorType.SYSTEM,
                 roles=frozenset(roles),
                 permissions=perms,
@@ -130,33 +135,47 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
         return None
 
     # ── Extract canonical claims ───────────────────────────────────────────────
-    actor_id: str  = claims.get("sub", "")
+    actor_id: str = claims.get("sub", "")
     tenant_id: str = claims.get(_CLAIM_TENANT_ID, "")
-    raw_actor_type = claims.get(_CLAIM_ACTOR_TYPE, "USER")
+    raw_actor_type = claims.get(_CLAIM_ACTOR_TYPE)
     raw_roles: list[str] = claims.get(_CLAIM_ROLES, [])
     raw_perms: list[str] = claims.get(_CLAIM_PERMISSIONS, [])
-    device_id: str | None        = claims.get(_CLAIM_DEVICE_ID)
+    device_id: str | None = claims.get(_CLAIM_DEVICE_ID)
     access_session_id: str | None = claims.get(_CLAIM_ACCESS_SESSION_ID)
-    location_id: str | None      = claims.get(_CLAIM_LOCATION_ID)
+    location_id: str | None = claims.get(_CLAIM_LOCATION_ID)
 
     if not actor_id:
         logger.warning("jwt_missing_sub")
         return None
 
-    # System tokens must NOT carry tenant_id
-    if system and tenant_id:
-        logger.warning("jwt_system_token_has_tenant_id", extra={"tenant_id": tenant_id})
-        return None
-
-    # Tenant tokens must carry tenant_id
-    if not system and not tenant_id:
-        logger.warning("jwt_missing_tenant_id", extra={"actor_id": actor_id})
+    if not isinstance(raw_actor_type, str) or not raw_actor_type:
+        logger.warning("jwt_missing_actor_type", extra={"actor_id": actor_id})
         return None
 
     try:
         actor_type = ActorType(raw_actor_type)
     except ValueError:
-        actor_type = ActorType.USER
+        logger.warning(
+            "jwt_unknown_actor_type",
+            extra={"actor_id": actor_id, "actor_type": raw_actor_type},
+        )
+        return None
+
+    # Dedicated system endpoints require a canonical SYSTEM actor. Security may
+    # issue SYSTEM identities with a Tenant scope, so tenant_id is allowed here.
+    if system:
+        if actor_type is not ActorType.SYSTEM:
+            logger.warning(
+                "jwt_system_endpoint_wrong_actor_type",
+                extra={"actor_id": actor_id, "actor_type": actor_type.value},
+            )
+            return None
+    else:
+        # Normal DI business/Admin operations are Tenant-scoped for all canonical
+        # actor types (USER, SYSTEM and SERVICE_INTEGRATION).
+        if not tenant_id:
+            logger.warning("jwt_missing_tenant_id", extra={"actor_id": actor_id})
+            return None
 
     return ActorPrincipal(
         actor_id=actor_id,

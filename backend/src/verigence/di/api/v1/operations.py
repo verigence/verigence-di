@@ -10,20 +10,34 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Operations"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/document-exceptions ───────────────────────────
 
-@router.get("/tenants/{tenant_id}/document-exceptions")
+@router.get(
+    "/tenants/{tenant_id}/document-exceptions",
+    summary="Get Tenant Document Exceptions",
+    description=(
+        "List all exception documents across the Tenant — documents in NOT_FIT, CORRUPT, "
+        "UPLOAD_FAILED, RETRY_PENDING, or FAILED state. Filterable by subjectId and actor. "
+        "Required permission: `di.operations.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Exception document list",
+    operation_id="getTenantDocumentExceptions",
+)
 async def get_tenant_document_exceptions(
     tenant_id: str,
     subject_id: str | None = None,
@@ -48,7 +62,7 @@ async def get_tenant_document_exceptions(
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
-                text(f"""
+                text("""
                     SELECT d.document_id, d.subject_id, d.upload_status,
                            d.processing_status, d.confirmation_status,
                            d.upload_issue_code, d.processing_failure_code,
@@ -92,7 +106,7 @@ async def get_tenant_document_exceptions(
             )
         ).scalar()
 
-    return {
+    payload = {
         "items": [
             {
                 "documentId": str(r["document_id"]),
@@ -110,18 +124,30 @@ async def get_tenant_document_exceptions(
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/upload-quality ─────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/upload-quality")
+@router.get(
+    "/tenants/{tenant_id}/upload-quality",
+    summary="Get Upload Quality Metrics",
+    description=(
+        "Upload quality metrics grouped by uploader actor — total, fit, not-fit, corrupt, "
+        "upload-failed counts and first-pass fit rate. Filterable by actor and date range. "
+        "Required permission: `di.operations.read`. "
+        "Returns D8 envelope with per-actor metrics array."
+    ),
+    response_description="Upload quality metrics",
+    operation_id="getUploadQuality",
+)
 async def get_upload_quality(
     tenant_id: str,
     uploaded_by_actor_id: str | None = None,
     from_: str | None = None,
     to: str | None = None,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.OPERATIONS_READ)),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Upload-quality metrics grouped by uploader."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -137,8 +163,8 @@ async def get_upload_quality(
                     FROM docintel.documents
                     WHERE tenant_id = :tid
                       AND (:actor_id IS NULL OR uploaded_by_actor_id = :actor_id)
-                      AND (:from_dt IS NULL OR registered_at_utc >= :from_dt::timestamptz)
-                      AND (:to_dt IS NULL OR registered_at_utc <= :to_dt::timestamptz)
+                      AND (:from_dt IS NULL OR registered_at_utc >= CAST(:from_dt AS timestamptz))
+                      AND (:to_dt IS NULL OR registered_at_utc <= CAST(:to_dt AS timestamptz))
                     GROUP BY uploaded_by_actor_id
                     ORDER BY total DESC
                 """),
@@ -151,7 +177,7 @@ async def get_upload_quality(
             )
         ).mappings().all()
 
-    return [
+    items = [
         {
             "uploadedByActorId": r["uploaded_by_actor_id"],
             "total": r["total"],
@@ -163,3 +189,4 @@ async def get_upload_quality(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
