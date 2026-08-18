@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +22,7 @@ from verigence.di.domain.enums import (
 from verigence.di.storage.adapter import StorageAdapter
 
 
-def _row_to_dict(row) -> dict:  # type: ignore[type-arg]
+def _row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
     """Convert a SQLAlchemy mapping row to a plain dict.
 
     D11: only fields needed for the public API response are included.
