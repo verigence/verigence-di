@@ -100,7 +100,7 @@ def _rule_image_min_dimensions(
     applied = {"min_width": min_width, "min_height": min_height}
 
     try:
-        from PIL import Image  # type: ignore[import]
+        from PIL import Image
         img = Image.open(io.BytesIO(data))
         w, h = img.size
         outcome = "PASS" if w >= min_width and h >= min_height else "FAIL"
@@ -136,8 +136,8 @@ def _rule_image_blur_score(
     applied = {"min_variance": min_variance}
 
     try:
-        import cv2  # type: ignore[import]
-        import numpy as np  # type: ignore[import]
+        import cv2
+        import numpy as np
 
         img_array = np.frombuffer(data, dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
@@ -184,7 +184,7 @@ def _rule_pdf_page_count(
     applied = {"max_pages": max_pages}
 
     try:
-        from pypdf import PdfReader  # type: ignore[import]
+        from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data), strict=False)
         page_count = len(reader.pages)
         outcome = "PASS" if page_count <= max_pages else "FAIL"
@@ -228,7 +228,7 @@ def get_rule(implementation_key: str) -> RuleFn | None:
 def _detect_mime(data: bytes) -> str:
     """Detect MIME type from bytes using python-magic, then header sniff."""
     try:
-        import magic  # type: ignore[import]
+        import magic
         return magic.from_buffer(data[:2048], mime=True)
     except Exception:
         pass
