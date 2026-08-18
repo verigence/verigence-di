@@ -361,7 +361,7 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
 
 # ── Gemini REST API call ───────────────────────────────────────────────────────
 
-def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict:
+def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict[str, Any]:
     effective_mime = mime_type if mime_type else "application/octet-stream"
     image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
     return {
