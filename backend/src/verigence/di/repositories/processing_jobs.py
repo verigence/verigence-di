@@ -137,6 +137,7 @@ async def retry_job(
     *,
     tenant_id: str,
     processing_job_id: uuid.UUID,
+    document_id: uuid.UUID,
     error_code: str | None = None,
     error_detail: str | None = None,
 ) -> None:
@@ -162,6 +163,24 @@ async def retry_job(
             "error_detail": error_detail,
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
+        },
+    )
+    await session.execute(
+        text("""
+            UPDATE docintel.documents
+            SET processing_status = 'RETRY_PENDING',
+                processing_failure_code = :error_code,
+                processing_failure_detail = :error_detail,
+                updated_at_utc = :now
+            WHERE tenant_id = :tenant_id
+              AND document_id = :doc_id
+        """),
+        {
+            "now": now,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "tenant_id": tenant_id,
+            "doc_id": document_id,
         },
     )
 
