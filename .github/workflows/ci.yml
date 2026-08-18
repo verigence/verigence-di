@@ -1,10 +1,10 @@
-name: DI CI
+name: CI
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [main]
   push:
-    branches: [dev]
+    branches: [main]
   workflow_dispatch:
     inputs:
       run_extended:
@@ -22,20 +22,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Tier 0: Lint + unit tests (no DB, no network) ────────────────────────────
   quality:
-    name: Lint + Unit Tests
-    runs-on: ubuntu-latest
+    name: Backend — lint, typecheck, test
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -47,7 +47,7 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src tests
 
-      - name: Import smoke check (catches ImportError at app startup)
+      - name: Import smoke check
         env:
           DI_SECRET_KEY: "ci-import-check-key-32-characters!!"
           DI_DATABASE_URL: "postgresql+asyncpg://user:pass@localhost/db"
@@ -57,6 +57,40 @@ jobs:
 
       - name: Ruff
         run: ruff check .
+
+      - name: Determine changed source files
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+
+          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
+            find backend/src -type f -name '*.py' | sed 's#^backend/##' | sort > /tmp/changed-source-files.txt
+          else
+            git diff --name-only --diff-filter=ACMRT "$base"...HEAD -- backend/src \
+              | grep -E '^backend/src/.*\.py$' \
+              | sed 's#^backend/##' \
+              | sort -u > /tmp/changed-source-files.txt || true
+          fi
+
+          echo 'Source files changed in this revision:'
+          cat /tmp/changed-source-files.txt || true
+
+      - name: Type check changed source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < /tmp/changed-source-files.txt
+          if (( ${#files[@]} == 0 )); then
+            echo 'No changed source files to type check.'
+            exit 0
+          fi
+          mypy "${files[@]}"
 
       - name: Run unit tests
         env:
@@ -74,10 +108,9 @@ jobs:
       - name: Verify installed dependency consistency
         run: python -m pip check
 
-  # ── Tier 1: Smoke tests (fast, mandatory, blocks deploy) ─────────────────────
   smoke:
     name: Tier 1 Smoke Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: quality
     defaults:
@@ -85,10 +118,9 @@ jobs:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -104,7 +136,6 @@ jobs:
           DI_ENV: dev
           DI_DOCAI_MOCK: "true"
           DI_WORKER_ENABLED: "false"
-          # R2 test bucket
           DI_STORAGE_PROVIDER: r2
           DI_STORAGE_BUCKET: verigence-di-test
           DI_STORAGE_ENDPOINT: ${{ secrets.TEST_R2_ENDPOINT }}
@@ -115,10 +146,45 @@ jobs:
           TEST_JWT_PRIVATE_KEY: ${{ secrets.TEST_JWT_PRIVATE_KEY }}
         run: PYTHONPATH=src python -m pytest -m smoke --no-cov -q
 
-  # ── Tier 2: Extended tests (on demand only — workflow_dispatch) ───────────────
+  frontend:
+    name: Frontend — build check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect implemented operator UI
+        id: ui
+        shell: bash
+        run: |
+          if [[ -f ops-ui/package.json && -f ops-ui/package-lock.json ]]; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+            echo 'Operator UI is currently a placeholder; frontend build is not applicable.'
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.ui.outputs.exists == 'true'
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ops-ui/package-lock.json
+
+      - name: Install dependencies
+        if: steps.ui.outputs.exists == 'true'
+        working-directory: ops-ui
+        run: npm ci
+
+      - name: TypeScript build check
+        if: steps.ui.outputs.exists == 'true'
+        working-directory: ops-ui
+        run: npm run build
+
   extended:
     name: Tier 2 Extended Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -128,10 +194,9 @@ jobs:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
