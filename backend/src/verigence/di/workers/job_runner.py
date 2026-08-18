@@ -444,20 +444,30 @@ async def _execute_steps(
     # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
     # First persist the raw extracted_facts, then normalize them
     field_result_map: dict[str, FieldResult] = {fr.field_key: fr for fr in field_results}
-    profile_field_map: dict[str, dict] = {pf["canonical_field_key"]: pf for pf in profile_fields}
+    profile_field_map: dict[str, dict[str, Any]] = {
+        pf["canonical_field_key"]: pf for pf in profile_fields
+    }
 
     extracted_inputs: list[ExtractedFieldInput] = []
     fact_id_map: dict[str, uuid.UUID] = {}  # field_key → extracted_fact_id
 
     for pf in profile_fields:
         fkey = pf["canonical_field_key"]
-        fr = field_result_map.get(fkey)
+        field_result = field_result_map.get(fkey)
         fact_id = uuid.uuid4()
         fact_id_map[fkey] = fact_id
 
-        found_status = fr.found_status.value if fr else FoundStatus.NOT_FOUND.value
-        raw_value = fr.raw_value if fr else None
-        confidence = float(fr.confidence) if fr and fr.confidence is not None else None
+        found_status = (
+            field_result.found_status.value
+            if field_result
+            else FoundStatus.NOT_FOUND.value
+        )
+        raw_value = field_result.raw_value if field_result else None
+        confidence = (
+            float(field_result.confidence)
+            if field_result and field_result.confidence is not None
+            else None
+        )
 
         await session.execute(
             text("""
@@ -482,8 +492,12 @@ async def _execute_steps(
                 "found_status": found_status,
                 "raw_value": raw_value,
                 "confidence": confidence,
-                "page_no": fr.page_no if fr else None,
-                "evidence_region": json.dumps(fr.evidence_region) if fr and fr.evidence_region else "null",
+                "page_no": field_result.page_no if field_result else None,
+                "evidence_region": (
+                    json.dumps(field_result.evidence_region)
+                    if field_result and field_result.evidence_region
+                    else "null"
+                ),
                 "inv_id": extract_invocation_id,
                 "now": now,
             },
@@ -517,10 +531,18 @@ async def _execute_steps(
         fkey = pf["canonical_field_key"]
         fact_id = fact_id_map[fkey]
         norm = norm_map.get(fact_id)
-        fr = field_result_map.get(fkey)
+        field_result = field_result_map.get(fkey)
 
-        norm_value = norm.normalized_value if norm else (fr.normalized_value if fr else None)
-        conf_score = float(fr.confidence) if fr and fr.confidence is not None else None
+        norm_value = (
+            norm.normalized_value
+            if norm
+            else (field_result.normalized_value if field_result else None)
+        )
+        conf_score = (
+            float(field_result.confidence)
+            if field_result and field_result.confidence is not None
+            else None
+        )
 
         await session.execute(
             text("""
@@ -689,7 +711,10 @@ async def _execute_steps(
 
 # ── DB helper functions ───────────────────────────────────────────────────────
 
-async def _get_tenant_settings(session: AsyncSession, tenant_id: str) -> dict:
+async def _get_tenant_settings(
+    session: AsyncSession,
+    tenant_id: str,
+) -> dict[str, Any]:
     row = (
         await session.execute(
             text("""
@@ -769,7 +794,7 @@ async def _get_requirement_keys(
 
 async def _form_candidate_set(
     session: AsyncSession, tenant_id: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Implements DI_CLASSIFICATION_v2.2.md §2 candidate-set algorithm steps 1-4.
 
@@ -817,15 +842,15 @@ async def _form_candidate_set(
 
 
 def _build_candidate_snapshot(
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     req_keys: set[str],
     hint_key: str | None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Build the JSON snapshot persisted on processing_runs.classification_candidate_set.
     Order per DI_CLASSIFICATION_v2.2 §2 step 9: hint first, then requirement, then rest.
     """
-    snapshot = []
+    snapshot: list[dict[str, Any]] = []
     for c in candidates:
         snapshot.append({
             "documentTypeId": str(c["document_type_id"]),
@@ -844,9 +869,9 @@ def _build_candidate_snapshot(
 
 def _accept_classification(
     classifications: list[ClassificationCandidate],
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     acceptance_score: Decimal,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """
     DI_CLASSIFICATION_v2.2 §2 step 11:
     Accept exactly one candidate above acceptance_score.
@@ -869,7 +894,7 @@ async def _persist_classifications(
     processing_run_id: uuid.UUID,
     document_id: uuid.UUID,
     classifications: list[ClassificationCandidate],
-    accepted: dict,
+    accepted: dict[str, Any],
     profile_id: uuid.UUID,
 ) -> None:
     now = datetime.now(UTC)
@@ -943,7 +968,7 @@ async def _load_original_artifact(
 async def _load_profile_fields(
     session: AsyncSession,
     profile_id: uuid.UUID,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Load enabled extraction profile fields with canonical field keys."""
     rows = (
         await session.execute(
@@ -998,7 +1023,7 @@ async def _get_physical_form_type(
 
 
 def _build_scored_fields(
-    profile_fields: list[dict],
+    profile_fields: list[dict[str, Any]],
     field_result_map: dict[str, FieldResult],
 ) -> list[ScoredField]:
     scored = []
@@ -1006,9 +1031,9 @@ def _build_scored_fields(
         if not pf["score_included"]:
             continue
         fkey = pf["canonical_field_key"]
-        fr = field_result_map.get(fkey)
-        found = fr.found_status if fr else FoundStatus.NOT_FOUND
-        conf = fr.confidence if fr else None
+        field_result = field_result_map.get(fkey)
+        found = field_result.found_status if field_result else FoundStatus.NOT_FOUND
+        conf = field_result.confidence if field_result else None
         scored.append(ScoredField(
             field_key=fkey,
             found_status=found,
@@ -1054,7 +1079,7 @@ async def _update_invocation(
     invocation_id: uuid.UUID,
     outcome: str,
     provider_request_id: str | None = None,
-    usage_metrics: dict | None = None,
+    usage_metrics: dict[str, Any] | None = None,
     error_detail: str | None = None,
 ) -> None:
     now = datetime.now(UTC)
