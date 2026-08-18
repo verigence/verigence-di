@@ -403,7 +403,7 @@ async def put_quality_policy(
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.TENANT_CONFIG_WRITE)),
 ) -> dict[str, Any]:
     """Replace the Tenant quality policy array."""
-    rules: list[dict] = body.get("qualityPolicy") or []
+    rules: list[dict[str, Any]] = body.get("qualityPolicy") or []
     now = datetime.now(UTC)
     async with tenant_session(tenant_id) as session:
         await session.execute(
