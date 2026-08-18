@@ -136,8 +136,8 @@ async def test_create_subject_returns_201(
     )
     assert resp.status_code == 201
     body = resp.json()
-    assert "subjectId" in body
-    assert body["subjectType"] == "PERSON"
+    assert "subjectId" in body["data"]
+    assert body["data"]["subjectType"] == "PERSON"
 
 
 @pytest.mark.smoke
@@ -159,7 +159,7 @@ async def test_get_subject_returns_created_subject(
         json={"subjectType": "PERSON", "displayName": "Smoke Get Subject"},
     )
     assert create_resp.status_code == 201
-    subject_id = create_resp.json()["subjectId"]
+    subject_id = create_resp.json()["data"]["subjectId"]
 
     # Retrieve
     get_resp = await api_client.get(
@@ -168,9 +168,9 @@ async def test_get_subject_returns_created_subject(
     )
     assert get_resp.status_code == 200
     body = get_resp.json()
-    assert body["subjectId"] == subject_id
-    assert body["subjectType"] == "PERSON"
-    assert body["displayName"] == "Smoke Get Subject"
+    assert body["data"]["subjectId"] == subject_id
+    assert body["data"]["subjectType"] == "PERSON"
+    assert body["data"]["displayName"] == "Smoke Get Subject"
 
 
 # ── Problem JSON shape ────────────────────────────────────────────────────────
