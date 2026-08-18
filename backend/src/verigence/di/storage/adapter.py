@@ -162,7 +162,7 @@ class StorageAdapter(abc.ABC):
         """Write a stream to object storage and return metadata."""
 
     @abc.abstractmethod
-    async def get_stream(self, logical_key: str) -> AsyncIterator[bytes]:
+    def get_stream(self, logical_key: str) -> AsyncIterator[bytes]:
         """Stream bytes from object storage."""
 
     @abc.abstractmethod
@@ -218,15 +218,15 @@ class S3StorageAdapter(StorageAdapter):
     ) -> StorageMetadata:
         import uuid
 
-        import aioboto3  # type: ignore[import]
+        import aioboto3
 
         # Normalise: accept both sync IO (BytesIO) and async iterators
         if hasattr(stream, "read"):
             # Sync IO object — wrap in BytesIO if not already, then read
-            buffer: io.BytesIO = stream if isinstance(stream, io.BytesIO) else io.BytesIO(stream.read())  # type: ignore[assignment]
+            buffer: io.BytesIO = stream if isinstance(stream, io.BytesIO) else io.BytesIO(stream.read())
         else:
             buffer = io.BytesIO()
-            async for chunk in stream:  # type: ignore[union-attr]
+            async for chunk in stream:
                 buffer.write(chunk)
         size = buffer.tell()
         buffer.seek(0)
@@ -265,7 +265,7 @@ class S3StorageAdapter(StorageAdapter):
 
     async def exists(self, logical_key: str) -> bool:
         import aioboto3
-        from botocore.exceptions import ClientError  # type: ignore[import]
+        from botocore.exceptions import ClientError
 
         session = aioboto3.Session()
         async with session.client("s3", **self._client_kwargs()) as s3:
