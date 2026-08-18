@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 import traceback
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -100,7 +102,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     @asynccontextmanager
-    async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
+    async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         """Start background worker + EOD scheduler on startup; stop on shutdown."""
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
@@ -136,7 +138,7 @@ def create_app() -> FastAPI:
     )
 
     # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
-    def custom_openapi() -> dict:
+    def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
@@ -223,7 +225,10 @@ def create_app() -> FastAPI:
 
     # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
-    async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
+    async def correlation_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
         correlation_id = (
             incoming
@@ -309,7 +314,7 @@ def create_app() -> FastAPI:
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
         try:
-            import sentry_sdk  # type: ignore[import]
+            import sentry_sdk
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
