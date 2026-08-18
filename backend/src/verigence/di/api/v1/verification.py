@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -133,7 +134,7 @@ async def verify_subject_document(
     """
     now = datetime.now(UTC)
     remarks: str | None = body.get("remarks")
-    corrections: list[dict] = body.get("fieldCorrections") or []
+    corrections: list[dict[str, Any]] = body.get("fieldCorrections") or []
 
     async with tenant_session(tenant_id) as session:
         doc_row = (
@@ -273,7 +274,7 @@ async def verify_subject_document(
     return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
-def _format_document(row: dict) -> dict[str, Any]:
+def _format_document(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "documentId": str(row["document_id"]),
         "subjectId": str(row["subject_id"]) if row.get("subject_id") else None,
