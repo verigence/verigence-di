@@ -8,7 +8,7 @@ D12: New /document-types summary endpoint.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
@@ -81,7 +81,7 @@ def _upload_error_message(internal_status: UploadStatus, issue_code: str | None)
     return "File did not meet quality requirements"
 
 
-def _doc_data(doc: dict) -> DocumentData:
+def _doc_data(doc: dict[str, Any]) -> DocumentData:
     """Build slim public DocumentData from internal doc dict."""
     internal_upload = doc["upload_status"]
     pub_upload = public_upload_status(internal_upload)
@@ -397,7 +397,6 @@ async def get_subject_document_content(
 
     raw_key: str = art_row[0] or ""
     filename = raw_key.split("/")[-1] if raw_key else f"{documentId}"
-
     headers: dict[str, str] = {
         "Content-Disposition": f'attachment; filename="{filename}"',
     }
