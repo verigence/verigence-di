@@ -241,7 +241,7 @@ def _check_structure(data: bytes, detected_mime: str) -> tuple[bool, str]:
 
 def _check_pdf(data: bytes) -> tuple[bool, str]:
     try:
-        from pypdf import PdfReader  # type: ignore[import]
+        from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data), strict=False)
         # Access pages to confirm parseable
         _ = len(reader.pages)
@@ -252,7 +252,7 @@ def _check_pdf(data: bytes) -> tuple[bool, str]:
 
 def _check_image(data: bytes) -> tuple[bool, str]:
     try:
-        from PIL import Image  # type: ignore[import]
+        from PIL import Image
         img = Image.open(io.BytesIO(data))
         img.verify()  # raises if corrupt
         return True, ""
