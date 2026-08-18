@@ -404,7 +404,7 @@ async def intake_document(
     _duration_ms = round((_time3.monotonic() - _intake_start) * 1000, 1)
     failed_rules = [
         r.rule_key for r in (validator_result.quality_results or [])
-        if not r.passed
+        if r.outcome == "FAIL"
     ] if hasattr(validator_result, "quality_results") else []
 
     if validator_result.upload_status == UploadStatus.FIT:
@@ -431,7 +431,7 @@ async def intake_document(
 def _detect_mime(data: bytes, filename: str) -> str:
     """Detect MIME type from file bytes using python-magic or fallback."""
     try:
-        import magic  # type: ignore[import]
+        import magic
         return magic.from_buffer(data[:2048], mime=True)
     except Exception:
         pass
