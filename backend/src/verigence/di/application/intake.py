@@ -292,7 +292,6 @@ async def intake_document(
             },
         )
         storage_id = storage_meta.storage_id
-        import time as _time2
         log.info(
             "storage_written",
             document_id=str(document_id),
