@@ -27,11 +27,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import]
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.repositories.backout import sweep_expired_backout_jobs
@@ -78,7 +79,7 @@ class EODRetryScheduler:
         logger.info("eod_retry_scheduler_stopped")
 
 
-async def _run_eod_check(session_factory: async_sessionmaker) -> None:
+async def _run_eod_check(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Periodic check (every 60 s):
     0. Reclaim stale RUNNING jobs (lease timeout exceeded).
     1. Sweep expired backout_jobs rows (D24) — runs on every tick.
@@ -148,7 +149,7 @@ def _is_eod_window(now_utc: datetime, tz_name: str, eod_time: dtime) -> bool:
         tz = zoneinfo.ZoneInfo(tz_name)
     except (ImportError, Exception):
         try:
-            from dateutil import tz as dateutil_tz  # type: ignore[import]
+            from dateutil import tz as dateutil_tz
             tz_obj = dateutil_tz.gettz(tz_name)
             if tz_obj is None:
                 logger.warning("unknown_timezone", tz_name=tz_name)
@@ -264,7 +265,7 @@ async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
         """),
         {"cutoff": now_utc - timedelta(minutes=lease_minutes)},
     )
-    return result.rowcount
+    return cast(CursorResult[Any], result).rowcount
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
