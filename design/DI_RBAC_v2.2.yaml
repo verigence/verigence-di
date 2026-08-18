@@ -1,0 +1,179 @@
+version: '2.2'
+tenantJwt:
+  audience: verigence-document-intelligence
+  requiredStandardClaims:
+  - iss
+  - sub
+  - aud
+  - exp
+  - iat
+  requiredCanonicalClaims:
+  - tenant_id
+  - actor_id
+  - actor_type
+  - roles
+  - permissions
+  conditionalClaims:
+    device_id: Required when actor_type=USER; must match ACTIVE registered_devices row for the actor/Tenant.
+  actorTypes:
+  - USER
+  - SERVICE
+  - SYSTEM
+  authorization: permissions is authoritative for endpoint checks; roles are named default bundles.
+systemJwt:
+  audience: verigence-document-intelligence-system
+  requiredStandardClaims:
+  - iss
+  - sub
+  - aud
+  - exp
+  - iat
+  requiredCanonicalClaims:
+  - actor_id
+  - actor_type
+  - roles
+  - permissions
+  tenant_id: Must be absent for platform-scoped token.
+permissions:
+- key: subject:create
+  description: Create a Verigence Subject.
+- key: subject:read
+  description: Read/search Subjects.
+- key: document:upload
+  description: Upload/replace evidence for an existing Subject.
+- key: document:read
+  description: Read Document metadata/completeness/exception state.
+- key: document:content:read
+  description: Read original Document bytes.
+- key: document:fields:read
+  description: Read extracted/accepted field values.
+- key: document:quality:read
+  description: Read deterministic quality results.
+- key: verification:read
+  description: Read verification queue/state.
+- key: verification:write
+  description: Perform one human verification/correction action.
+- key: entity_link:read
+  description: Read optional external entity links.
+- key: entity_link:write
+  description: Create optional external entity links.
+- key: operations:read
+  description: Read Tenant exception and upload-quality operational views.
+- key: unassigned_document:read
+  description: Read Tenant-unassigned intake/document evidence.
+- key: unassigned_document:assign
+  description: Assign an unassigned Document to a Subject.
+- key: requirement_profile:read
+  description: Read Requirement Profiles.
+- key: requirement_profile:write
+  description: Create/update DRAFT Requirement Profiles.
+- key: requirement_profile:publish
+  description: Publish a Requirement Profile.
+- key: requirement_profile:assign
+  description: Assign a published Requirement Profile to a Subject.
+- key: extraction_config:read
+  description: Read Document Types, Extraction Profiles and rule catalogues.
+- key: extraction_config:write
+  description: Create/update Document Types/DRAFT Extraction Profiles.
+- key: extraction_config:publish
+  description: Publish Extraction Profiles.
+- key: quality_config:read
+  description: Read quality policy/rule catalogue.
+- key: quality_config:write
+  description: Update Tenant quality policy.
+- key: tenant_config:read
+  description: Read Tenant runtime settings/retention configuration.
+- key: tenant_config:write
+  description: Update Tenant runtime settings/retention configuration.
+- key: subject_matching:write
+  description: Register verified Subject identifiers/channel mappings.
+- key: platform:whatsapp:admin
+  description: Manage system WhatsApp routes and pre-Tenant quarantine.
+roles:
+- role: DOCUMENT_OPERATOR
+  permissions:
+  - subject:create
+  - subject:read
+  - document:upload
+  - document:read
+  - document:content:read
+  - document:fields:read
+  - document:quality:read
+  - entity_link:read
+  - entity_link:write
+- role: DOCUMENT_VERIFIER
+  permissions:
+  - subject:read
+  - document:read
+  - document:content:read
+  - document:fields:read
+  - document:quality:read
+  - verification:read
+  - verification:write
+- role: OPERATIONS_VIEWER
+  permissions:
+  - subject:read
+  - document:read
+  - verification:read
+  - operations:read
+- role: UNASSIGNED_INTAKE_OPERATOR
+  permissions:
+  - subject:read
+  - document:read
+  - document:content:read
+  - document:fields:read
+  - document:quality:read
+  - unassigned_document:read
+  - unassigned_document:assign
+- role: CONFIGURATION_ADMIN
+  permissions:
+  - requirement_profile:read
+  - requirement_profile:write
+  - requirement_profile:publish
+  - requirement_profile:assign
+  - extraction_config:read
+  - extraction_config:write
+  - extraction_config:publish
+  - quality_config:read
+  - quality_config:write
+  - tenant_config:read
+- role: TENANT_ADMIN
+  permissions:
+  - document:content:read
+  - document:fields:read
+  - document:quality:read
+  - document:read
+  - document:upload
+  - entity_link:read
+  - entity_link:write
+  - extraction_config:publish
+  - extraction_config:read
+  - extraction_config:write
+  - operations:read
+  - quality_config:read
+  - quality_config:write
+  - requirement_profile:assign
+  - requirement_profile:publish
+  - requirement_profile:read
+  - requirement_profile:write
+  - subject:create
+  - subject:read
+  - subject_matching:write
+  - tenant_config:read
+  - tenant_config:write
+  - unassigned_document:assign
+  - unassigned_document:read
+  - verification:read
+  - verification:write
+- role: SERVICE_INTEGRATION
+  permissions:
+  - subject:create
+  - subject:read
+  - document:upload
+  - document:read
+  - document:fields:read
+  - entity_link:read
+  - entity_link:write
+- role: PLATFORM_ADMIN
+  permissions:
+  - platform:whatsapp:admin

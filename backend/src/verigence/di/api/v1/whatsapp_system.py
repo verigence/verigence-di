@@ -20,21 +20,33 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_system_actor
-from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.auth.permissions import Permission
+from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.errors import ErrorCode, problem
-from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(tags=["WhatsApp"])
+logger = structlog.get_logger(__name__)
 
 
 # ── POST /v1/system/whatsapp/routes ──────────────────────────────────────────
 
-@router.post("/v1/system/whatsapp/routes")
+@router.post(
+    "/v1/system/whatsapp/routes",
+    summary="Put WhatsApp Route",
+    description=(
+        "Configure or update a WhatsApp destination/account route mapping to a Tenant. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with the route record. Phase 1: stores route only."
+    ),
+    response_description="Route record",
+    operation_id="putWhatsappRoute",
+)
 async def put_whatsapp_route(
     body: dict[str, Any],
     actor: ActorPrincipal = Depends(require_system_actor),
@@ -60,14 +72,14 @@ async def put_whatsapp_route(
     route_id = uuid.uuid4()
 
     # Use a raw non-tenant session (system scope has no app.tenant_id)
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            await session.execute(
-                text("""
+    async with factory() as session, session.begin():
+        await session.execute(
+            text("""
                     INSERT INTO docintel.whatsapp_routes
                         (route_id, destination_id, tenant_id, system_actor_id,
                          status, created_at_utc, updated_at_utc)
@@ -78,25 +90,43 @@ async def put_whatsapp_route(
                         status = 'ACTIVE',
                         updated_at_utc = EXCLUDED.updated_at_utc
                 """),
-                {
-                    "rid": route_id, "dest": destination_id,
-                    "tid": tenant_id, "said": system_actor_id or None,
-                    "now": now,
-                },
-            )
+            {
+                "rid": route_id, "dest": destination_id,
+                "tid": tenant_id, "said": system_actor_id or None,
+                "now": now,
+            },
+        )
 
-    return {
+    logger.info(
+        "whatsapp_sender_mapped",
+        actor_id=actor.actor_id,
+        destination_id=destination_id,
+        tenant_id=tenant_id,
+    )
+
+    payload = {
         "routeId": str(route_id),
         "destinationId": destination_id,
         "tenantId": tenant_id,
         "systemActorId": system_actor_id or None,
         "status": "ACTIVE",
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/integrations/whatsapp/webhook ────────────────────────────────────
 
-@router.post("/v1/integrations/whatsapp/webhook")
+@router.post(
+    "/v1/integrations/whatsapp/webhook",
+    summary="WhatsApp Webhook",
+    description=(
+        "Receive inbound WhatsApp message/media webhook events from the provider. "
+        "No JWT required — provider HMAC signature verification is used instead (Phase 2). "
+        "Phase 1: acknowledges receipt with HTTP 200. Full intake processing is Phase 2."
+    ),
+    include_in_schema=True,
+    operation_id="whatsappWebhook",
+)
 async def whatsapp_webhook(request: Request) -> Response:
     """Receive inbound WhatsApp message/media webhook.
 
@@ -109,7 +139,17 @@ async def whatsapp_webhook(request: Request) -> Response:
 
 # ── GET /v1/system/whatsapp/quarantine ────────────────────────────────────────
 
-@router.get("/v1/system/whatsapp/quarantine")
+@router.get(
+    "/v1/system/whatsapp/quarantine",
+    summary="Get WhatsApp Quarantine",
+    description=(
+        "List WhatsApp intake events for which Tenant routing failed (status=PENDING). "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with paginated quarantine items."
+    ),
+    response_description="Quarantine items list",
+    operation_id="getWhatsappQuarantine",
+)
 async def get_whatsapp_quarantine(
     page: int = 1,
     page_size: int = 50,
@@ -123,8 +163,9 @@ async def get_whatsapp_quarantine(
     offset = (max(1, page) - 1) * min(200, page_size)
     limit = min(200, page_size)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
@@ -150,7 +191,7 @@ async def get_whatsapp_quarantine(
             )
         ).scalar()
 
-    return {
+    payload = {
         "items": [
             {
                 "quarantineId": str(r["quarantine_id"]),
@@ -165,11 +206,23 @@ async def get_whatsapp_quarantine(
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── POST /v1/system/whatsapp/quarantine/{quarantineId}/replay ─────────────────
 
-@router.post("/v1/system/whatsapp/quarantine/{quarantine_id}/replay", status_code=202)
+@router.post(
+    "/v1/system/whatsapp/quarantine/{quarantine_id}/replay",
+    status_code=202,
+    summary="Replay WhatsApp Quarantine Item",
+    description=(
+        "Replay a quarantined WhatsApp intake item after correcting the route. "
+        "Sets status to REPLAYING. Full replay processing is Phase 2. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns 409 if the item is not in PENDING state."
+    ),
+    operation_id="replayWhatsappQuarantine",
+)
 async def replay_whatsapp_quarantine(
     quarantine_id: uuid.UUID,
     actor: ActorPrincipal = Depends(require_system_actor),
@@ -185,43 +238,54 @@ async def replay_whatsapp_quarantine(
     from datetime import UTC, datetime
     now = datetime.now(UTC)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text("""
+    async with factory() as session, session.begin():
+        row = (
+            await session.execute(
+                text("""
                         SELECT status FROM docintel.whatsapp_quarantine
                         WHERE quarantine_id = :qid
                     """),
-                    {"qid": quarantine_id},
-                )
-            ).one_or_none()
-            if row is None:
-                raise problem(404, "Quarantine item not found",
-                              ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
-            if row[0] != "PENDING":
-                raise problem(409, f"Quarantine item is {row[0]}, not PENDING",
-                              ErrorCode.INVALID_DOCUMENT_STATE)
+                {"qid": quarantine_id},
+            )
+        ).one_or_none()
+        if row is None:
+            raise problem(404, "Quarantine item not found",
+                          ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
+        if row[0] != "PENDING":
+            raise problem(409, f"Quarantine item is {row[0]}, not PENDING",
+                          ErrorCode.INVALID_DOCUMENT_STATE)
 
-            await session.execute(
-                text("""
+        await session.execute(
+            text("""
                     UPDATE docintel.whatsapp_quarantine
                     SET status = 'REPLAYING', updated_at_utc = :now
                     WHERE quarantine_id = :qid
                 """),
-                {"qid": quarantine_id, "now": now},
-            )
+            {"qid": quarantine_id, "now": now},
+        )
 
     return Response(status_code=202)
 
 
 # ── POST /v1/system/whatsapp/quarantine/{quarantineId}/discard ────────────────
 
-@router.post("/v1/system/whatsapp/quarantine/{quarantine_id}/discard")
+@router.post(
+    "/v1/system/whatsapp/quarantine/{quarantine_id}/discard",
+    summary="Discard WhatsApp Quarantine Item",
+    description=(
+        "Discard a quarantined item — marks it DISCARDED and removes temporary media. "
+        "Required permission: `platform.whatsapp.admin` (system Bearer token). "
+        "Returns D8 envelope with quarantineId and DISCARDED status. "
+        "Returns 409 if the item is not in PENDING or REPLAYING state."
+    ),
+    response_description="Discard confirmation",
+    operation_id="discardWhatsappQuarantine",
+)
 async def discard_whatsapp_quarantine(
     quarantine_id: uuid.UUID,
     actor: ActorPrincipal = Depends(require_system_actor),
@@ -234,35 +298,36 @@ async def discard_whatsapp_quarantine(
     from datetime import UTC, datetime
     now = datetime.now(UTC)
 
-    from verigence.di.repositories.database import get_engine
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from verigence.di.repositories.database import get_engine
     engine = get_engine()
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text("""
+    async with factory() as session, session.begin():
+        row = (
+            await session.execute(
+                text("""
                         SELECT status FROM docintel.whatsapp_quarantine
                         WHERE quarantine_id = :qid
                     """),
-                    {"qid": quarantine_id},
-                )
-            ).one_or_none()
-            if row is None:
-                raise problem(404, "Quarantine item not found",
-                              ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
-            if row[0] not in ("PENDING", "REPLAYING"):
-                raise problem(409, f"Cannot discard item in state {row[0]}",
-                              ErrorCode.INVALID_DOCUMENT_STATE)
+                {"qid": quarantine_id},
+            )
+        ).one_or_none()
+        if row is None:
+            raise problem(404, "Quarantine item not found",
+                          ErrorCode.QUARANTINE_ITEM_NOT_FOUND)
+        if row[0] not in ("PENDING", "REPLAYING"):
+            raise problem(409, f"Cannot discard item in state {row[0]}",
+                          ErrorCode.INVALID_DOCUMENT_STATE)
 
-            await session.execute(
-                text("""
+        await session.execute(
+            text("""
                     UPDATE docintel.whatsapp_quarantine
                     SET status = 'DISCARDED', updated_at_utc = :now
                     WHERE quarantine_id = :qid
                 """),
-                {"qid": quarantine_id, "now": now},
-            )
+            {"qid": quarantine_id, "now": now},
+        )
 
-    return {"quarantineId": str(quarantine_id), "status": "DISCARDED"}
+    payload = {"quarantineId": str(quarantine_id), "status": "DISCARDED"}
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()

@@ -19,17 +19,17 @@ from verigence.di.rules.normalizers import (
     NormalizerResult,
     get_normalizer,
 )
-from verigence.di.rules.validators import (
-    VALIDATOR_REGISTRY,
-    ValidatorRuleResult,
-    get_validator,
-)
 from verigence.di.rules.runner import (
     ExtractedFieldInput,
     FieldValidationOutput,
     NormalizedFieldOutput,
     RunnerOutput,
     normalize_and_validate,
+)
+from verigence.di.rules.validators import (
+    VALIDATOR_REGISTRY,
+    ValidatorRuleResult,
+    get_validator,
 )
 
 __all__ = [

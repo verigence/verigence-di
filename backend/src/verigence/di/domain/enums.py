@@ -59,7 +59,7 @@ class SourceChannel(str, Enum):
 class ActorType(str, Enum):
     USER = "USER"
     SYSTEM = "SYSTEM"
-    SERVICE = "SERVICE"
+    SERVICE_INTEGRATION = "SERVICE_INTEGRATION"
 
 
 # ── Subject ───────────────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ class RequirementClassification(str, Enum):
     ADDITIONAL = "ADDITIONAL"
 
 
-# ── Retention ─────────────────────────────────────────────────────────────────
+# ── Retention ────────────────────────────────────────────────────────────────
 class RetentionDisposition(str, Enum):
     PURGE_CONTENT = "PURGE_CONTENT"
     KEEP_CONTENT = "KEEP_CONTENT"

@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import io
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-pytestmark = pytest.mark.no_docker
+from fastapi import UploadFile
 
 from verigence.di.application.intake import intake_document
 from verigence.di.domain.enums import UploadStatus
-from fastapi import UploadFile
 
+pytestmark = pytest.mark.no_docker
 
 # ── Fixture helpers ────────────────────────────────────────────────────────────
 
@@ -58,15 +57,21 @@ def _make_mappings_row(**kwargs) -> MagicMock:  # type: ignore[no-untyped-def]
 
 
 def _make_session_mock() -> AsyncMock:
-    """Minimal async session: retention policy + storage key + artifact INSERT.
+    """Minimal async session mock matching the new intake flow (D4/D5).
 
-    Uses proper mapping mocks so RetentionDisposition(row["disposition"]) works.
+    Call order in intake_document:
+      1. get_active_retention_policy      → mappings().one_or_none()
+      2. SELECT tenant_document_types     → one_or_none()  (type resolution)
+      3. SELECT subjects.display_name     → one_or_none()  (path building)
+      4. INSERT documents                 → plain result
+      5. INSERT document_artifacts        → plain result
+      6+ UPDATE document / quality gate / generic results
     """
     session = AsyncMock()
 
     _retention_policy_id = uuid.uuid4()
 
-    # 1. get_active_retention_policy — returns a mappings().one_or_none()
+    # 1. get_active_retention_policy — mappings().one_or_none()
     retention_row = _make_mappings_row(
         retention_policy_id=_retention_policy_id,
         retention_days=365,
@@ -77,30 +82,56 @@ def _make_session_mock() -> AsyncMock:
     retention_result = MagicMock()
     retention_result.mappings.return_value = retention_mappings
 
-    # 2. INSERT documents (create_document_receiving) — plain result
+    # 2. SELECT tenant_document_types — one_or_none() returns None (→ ADDITIONAL)
+    tdt_result = MagicMock()
+    tdt_result.one_or_none.return_value = None
+
+    # 3. SELECT subjects.display_name — one_or_none() returns plain row
+    subject_name_row = MagicMock()
+    subject_name_row.__getitem__ = MagicMock(return_value="Test Subject")
+    subject_name_result = MagicMock()
+    subject_name_result.one_or_none.return_value = subject_name_row
+
+    # 4. INSERT documents — plain result
     insert_doc_result = MagicMock()
 
-    # 3. SELECT tenant_storage_key — returns a plain row (accessed as row[0])
-    storage_key_row = MagicMock()
-    storage_key_row.__getitem__ = MagicMock(return_value=str(uuid.uuid4()))
-    storage_key_result = MagicMock()
-    storage_key_result.one_or_none.return_value = storage_key_row
-
-    # 4. INSERT document_artifacts — plain result
+    # 5. INSERT document_artifacts — plain result
     insert_artifact_result = MagicMock()
 
-    # 5+ UPDATE document / INSERT job / validate_upload internals (unlimited generics)
+    # 6+ everything else (UPDATE document, quality gate internals, etc.)
     generic = MagicMock()
 
     session.execute = AsyncMock(side_effect=[
         retention_result,       # get_active_retention_policy
+        tdt_result,             # SELECT tenant_document_types (type resolution)
+        subject_name_result,    # SELECT subjects.display_name (path building)
         insert_doc_result,      # INSERT documents
-        storage_key_result,     # SELECT tenant_storage_key
         insert_artifact_result, # INSERT document_artifacts
     ] + [generic] * 30)
 
     session.commit = AsyncMock()
     return session
+
+
+def _make_session_mock_with_type(
+    physical_form_type: str = "GOVT_ID",
+    requires_processing: bool = True,
+) -> AsyncMock:
+    """Like _make_session_mock but TDT lookup returns a real type row."""
+    session = _make_session_mock()
+    tdt_row = MagicMock()
+    _dt_id = uuid.uuid4()
+    tdt_row.__getitem__ = MagicMock(
+        side_effect=lambda i: [physical_form_type, requires_processing, _dt_id][i]
+    )
+    # Rebuild side_effect list with real TDT row at position 1
+    original = list(session.execute.side_effect)  # type: ignore[arg-type]
+    original[1] = MagicMock()
+    original[1].one_or_none.return_value = tdt_row
+    session.execute = AsyncMock(side_effect=original)
+    return session
+
+
 
 
 def _make_storage_mock() -> MagicMock:
@@ -133,9 +164,6 @@ async def test_intake_calls_validate_upload() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=__import__(
-                "verigence.di.domain.enums", fromlist=["SourceChannel"]
-            ).SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
@@ -150,11 +178,11 @@ async def test_intake_calls_validate_upload() -> None:
 
 @pytest.mark.asyncio
 async def test_intake_fit_result_creates_processing_job() -> None:
-    """A FIT validator result must trigger create_initial_job."""
+    """A FIT document with a known processable type must trigger create_initial_job."""
     from verigence.di.quality.validator import ValidatorResult
-    from verigence.di.domain.enums import SourceChannel
 
-    session = _make_session_mock()
+    # Build session mock with TDT returning GOVT_ID (requires_processing=True)
+    session = _make_session_mock_with_type(physical_form_type="GOVT_ID", requires_processing=True)
     storage = _make_storage_mock()
     upload = _make_upload(_minimal_pdf())
 
@@ -169,11 +197,11 @@ async def test_intake_fit_result_creates_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
             upload=upload,
+            document_type_key="passport",
         )
 
     assert doc["upload_status"] == UploadStatus.FIT
@@ -184,7 +212,6 @@ async def test_intake_fit_result_creates_processing_job() -> None:
 async def test_intake_not_fit_skips_processing_job() -> None:
     """A NOT_FIT validator result must NOT create a processing job."""
     from verigence.di.quality.validator import ValidatorResult
-    from verigence.di.domain.enums import SourceChannel
 
     session = _make_session_mock()
     storage = _make_storage_mock()
@@ -206,7 +233,6 @@ async def test_intake_not_fit_skips_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",
@@ -222,7 +248,6 @@ async def test_intake_not_fit_skips_processing_job() -> None:
 async def test_intake_corrupt_result_skips_processing_job() -> None:
     """A CORRUPT validator result must NOT create a processing job."""
     from verigence.di.quality.validator import ValidatorResult
-    from verigence.di.domain.enums import SourceChannel
 
     session = _make_session_mock()
     storage = _make_storage_mock()
@@ -244,7 +269,6 @@ async def test_intake_corrupt_result_skips_processing_job() -> None:
             storage=storage,
             tenant_id="tenant-1",
             subject_id=uuid.uuid4(),
-            source_channel=SourceChannel.WEB,
             uploaded_by_actor_id="actor-1",
             uploaded_by_actor_type="USER",
             correlation_id="corr-001",

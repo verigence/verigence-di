@@ -20,19 +20,19 @@ dependencies = [
     # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
-    "psycopg2-binary>=2.9.9",
+    "psycopg2-binary>=2.9.12",
     "alembic>=1.13.0",
 
     # Object storage (S3-compatible: R2 + MinIO)
     "boto3>=1.34.0",
     "aioboto3>=13.0.0",
 
-    # Auth — Security JWT verification
+    # Auth — Security-issued JWT verification
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
 
-    # Google Document AI
-    "google-cloud-documentai>=2.29.0",
+    # Gemini 2.5 Flash — AI/OCR provider (D19, supersedes D13 Azure)
+    "google-generativeai>=0.8.0",
 
     # Image / PDF quality checks
     "Pillow>=10.3.0",
@@ -82,6 +82,7 @@ ignore = [
     "TC003",   # move stdlib import into TYPE_CHECKING — breaks Pydantic/FastAPI runtime annotation
     "F841",    # local variable assigned but never used — we clean these up manually
     "UP042",   # prefer StrEnum — str+Enum is required for Pydantic v2 serialization compat
+    "UP046",   # use type parameters — Generic[T] required for Pydantic v2 generic model compat
     "UP007",   # use X|Y union — keep Union for clarity in complex storage type hints
     "UP035",   # AsyncIterator from collections.abc — keep typing import for now
 ]
@@ -95,9 +96,7 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# Current measured repository baseline is ~49%. Keep this as an enforced floor
-# so coverage cannot regress while the test backlog is expanded toward 70%.
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=49"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=70"
 
 [tool.coverage.run]
 source = ["src"]

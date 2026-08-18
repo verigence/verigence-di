@@ -22,9 +22,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -32,17 +34,28 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Extraction Configuration"])
+logger = structlog.get_logger(__name__)
 
 
 # ── Document Types ────────────────────────────────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/document-types")
+@router.get(
+    "/tenants/{tenant_id}/document-types",
+    summary="List Document Types",
+    description=(
+        "List effective global and tenant-scoped Document Types (excluding RETIRED). "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with document types array."
+    ),
+    response_description="Document types list",
+    operation_id="listDocumentTypes",
+)
 async def list_document_types(
     tenant_id: str,
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List effective global + tenant Document Types."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -61,10 +74,25 @@ async def list_document_types(
                 {"tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_doc_type(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_doc_type(r) for r in rows],
+    ).model_dump()
 
 
-@router.post("/tenants/{tenant_id}/document-types", status_code=201)
+@router.post(
+    "/tenants/{tenant_id}/document-types",
+    status_code=201,
+    summary="Create Document Type",
+    description=(
+        "Create a tenant-owned DRAFT Document Type. "
+        "Required permission: `di.extraction_config.write`. "
+        "Returns D8 envelope with the created document type record."
+    ),
+    response_description="Created document type",
+    operation_id="createDocumentType",
+)
 async def create_document_type(
     tenant_id: str,
     body: dict[str, Any],
@@ -119,10 +147,27 @@ async def create_document_type(
                 {"dt_id": dt_id},
             )
         ).mappings().one()
-    return _fmt_doc_type(row)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_type_key=key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(row)).model_dump()
 
 
-@router.get("/tenants/{tenant_id}/document-types/{document_type_key}")
+@router.get(
+    "/tenants/{tenant_id}/document-types/{document_type_key}",
+    summary="Get Document Type",
+    description=(
+        "Fetch a single Document Type by key within the Tenant scope. "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with the document type record, or 404 if not found."
+    ),
+    response_description="Document type record",
+    operation_id="getDocumentType",
+)
 async def get_document_type(
     tenant_id: str,
     document_type_key: str,
@@ -149,10 +194,20 @@ async def get_document_type(
         ).mappings().one_or_none()
     if row is None:
         raise problem(404, "Document Type not found", ErrorCode.DOCUMENT_TYPE_NOT_FOUND)
-    return _fmt_doc_type(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(row)).model_dump()
 
 
-@router.put("/tenants/{tenant_id}/document-types/{document_type_key}")
+@router.put(
+    "/tenants/{tenant_id}/document-types/{document_type_key}",
+    summary="Update Document Type",
+    description=(
+        "Update the display name and description of a tenant-owned Document Type. "
+        "Required permission: `di.extraction_config.write`. "
+        "Returns 409 if the document type is RETIRED."
+    ),
+    response_description="Updated document type",
+    operation_id="updateDocumentType",
+)
 async def update_document_type(
     tenant_id: str,
     document_type_key: str,
@@ -204,13 +259,28 @@ async def update_document_type(
                 {"dt_id": row[0]},
             )
         ).mappings().one()
-    return _fmt_doc_type(updated)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(updated)).model_dump()
 
 
 # ── Extraction Profiles ───────────────────────────────────────────────────────
 
 @router.get(
-    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles"
+    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles",
+    summary="List Extraction Profiles",
+    description=(
+        "List all Extraction Profile versions for a Document Type in the Tenant scope. "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with profiles array (profileId, versionNo, status)."
+    ),
+    response_description="Extraction profiles list",
+    operation_id="listExtractionProfiles",
 )
 async def list_extraction_profiles(
     tenant_id: str,
@@ -218,7 +288,7 @@ async def list_extraction_profiles(
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -236,12 +306,24 @@ async def list_extraction_profiles(
                 {"key": document_type_key, "tid": tenant_id},
             )
         ).mappings().all()
-    return [_fmt_extraction_profile(r) for r in rows]
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=[_fmt_extraction_profile(r) for r in rows],
+    ).model_dump()
 
 
 @router.post(
     "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles",
     status_code=201,
+    summary="Create Extraction Profile",
+    description=(
+        "Create a DRAFT Extraction Profile for a Document Type. "
+        "Required permission: `di.extraction_config.write`. "
+        "Returns D8 envelope with the created profile record."
+    ),
+    response_description="Created extraction profile",
+    operation_id="createExtractionProfile",
 )
 async def create_extraction_profile(
     tenant_id: str,
@@ -314,11 +396,27 @@ async def create_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(row)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(row)).model_dump()
 
 
 @router.get(
-    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}"
+    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}",
+    summary="Get Extraction Profile",
+    description=(
+        "Fetch a single Extraction Profile version by ID for a Document Type. "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with the profile record, or 404 if not found."
+    ),
+    response_description="Extraction profile record",
+    operation_id="getExtractionProfile",
 )
 async def get_extraction_profile(
     tenant_id: str,
@@ -348,11 +446,19 @@ async def get_extraction_profile(
     if row is None:
         raise problem(404, "Extraction Profile not found",
                       ErrorCode.EXTRACTION_PROFILE_NOT_FOUND)
-    return _fmt_extraction_profile(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(row)).model_dump()
 
 
 @router.put(
-    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}"
+    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}",
+    summary="Update Draft Extraction Profile",
+    description=(
+        "Replace the profile name of a DRAFT Extraction Profile. "
+        "Required permission: `di.extraction_config.write`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Updated extraction profile",
+    operation_id="updateDraftExtractionProfile",
 )
 async def update_draft_extraction_profile(
     tenant_id: str,
@@ -405,11 +511,28 @@ async def update_draft_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(updated)
+
+    logger.info(
+        "extraction_profile_created",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(updated)).model_dump()
 
 
 @router.post(
-    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}/publish"
+    "/tenants/{tenant_id}/document-types/{document_type_key}/extraction-profiles/{profile_id}/publish",
+    summary="Publish Extraction Profile",
+    description=(
+        "Publish a DRAFT Extraction Profile; atomically retires the previous PUBLISHED for the same type+scope. "
+        "Also activates the parent Document Type if it is in DRAFT state. "
+        "Required permission: `di.extraction_config.publish`. "
+        "Returns 409 if the profile is not in DRAFT state."
+    ),
+    response_description="Published extraction profile",
+    operation_id="publishExtractionProfile",
 )
 async def publish_extraction_profile(
     tenant_id: str,
@@ -487,18 +610,36 @@ async def publish_extraction_profile(
                 {"pid": profile_id},
             )
         ).mappings().one()
-    return _fmt_extraction_profile(updated)
+
+    logger.info(
+        "extraction_profile_published",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        profile_id=str(profile_id),
+        document_type_key=document_type_key,
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(updated)).model_dump()
 
 
 # ── Rule Catalogs ─────────────────────────────────────────────────────────────
 
-@router.get("/tenants/{tenant_id}/normalization-rules")
+@router.get(
+    "/tenants/{tenant_id}/normalization-rules",
+    summary="List Normalization Rules",
+    description=(
+        "List all active normalization rules available in the platform catalog. "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with rules array (ruleKey, description, parameterSchema)."
+    ),
+    response_description="Normalization rules catalog",
+    operation_id="listNormalizationRules",
+)
 async def list_normalization_rules(
     tenant_id: str,
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -511,7 +652,7 @@ async def list_normalization_rules(
                 """),
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "ruleKey": r["rule_key"],
             "description": r["description"],
@@ -521,15 +662,26 @@ async def list_normalization_rules(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
-@router.get("/tenants/{tenant_id}/validation-rules")
+@router.get(
+    "/tenants/{tenant_id}/validation-rules",
+    summary="List Validation Rules",
+    description=(
+        "List all active validation rules available in the platform catalog. "
+        "Required permission: `di.extraction_config.read`. "
+        "Returns D8 envelope with rules array (ruleKey, description, resultScope, parameterSchema)."
+    ),
+    response_description="Validation rules catalog",
+    operation_id="listValidationRules",
+)
 async def list_validation_rules(
     tenant_id: str,
     actor: ActorPrincipal = Depends(
         require_tenant_permission(Permission.EXTRACTION_CONFIG_READ)
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     async with tenant_session(tenant_id) as session:
         rows = (
             await session.execute(
@@ -542,7 +694,7 @@ async def list_validation_rules(
                 """),
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "ruleKey": r["rule_key"],
             "description": r["description"],
@@ -553,6 +705,7 @@ async def list_validation_rules(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

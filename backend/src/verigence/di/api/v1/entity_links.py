@@ -12,9 +12,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -22,17 +24,28 @@ from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["External Links"])
+logger = structlog.get_logger(__name__)
 
 _PREFIX = "/tenants/{tenant_id}/subjects/{subject_id}/documents/{document_id}/entity-links"
 
 
-@router.get(_PREFIX)
+@router.get(
+    _PREFIX,
+    summary="Get Document Entity Links",
+    description=(
+        "List all active external entity links for a document. "
+        "Required permission: `di.entity_link.read`. "
+        "Returns D8 envelope with entity links array (linkType, externalEntityId, externalSystem)."
+    ),
+    response_description="Entity links list",
+    operation_id="getDocumentEntityLinks",
+)
 async def get_document_entity_links(
     tenant_id: str,
     subject_id: uuid.UUID,
     document_id: uuid.UUID,
     actor: ActorPrincipal = Depends(require_tenant_permission(Permission.ENTITY_LINK_READ)),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List active external entity links for a document."""
     async with tenant_session(tenant_id) as session:
         rows = (
@@ -51,7 +64,7 @@ async def get_document_entity_links(
                 {"tid": tenant_id, "doc_id": document_id, "sid": subject_id},
             )
         ).mappings().all()
-    return [
+    items = [
         {
             "entityLinkId": str(r["entity_link_id"]),
             "linkType": r["link_type"],
@@ -63,9 +76,21 @@ async def get_document_entity_links(
         }
         for r in rows
     ]
+    return ApiResponse(errorCode="000", errorMessage="Success", data=items).model_dump()
 
 
-@router.post(_PREFIX, status_code=201)
+@router.post(
+    _PREFIX,
+    status_code=201,
+    summary="Add Document Entity Link",
+    description=(
+        "Add a generic external entity link to a document (e.g. link to a loan ID in a core banking system). "
+        "Required permission: `di.entity_link.write`. "
+        "Returns D8 envelope with the created entity link record."
+    ),
+    response_description="Created entity link",
+    operation_id="addDocumentEntityLink",
+)
 async def add_document_entity_link(
     tenant_id: str,
     subject_id: uuid.UUID,
@@ -126,7 +151,15 @@ async def add_document_entity_link(
         )
         await session.commit()
 
-    return {
+    logger.info(
+        "entity_link_added",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_id=str(document_id),
+        entity_link_id=str(link_id),
+    )
+
+    payload = {
         "entityLinkId": str(link_id),
         "linkType": link_type,
         "externalEntityId": external_entity_id,
@@ -135,3 +168,4 @@ async def add_document_entity_link(
         "createdByActorId": actor.actor_id,
         "createdAt": now.isoformat(),
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()

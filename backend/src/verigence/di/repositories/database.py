@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -20,7 +19,7 @@ from verigence.di.settings import get_settings
 
 
 # ── Engine (module singleton) ─────────────────────────────────────────────────
-def _make_engine() -> AsyncEngine:
+def _make_engine():  # type: ignore[no-untyped-def]
     settings = get_settings()
     return create_async_engine(
         settings.database_url,
@@ -46,16 +45,17 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set transaction-local tenant_id for PostgreSQL RLS.
 
     Must be called at the start of every tenant-scoped transaction.
-    ``set_config(..., true)`` accepts the tenant ID as a safe bind parameter and
-    is transaction-local, matching the intended semantics of ``SET LOCAL``.
+    Uses SET LOCAL so the value is cleared automatically at transaction end.
+    PostgreSQL SET LOCAL does not accept bind parameters — value is
+    sanitised and interpolated directly.
     """
-    await session.execute(
-        text("SELECT set_config('app.tenant_id', :tid, true)"),
-        {"tid": tenant_id},
-    )
+    # Strip any characters that are not alphanumeric, hyphen, or underscore
+    # to prevent SQL injection via tenant_id.
+    safe_tid = "".join(c for c in str(tenant_id) if c.isalnum() or c in "-_")
+    await session.execute(text(f"SET LOCAL app.tenant_id = '{safe_tid}'"))
 
 
-def get_engine() -> AsyncEngine:
+def get_engine():  # type: ignore[no-untyped-def]
     """Return the module-level engine (for non-FastAPI use in workers/schedulers)."""
     return _engine
 
@@ -77,10 +77,18 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 # ── Context manager for worker/scheduler use ─────────────────────────────────
 @asynccontextmanager
 async def tenant_session(tenant_id: str) -> AsyncGenerator[AsyncSession, None]:
-    """Open a session, set RLS context and yield — for use outside FastAPI."""
+    """Open a session, set RLS context, auto-provision tenant, and yield."""
+    from verigence.di.repositories.tenants import (  # noqa: PLC0415
+        provision_retention_policy,
+        provision_tenant,
+        provision_tenant_document_types,
+    )
     async with AsyncSessionFactory() as session:
         try:
             await set_tenant_context(session, tenant_id)
+            await provision_tenant(session, tenant_id)
+            await provision_retention_policy(session, tenant_id)
+            await provision_tenant_document_types(session, tenant_id)
             yield session
             await session.commit()
         except Exception:

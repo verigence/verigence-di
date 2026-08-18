@@ -1,0 +1,235 @@
+version: '2.2'
+rules:
+  client_contract: Clients branch on code, never on title/detail text.
+  retry_contract: retryable=true means technical retry may be attempted only where the HTTP method/idempotency contract makes
+    retry safe.
+  correlation_contract: Every application Problem response includes X-Correlation-ID header and correlationId body value.
+errors:
+- code: INVALID_REQUEST
+  httpStatus: 400
+  retryable: false
+  category: REQUEST
+  meaning: Request syntax/parameters/body are invalid.
+  clientAction: Correct the request; do not retry unchanged.
+- code: UNAUTHORIZED
+  httpStatus: 401
+  retryable: false
+  category: AUTHENTICATION
+  meaning: JWT is absent, invalid, expired, wrong issuer/audience, or required canonical claims are missing/invalid.
+  clientAction: Re-authenticate/obtain a valid token, then retry.
+- code: FORBIDDEN
+  httpStatus: 403
+  retryable: false
+  category: AUTHORIZATION
+  meaning: Authenticated actor lacks the required permission or Tenant/resource scope.
+  clientAction: Do not retry unchanged; request appropriate access.
+- code: TENANT_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: TENANT
+  meaning: Tenant does not exist or is not visible to the caller.
+  clientAction: Correct Tenant context.
+- code: TENANT_NOT_READY
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Tenant activation prerequisites are incomplete.
+  clientAction: Complete Tenant configuration, then retry.
+- code: RETENTION_POLICY_NOT_CONFIGURED
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Required active retention policy is missing.
+  clientAction: Configure retention policy, then retry.
+- code: DEVICE_NOT_REGISTERED
+  httpStatus: 403
+  retryable: false
+  category: AUTHORIZATION
+  meaning: USER token device_id is missing, revoked, or not registered for the actor/Tenant.
+  clientAction: Register/use an active device and obtain/refresh token if required.
+- code: REQUIREMENT_PROFILE_NOT_ASSIGNED
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: An operation requiring a Subject Requirement Profile has no active assignment.
+  clientAction: Assign a published Requirement Profile.
+- code: REQUIREMENT_PROFILE_NOT_PUBLISHED
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Requested Requirement Profile is not in PUBLISHED state.
+  clientAction: Publish/select a published profile.
+- code: DOCUMENT_TYPE_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: CONFIGURATION
+  meaning: Document Type key/resource is not visible or does not exist.
+  clientAction: Correct the type key or configuration.
+- code: EXTRACTION_PROFILE_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: CONFIGURATION
+  meaning: Requested/effective Extraction Profile does not exist.
+  clientAction: Create/publish the required Extraction Profile.
+- code: SUBJECT_DOCUMENT_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: RESOURCE
+  meaning: No matching Document exists inside the supplied Tenant + Subject boundary.
+  clientAction: Refresh/re-resolve Subject documents.
+- code: DOCUMENT_NOT_CONFIRMED
+  httpStatus: 409
+  retryable: false
+  category: STATE
+  meaning: Requested operation requires machine CONFIRMED state.
+  clientAction: Wait for successful processing or resolve the processing exception.
+- code: DOCUMENT_CONTENT_PURGED
+  httpStatus: 410
+  retryable: false
+  category: RETENTION
+  meaning: Document metadata exists but content was purged under retention policy.
+  clientAction: Do not retry content retrieval.
+- code: IDEMPOTENCY_CONFLICT
+  httpStatus: 409
+  retryable: false
+  category: IDEMPOTENCY
+  meaning: Same idempotency key was reused with a different request identity/payload.
+  clientAction: Use the original request or a new idempotency key.
+- code: FILE_EMPTY
+  httpStatus: 422
+  retryable: false
+  category: UPLOAD
+  meaning: Uploaded file contains zero bytes.
+  clientAction: Upload a non-empty file.
+- code: FILE_TOO_LARGE
+  httpStatus: 413
+  retryable: false
+  category: UPLOAD
+  meaning: File exceeds configured Tenant limit.
+  clientAction: Upload a file within configured limit.
+- code: MIME_TYPE_NOT_ALLOWED
+  httpStatus: 415
+  retryable: false
+  category: UPLOAD
+  meaning: Declared/detected MIME type is not allowed.
+  clientAction: Upload an allowed file type.
+- code: INVALID_FILE_CONTENT
+  httpStatus: 422
+  retryable: false
+  category: UPLOAD
+  meaning: File signature/parser/structure validation failed.
+  clientAction: Upload a valid non-corrupt file.
+- code: INVALID_CONFIGURATION
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Persisted configuration fails a deterministic activation/publication/runtime invariant.
+  clientAction: Correct configuration; retry after correction.
+- code: DOCUMENT_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: RESOURCE
+  meaning: Document resource does not exist or is not visible.
+  clientAction: Refresh/re-resolve the resource.
+- code: UNASSIGNED_DOCUMENT_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: RESOURCE
+  meaning: Unassigned Tenant Document does not exist or is not visible.
+  clientAction: Refresh unassigned intake list.
+- code: SUBJECT_DOCUMENT_MISMATCH
+  httpStatus: 404
+  retryable: false
+  category: RESOURCE
+  meaning: Document does not belong to the supplied Subject boundary.
+  clientAction: Use the correct Tenant + Subject + Document path.
+- code: INVALID_DOCUMENT_STATE
+  httpStatus: 409
+  retryable: false
+  category: STATE
+  meaning: Requested state transition/action is not valid for the current Document state.
+  clientAction: Refresh state and follow allowed transition.
+- code: DOCUMENT_REPLACEMENT_NOT_ALLOWED
+  httpStatus: 409
+  retryable: false
+  category: STATE
+  meaning: Replacement is allowed only for NOT_FIT, CORRUPT or UPLOAD_FAILED evidence under Phase-1 rules.
+  clientAction: Do not replace a confirmed/otherwise ineligible Document.
+- code: DOCUMENT_ALREADY_ASSIGNED
+  httpStatus: 409
+  retryable: false
+  category: STATE
+  meaning: Unassigned Document already has a Subject.
+  clientAction: Refresh Document state; do not reassign through the unassigned flow.
+- code: PROFILE_IMMUTABLE
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Published/retired profile content is immutable.
+  clientAction: Create/edit a DRAFT version.
+- code: PROFILE_NOT_DRAFT
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Requested profile mutation requires DRAFT state.
+  clientAction: Create/select a DRAFT profile.
+- code: WHATSAPP_ROUTE_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: INTEGRATION
+  meaning: No configured Tenant route matches the WhatsApp destination/account identity.
+  clientAction: Configure the route or handle system quarantine.
+- code: QUARANTINE_ITEM_NOT_FOUND
+  httpStatus: 404
+  retryable: false
+  category: INTEGRATION
+  meaning: System quarantine item does not exist or is no longer actionable.
+  clientAction: Refresh quarantine list.
+- code: STORAGE_WRITE_FAILED
+  httpStatus: 503
+  retryable: true
+  category: DEPENDENCY
+  meaning: Object-storage write/finalization failed transiently or was unavailable.
+  clientAction: Retry with the same idempotency key using backoff where the operation is safe.
+- code: STORAGE_READ_FAILED
+  httpStatus: 503
+  retryable: true
+  category: DEPENDENCY
+  meaning: Object-storage read failed transiently or was unavailable.
+  clientAction: Retry with backoff.
+- code: QUALITY_POLICY_NOT_CONFIGURED
+  httpStatus: 409
+  retryable: false
+  category: CONFIGURATION
+  meaning: Tenant quality policy is absent/invalid.
+  clientAction: Configure a valid non-empty quality policy.
+- code: CLASSIFICATION_NO_CANDIDATES
+  httpStatus: 409
+  retryable: false
+  category: CLASSIFICATION
+  meaning: Deterministic candidate formation produced no processing-ready Document Type.
+  clientAction: Activate/configure a Document Type with an effective PUBLISHED Extraction Profile.
+- code: CLASSIFICATION_AMBIGUOUS
+  httpStatus: 422
+  retryable: false
+  category: CLASSIFICATION
+  meaning: Classification did not yield exactly one acceptable candidate under Tenant acceptance policy.
+  clientAction: Resolve configuration/input quality; no automatic client retry unchanged.
+- code: SUBJECT_MATCH_AMBIGUOUS
+  httpStatus: 409
+  retryable: false
+  category: SUBJECT_MATCHING
+  meaning: Available deterministic identity evidence maps to more than one candidate Subject or does not meet acceptance rule.
+  clientAction: Resolve/assign Subject through authorized review.
+- code: SUBJECT_IDENTIFIER_CONFLICT
+  httpStatus: 409
+  retryable: false
+  category: SUBJECT_MATCHING
+  meaning: The same active VERIFIED identifier already belongs to another Subject in this Tenant.
+  clientAction: Do not create a duplicate verified mapping; resolve the existing mapping.
+- code: INTERNAL_ERROR
+  httpStatus: 500
+  retryable: true
+  category: INTERNAL
+  meaning: Unexpected server error not represented by a more specific code.
+  clientAction: Retry only with backoff/idempotency where safe; provide correlation ID to support if persistent.

@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "verigence-di-test-key-1",
+      "n": "xgVZR6HZiDOyWiWAxHrYH9oNgJtkQhijkA7R57d9x-VSOgfpNhnYONWdN9fz-B9eYkzi7XnPmX81V0-z4TUMx0S8PiI-7gEwXnWiG4r7dM1SNxqoOiHVPybslo1c9oxk2uPLk5sZ7g2W3Bv5Q_FhIXR6upz7FHVtytWZCmMCyfqQuPwcb1qwZoAoZbX0-4--YmPbw3c-x_4OWlKr6m9SI3gQ5WgpJfwTTdEOkWGQGNKStCHPwUa47R9qksvzvcl-ankcOrinSVjhbRIZUHDz2nEbV0w4R94gAraSjB1K49IDEnE9CgCJhkoGFpDjwVL-64sid_TrK0gwQho1nRc5sw",
+      "e": "AQAB"
+    }
+  ]
+}

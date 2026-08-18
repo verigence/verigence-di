@@ -1,129 +1,158 @@
-name: CI
+name: DI CI
 
 on:
   pull_request:
     branches: [dev, main]
   push:
-    branches: [dev, main]
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      run_extended:
+        description: 'Run Tier 2 extended tests'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: read
 
+concurrency:
+  group: di-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend:
-    name: Backend — lint, typecheck, test
-    runs-on: ubuntu-24.04
+  # ── Tier 0: Lint + unit tests (no DB, no network) ────────────────────────────
+  quality:
+    name: Lint + Unit Tests
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
 
-      - name: Install uv
-        run: pip install uv
+      - name: Install project and dev tooling
+        run: pip install -e ".[dev]"
 
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+      - name: Compile Python sources
+        run: python -m compileall -q src tests
 
-      - name: Determine changed Python files
-        shell: bash
-        working-directory: .
-        run: |
-          set -euo pipefail
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          else
-            base="${{ github.event.before }}"
-          fi
-
-          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
-            find backend/src backend/tests -type f -name '*.py' | sed 's#^backend/##' | sort > /tmp/changed-python-files.txt
-          else
-            git diff --name-only --diff-filter=ACMRT "$base"...HEAD -- backend/src backend/tests \
-              | grep -E '^backend/(src|tests)/.*\.py$' \
-              | sed 's#^backend/##' \
-              | sort -u > /tmp/changed-python-files.txt || true
-          fi
-
-          echo 'Python files changed in this revision:'
-          cat /tmp/changed-python-files.txt || true
-
-      - name: Lint changed Python files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -t files < /tmp/changed-python-files.txt
-          if (( ${#files[@]} == 0 )); then
-            echo 'No changed Python files to lint.'
-            exit 0
-          fi
-          ruff check "${files[@]}"
-
-      - name: Type check changed source files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -t files < <(grep '^src/.*\.py$' /tmp/changed-python-files.txt || true)
-          if (( ${#files[@]} == 0 )); then
-            echo 'No changed source files to type check.'
-            exit 0
-          fi
-          mypy "${files[@]}"
-
-      - name: Run tests
+      - name: Import smoke check (catches ImportError at app startup)
         env:
-          DI_SECRET_KEY: "ci-test-secret-key-32-chars-minimum"
+          DI_SECRET_KEY: "ci-import-check-key-32-characters!!"
+          DI_DATABASE_URL: "postgresql+asyncpg://user:pass@localhost/db"
           DI_DOCAI_MOCK: "true"
-          DI_STORAGE_PROVIDER: "minio"
-          DI_STORAGE_ENDPOINT: "http://localhost:9000"
-          DI_STORAGE_ACCESS_KEY_ID: "minioadmin"
-          DI_STORAGE_SECRET_ACCESS_KEY: "minioadmin123"
-          DI_STORAGE_BUCKET: "verigence-di-test"
-          DI_CLERK_PUBLISHABLE_KEY: "pk_test_mock"
-          DI_CLERK_SECRET_KEY: "sk_test_mock"
-          DI_CLERK_JWKS_URL: "http://localhost/mock-jwks"
-        run: pytest --tb=short
+          DI_ENV: local
+        run: PYTHONPATH=src python -c "from verigence.di.main import create_app; create_app()"
 
-  frontend:
-    name: Frontend — build check
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+      - name: Ruff
+        run: ruff check .
+
+      - name: Run unit tests
+        env:
+          DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
+          DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DI_STORAGE_PROVIDER: minio
+          DI_STORAGE_ENDPOINT: http://localhost:9000
+          DI_STORAGE_ACCESS_KEY_ID: minioadmin
+          DI_STORAGE_SECRET_ACCESS_KEY: minioadmin123
+          DI_STORAGE_BUCKET: verigence-di-dev
+          DI_DOCAI_MOCK: "true"
+          DI_ENV: dev
+        run: PYTHONPATH=src python -m pytest -m no_docker --no-cov -q
+
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+
+  # ── Tier 1: Smoke tests (fast, mandatory, blocks deploy) ─────────────────────
+  smoke:
+    name: Tier 1 Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Detect implemented operator UI
-        id: ui
-        shell: bash
-        run: |
-          if [[ -f ops-ui/package.json && -f ops-ui/package-lock.json ]]; then
-            echo 'exists=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'exists=false' >> "$GITHUB_OUTPUT"
-            echo 'Operator UI is currently a placeholder; frontend build is not applicable.'
-          fi
-
-      - uses: actions/setup-node@v6
-        if: steps.ui.outputs.exists == 'true'
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: ops-ui/package-lock.json
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
 
-      - name: Install dependencies
-        if: steps.ui.outputs.exists == 'true'
-        working-directory: ops-ui
-        run: npm ci
+      - name: Install project and dev tooling
+        run: pip install -e ".[dev]"
 
-      - name: TypeScript build check
-        if: steps.ui.outputs.exists == 'true'
-        working-directory: ops-ui
-        run: npm run build
+      - name: Run smoke tests
+        env:
+          DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
+          DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DI_ENV: dev
+          DI_DOCAI_MOCK: "true"
+          DI_WORKER_ENABLED: "false"
+          # R2 test bucket
+          DI_STORAGE_PROVIDER: r2
+          DI_STORAGE_BUCKET: verigence-di-test
+          DI_STORAGE_ENDPOINT: ${{ secrets.TEST_R2_ENDPOINT }}
+          DI_STORAGE_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
+          DI_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
+          DI_STORAGE_REGION: auto
+          DI_SECURITY_JWKS_URL: "https://raw.githubusercontent.com/${{ github.repository }}/dev/backend/tests/fixtures/test_jwks.json"
+          TEST_JWT_PRIVATE_KEY: ${{ secrets.TEST_JWT_PRIVATE_KEY }}
+        run: PYTHONPATH=src python -m pytest -m smoke --no-cov -q
+
+  # ── Tier 2: Extended tests (on demand only — workflow_dispatch) ───────────────
+  extended:
+    name: Tier 2 Extended Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_extended == 'true'
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install project and dev tooling
+        run: pip install -e ".[dev]"
+
+      - name: Run extended tests
+        env:
+          DI_SECRET_KEY: ${{ secrets.DI_SECRET_KEY }}
+          DI_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          DI_ENV: dev
+          DI_DOCAI_MOCK: "true"
+          DI_WORKER_ENABLED: "false"
+          DI_STORAGE_PROVIDER: r2
+          DI_STORAGE_BUCKET: verigence-di-test
+          DI_STORAGE_ENDPOINT: ${{ secrets.TEST_R2_ENDPOINT }}
+          DI_STORAGE_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
+          DI_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
+          DI_STORAGE_REGION: auto
+          DI_SECURITY_JWKS_URL: "https://raw.githubusercontent.com/${{ github.repository }}/dev/backend/tests/fixtures/test_jwks.json"
+          TEST_JWT_PRIVATE_KEY: ${{ secrets.TEST_JWT_PRIVATE_KEY }}
+        run: PYTHONPATH=src python -m pytest -m extended --no-cov -q

@@ -1,44 +1,49 @@
-"""Standalone DI background runtime for Railway.
+"""workers/__main__.py — Standalone entry point for the processing worker.
 
-Runs the ProcessingWorker and EODRetryScheduler together in the dedicated
-worker service. The HTTP API should run with DI_WORKER_ENABLED=false so the
-background responsibilities have exactly one owner.
+Run as:  python -m verigence.di.workers
+Used by: Docker container with START_MODE=worker
 """
 from __future__ import annotations
 
 import asyncio
 import signal
-from contextlib import suppress
 
-from verigence.di.scheduler.beat import get_eod_scheduler
-from verigence.di.workers.processor import get_worker
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
-async def main() -> None:
-    """Run the processing worker and EOD scheduler until termination."""
-    stopped = asyncio.Event()
+async def _main() -> None:
+    from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+    configure_logging()
+
+    from verigence.di.scheduler.beat import EODRetryScheduler
+    from verigence.di.workers.processor import ProcessingWorker
+
+    worker = ProcessingWorker()
+    scheduler = EODRetryScheduler()
+
+    stop_event = asyncio.Event()
+
+    def _handle_signal(sig: signal.Signals) -> None:
+        logger.info("worker_shutdown_signal", signal=sig.name)
+        stop_event.set()
+
     loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _handle_signal, sig)
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        with suppress(NotImplementedError):  # pragma: no cover - Windows fallback
-            loop.add_signal_handler(sig, stopped.set)
-
-    worker = get_worker()
-    scheduler = get_eod_scheduler()
-
+    logger.info("di_worker_starting")
     worker.start()
-    scheduler_started = False
-    try:
-        scheduler.start()
-        scheduler_started = True
-        print("DI_WORKER_STARTED=PASS", flush=True)
-        print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
-        await stopped.wait()
-    finally:
-        await worker.stop()
-        if scheduler_started:
-            scheduler.stop()
+    scheduler.start()
+
+    await stop_event.wait()
+
+    logger.info("di_worker_stopping")
+    await worker.stop()
+    scheduler.stop()
+    logger.info("di_worker_stopped")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_main())

@@ -9,43 +9,45 @@
 
 | Item | Value |
 |---|---|
-| Active baseline | **2.2** |
-| Baseline date | 2026-08-11 |
+| Active baseline | **2.4** |
+| Baseline date | 2026-08-15 |
 | Status | BASELINED FOR IMPLEMENTATION |
 | Design documents location | Workspace root (`/IDBP/`) |
 | Code repository | `verigence-di/` |
 
-> All design decisions are locked at Baseline 2.2 unless a new baseline is explicitly agreed and this file is updated. Do not infer design intent from older versioned files (v2.0, v2.1).
+> All design decisions are locked at Baseline 2.4 unless a new baseline is explicitly agreed and this file is updated. Do not infer design intent from older versioned files (v2.0, v2.1, v2.2).
+>
+> D1–D24 constitute the v2.4 delta from v2.2 baseline.
 
 **Reading order for a new session:**
-1. `DI_MASTER_REFERENCE.md` — this file (document map + step status)
-2. `DI_DESIGN_SUMMARY.md` — 5-minute visual overview (diagrams, lifecycle, stack)
-3. `PROGRESS.md` — current step detail and blockers
-4. Relevant spec file from §2 only if implementing that specific component
+1. `DI_DECISIONS.md` — **READ THIS FIRST** — every locked design decision agreed in conversation
+2. `DI_MASTER_REFERENCE.md` — this file (document map + step status)
+3. `DI_DESIGN_SUMMARY.md` — 5-minute visual overview (diagrams, lifecycle, stack)
+4. `PROGRESS.md` — current step detail and blockers
+5. Relevant spec file from §2 only if implementing that specific component
 
 ---
 
 ## 2. Authoritative design documents (always read these first)
 
-| Document | File (workspace root) | What it governs |
+All design documents now live in `verigence-di/design/`. See `design/README.md` for the full index.
+
+| Document | File | What it governs |
 |---|---|---|
-| Architecture | `DI_ARCHITECTURE_v2.2.md` | Fixed principles, component boundaries, core flow, WhatsApp flow |
-| Low-Level Design | `DI_LLD_v2.2.md` | Component contracts, intake steps, worker steps, scoring, error handling |
-| Data Model | `DI_DATA_MODEL_v2.2.md` | Every DB entity, relationships, state machines |
-| PostgreSQL Schema | `DI_POSTGRESQL_SCHEMA_v2.2.sql` | Canonical DDL — single source of truth for table/column names |
-| OpenAPI Spec | `DI_OPENAPI_v2.2.yaml` | All 54 operations, request/response schemas, `x-required-permissions` |
-| RBAC / JWT | `DI_SECURITY_RBAC_v2.2.md` + `DI_RBAC_v2.2.yaml` | 27 permissions, 8 role bundles, JWT claim contract |
-| Error Catalog | `DI_ERROR_CATALOG_v2.2.md` + `DI_ERROR_CATALOG_v2.2.yaml` | 38 stable problem codes, HTTP status, retryability |
-| Classification | `DI_CLASSIFICATION_v2.2.md` | Deterministic candidate-set formation rules |
-| Audit Model | `DI_AUDIT_MODEL_v2.2.md` | Entity-scoped hash-chain audit design |
-| Baseline Audit Report | `DI_BASELINE_AUDIT_REPORT_v2.2.md` | Confirmed: 39/39 checks passed, 54 OAS ops, 38 error codes |
+| Architecture | `design/DI_ARCHITECTURE_v2.2.md` | Fixed principles, component boundaries, core flow, WhatsApp flow |
+| Low-Level Design | `design/DI_LLD_v2.2.md` | Component contracts, intake steps, worker steps, scoring, error handling |
+| Data Model | `design/DI_DATA_MODEL_v2.2.md` | Every DB entity, relationships, state machines |
+| PostgreSQL Schema | `design/DI_POSTGRESQL_SCHEMA_v2.2.sql` | Canonical DDL — single source of truth for table/column names |
+| OpenAPI Spec | `design/DI_OPENAPI_v2.2.yaml` | All 54 operations, request/response schemas, `x-required-permissions` |
+| RBAC / JWT | `design/DI_SECURITY_RBAC_v2.2.md` + `design/DI_RBAC_v2.2.yaml` | 27 permissions, 8 role bundles, JWT claim contract |
+| Error Catalog | `design/DI_ERROR_CATALOG_v2.2.md` + `design/DI_ERROR_CATALOG_v2.2.yaml` | 38 stable problem codes, HTTP status, retryability |
+| Classification | `design/DI_CLASSIFICATION_v2.2.md` | Deterministic candidate-set formation rules |
+| Audit Model | `design/DI_AUDIT_MODEL_v2.2.md` | Entity-scoped hash-chain audit design |
+| Baseline Audit Report | `design/DI_BASELINE_AUDIT_REPORT_v2.2.md` | Confirmed: 39/39 checks passed, 54 OAS ops, 38 error codes |
 
 ### Superseded — do not use
 
-`DI_ARCHITECTURE_v2.0.md`, `DI_ARCHITECTURE_v2.1.md`, `DI_LLD_v2.0.md`, `DI_LLD_v2.1.md`,
-`DI_DATA_MODEL_v2.1.md`, `DI_OPENAPI_v2.0.yaml`, `DI_OPENAPI_v2.1.yaml`,
-`DI_POSTGRESQL_SCHEMA_v2.0.sql`, `DI_POSTGRESQL_SCHEMA_v2.1.sql`,
-`DI_TECHNOLOGY_v2.0.md`, `DI_CONFIGURATION_MODEL_v2.0.md`, `BASELINE_MANIFEST.md`.
+Superseded documents are in `design/archive/`. See `design/archive/README.md`.
 
 ---
 
@@ -139,12 +141,12 @@ The original list had **4 gaps** discovered during validation against the design
 | **6** | Document Intake use case + Subject/Document REST endpoints | LLD §Document Intake Service; OAS: `createSubject`, `listSubjects`, `getSubject`, `uploadSubjectDocument`, `getSubjectDocuments`, `getSubjectDocument` | ✅ DONE |
 | **7** | Quality rules + Upload Validator wired into intake | LLD §Upload Validator / Quality Service | ✅ DONE |
 | **8** | Normalization + Validation rules (`rules/` package) | LLD §Processing Worker steps 11–12 | ✅ DONE |
-| **9** | Real Google Document AI adapter | LLD §DocumentAIAdapter | ❌ NOT STARTED — needs GCP project + processor |
+| **9** | Gemini 2.5 Flash adapter + Document Schema Registry (D19–D23) | LLD §DocumentAIAdapter | ✅ DONE — `gemini_adapter.py` + `schemas/` package; set `DI_DOCAI_GEMINI_API_KEY` + `DI_DOCAI_MOCK=false` to activate |
 | **10a** | Processing Worker — full job claim loop + classification + extraction + scoring | LLD §Processing Worker (17 steps) + `DI_CLASSIFICATION_v2.2.md` | ✅ DONE |
 | **10b** | EOD Retry Scheduler | LLD §EOD Retry Scheduler | ✅ DONE |
 | **11** | All remaining 48 REST API operations (see breakdown below) | `DI_OPENAPI_v2.2.yaml` — 54 total, 54 done | ✅ DONE |
 | **12** | React PWA ops-ui | Architecture §Components / Access/API | ❌ NOT STARTED |
-| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ❌ NOT STARTED |
+| **13** | Secrets → Railway + Cloudflare Pages + CI/CD | Architecture §7 Vendor-neutral deployment | ✅ DONE — both services live on Railway via GitHub integration |
 | **14** | WhatsApp adapter — webhook, media download, intake, quarantine | LLD §WhatsApp Adapter + §11 WhatsApp flow | ❌ NOT STARTED (Phase 2) |
 | **15** | Registered device enforcement for USER actors | LLD §3 JWT/RBAC — `device_id` check | ❌ NOT STARTED (Phase 2) |
 | **16** | Idempotency records (`idempotency_records` table) | LLD §13 Idempotency | ❌ NOT STARTED (Phase 2) |
@@ -216,8 +218,7 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | `DI_CLERK_PUBLISHABLE_KEY` | `pk_test_mock` | ❌ not set | ❌ not set |
 | `DI_CLERK_SECRET_KEY` | `sk_test_mock` | ❌ not set | ❌ not set |
 | `DI_DOCAI_MOCK` | `true` | `true` | `false` |
-| `DI_DOCAI_PROJECT_ID` | _(not needed)_ | _(not needed)_ | ❌ not set |
-| `DI_DOCAI_PROCESSOR_ID` | _(not needed)_ | _(not needed)_ | ❌ not set |
+| `DI_DOCAI_GEMINI_API_KEY` | N/A (mock) | N/A (mock) | ❌ not set |
 | `DI_SENTRY_DSN` | empty | empty | ❌ not set |
 | `DI_ENV` | `local` | `dev` | `production` |
 
@@ -232,14 +233,20 @@ See `SECRETS_CHECKLIST.md` for the full per-environment matrix. Summary of requi
 | JWT audience (tenant) | `verigence-document-intelligence` |
 | JWT audience (system) | `verigence-document-intelligence-system` |
 | Authorization check | `permissions[]` array in JWT — NOT role names |
-| Problem response field clients must branch on | `code` (stable) — never `title` |
+| API response envelope | `{errorCode, errorMessage, data}` — `000` = success; client branches on `errorCode` |
+| Upload public status | `ACCEPTED` (FIT internally) / `REJECTED` (NOT_FIT/CORRUPT/UPLOAD_FAILED) |
+| source_channel | nullable — REST API sets NULL; WhatsApp adapter sets `WHATSAPP` |
 | Max upload size (default) | 30 MB |
-| Allowed MIME types (default) | `image/jpeg`, `image/png`, `image/webp`, `image/tiff`, `application/pdf` |
+| Allowed MIME types (default) | 22 types including PDF, images, Office, CSV, ZIP |
 | Processing job locking | `SELECT … FOR UPDATE SKIP LOCKED` |
 | Retry policy | 1 EOD retry for retryable failures; non-retryable → FAILED immediately |
 | Audit chain key | `(tenant_id, entity_type, entity_id)` — entity-scoped, not tenant-wide |
 | WhatsApp source channel | `WHATSAPP` — subject_id nullable until assigned |
 | Mock token format (dev/CI) | `mock.<tenant_id>.<actor_id>.<ROLE>[.<ROLE>...]` |
+| AI/OCR provider | Gemini 2.5 Flash — `gemini-2.5-flash` (D19 — supersedes D13 Azure) |
+| Scan all documents | Every document processed on upload; no ADDITIONAL skip (D18 — supersedes D4) |
+| Schema registry | `document_ai/schemas/` — one file per document type (D20) |
+| New document types | `booking_form`, `dealer_receipt`, `bank_statement_extract`, `upi_transaction`, `delivery_order_cover`, `upi_screenshot` — D16+D23 |
 
 ---
 
@@ -268,8 +275,63 @@ If a design decision needs to change, the human must agree, a new baseline versi
 
 ## 10. Next step
 
-**Current:** Step 12 — React PWA ops-ui
-**Pending env var:** `DI_SECURITY_JWKS_URL` must be set once Security module is deployed.
-**After ops-ui:** Step 13 — Railway + Cloudflare Pages + CI/CD.
+**Immediate: Backout Queue — migration 0008 + implementation (D24)**
+Design for backout queue locked in D24. Documents that fail processing are now
+immediately moved to a `backout_jobs` dead-letter table (TTL 12 h) and their
+`processing_status` set to `FAILED`. This unblocks the job queue during smoke
+testing.
 
-See `PROGRESS.md` for detailed task breakdown of each step.
+Steps in order:
+1. Apply migration `0007` to Neon (`alembic upgrade head`) — `document_search_index` table
+2. Apply migration `0008` to Neon — `backout_jobs` table (new, from D24)
+3. Implement backout queue code (see D24 implementation file list)
+4. Step 9c — Worker upserts to `document_search_index` after CONFIRMED
+5. Step 9d — `POST /analyse` endpoint (R1–R5 reconciliation rules, D15/D17)
+
+---
+
+### Infrastructure status — current
+
+| Service | Status |
+|---|---|
+| di-api (Railway) | ✅ Running — `https://di-api-production.up.railway.app` |
+| di-worker (Railway) | ✅ Running |
+| Neon PostgreSQL | ✅ Migrations 0001–0008 all applied |
+| Cloudflare R2 | ✅ Working — slug-based path with 4 form-type folders |
+| Security module JWKS | ✅ Using GitHub raw test JWKS |
+| CI pipeline | ✅ Green |
+
+### Schema changes beyond Baseline 2.2 spec
+
+| Migration | Change |
+|---|---|
+| `0002` | `subject_identifiers`: non-unique → UNIQUE partial index on active VERIFIED identifiers |
+| `0002` | `documents`: added `document_type_hint_key varchar(120)` |
+| `0002` | `processing_runs`: added `classification_candidate_set jsonb` |
+| `0002` | `audit_chain_heads`: rebuilt from per-tenant to entity-scoped PK `(tenant_id, entity_type, entity_id)` |
+| `0003` | `tenant_settings`: added nullable `verification_threshold NUMERIC(5,2)` |
+| `0004` | `tenant_settings`: relaxed constraints |
+| `0005` | new table `tenant_document_types`; `documents`: added `physical_form_type`, `requires_processing`; 15 global seed document types |
+| `0006` | `documents.source_channel`: dropped NOT NULL — now nullable (D10) |
+| `0007` | `document_search_index` table + GIN index + `pg_trgm`; `dealer_receipt` + `upi_screenshot` seed types; `requires_processing=true` for all form types |
+| `0008` | `backout_jobs` table + 2 indexes (D24) |
+
+### Code additions beyond Baseline 2.2 spec
+
+| Addition | Files | Detail |
+|---|---|---|
+| Delete Document API | `api/v1/documents.py`, `repositories/documents.py`, `errors.py`, `auth/permissions.py` | `DELETE .../documents/{id}` — hard delete for failed/not-fit documents. Permission: `di.document.delete` |
+| Configurable verification threshold | `settings.py`, `domain/scoring.py`, `workers/job_runner.py`, `api/v1/tenant_config.py`, `0003` migration | Per-tenant threshold stored in DB; env var fallback |
+| Auth migrated to Security module | `auth/verifier.py`, `auth/jwks.py`, `auth/principal.py`, `settings.py` | Issuer `verigence-security`, audience `verigence-platform`, `DI_SECURITY_JWKS_URL` replaces Clerk vars |
+| All permissions renamed | `auth/permissions.py` | All strings now `di.*` dot-separated (was colon-separated) |
+| Tenant document types | `repositories/tenants.py`, `repositories/database.py`, `0005` migration | 15 global seed types, per-tenant physical_form_type + requires_processing |
+| R2 path redesign | `storage/adapter.py`, `application/intake.py` | Slug-based path: `{tenant_slug}/subjects/{slug}-{id_short}/documents/{form_folder}/...` |
+| API contract redesign (D8–D12) | `api/v1/documents.py`, `api/v1/schemas.py`, `application/intake.py`, `repositories/documents.py`, `0006` migration | Universal envelope, ACCEPTED/REJECTED upload status, sourceChannel nullable, document-types summary endpoint |
+| Backout queue (D24) | `repositories/backout.py`, `workers/processor.py`, `scheduler/beat.py`, `settings.py`, `0008` migration | Dead-letter store for failed jobs; 12 h TTL; sweeper in EODRetryScheduler; `processing_status = FAILED` immediately on any failure |
+
+### Railway deployment method (no CLI token needed)
+
+Railway dashboard → service → Settings → Source → Connect Repo → select repo/branch `dev` → root directory blank.
+Auto-deploys on every push. Build/start commands read from `railway.toml`.
+
+See `PROGRESS.md` §Session 2026-08-14 for complete schema change log, all "what didn't work" failures, and next actions.

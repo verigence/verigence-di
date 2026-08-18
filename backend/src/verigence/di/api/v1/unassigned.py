@@ -20,9 +20,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 
+from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
@@ -31,11 +33,22 @@ from verigence.di.repositories.database import tenant_session
 from verigence.di.storage.adapter import get_storage_adapter
 
 router = APIRouter(prefix="/v1", tags=["WhatsApp"])
+logger = structlog.get_logger(__name__)
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents ───────────────────────────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents",
+    summary="Get Unassigned Documents",
+    description=(
+        "List all documents received via WhatsApp that have not yet been assigned to a Subject. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with paginated items array."
+    ),
+    response_description="Unassigned documents list",
+    operation_id="getUnassignedDocuments",
+)
 async def get_unassigned_documents(
     tenant_id: str,
     page: int = 1,
@@ -69,17 +82,28 @@ async def get_unassigned_documents(
                 {"tid": tenant_id},
             )
         ).scalar()
-    return {
+    payload = {
         "items": [_fmt_doc(r) for r in rows],
         "page": page,
         "pageSize": page_size,
         "total": total or 0,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId} ──────────────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}",
+    summary="Get Unassigned Document",
+    description=(
+        "Fetch a single unassigned WhatsApp document by ID. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with the document record, or 404 if not found."
+    ),
+    response_description="Unassigned document record",
+    operation_id="getUnassignedDocument",
+)
 async def get_unassigned_document(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -91,12 +115,21 @@ async def get_unassigned_document(
         row = await _fetch_unassigned_doc(session, tenant_id, document_id)
     if not row:
         raise problem(404, "Unassigned document not found", ErrorCode.DOCUMENT_NOT_FOUND)
-    return _fmt_doc(row)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc(row)).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/content ──────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/content")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/content",
+    summary="Get Unassigned Document Content",
+    description=(
+        "Stream the raw bytes of an unassigned WhatsApp document from storage. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns raw file bytes. Returns 410 Gone if content has been purged."
+    ),
+    operation_id="getUnassignedDocumentContent",
+)
 async def get_unassigned_document_content(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -145,7 +178,17 @@ async def get_unassigned_document_content(
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/fields ───────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/fields")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/fields",
+    summary="Get Unassigned Document Fields",
+    description=(
+        "Return extracted field values for a CONFIRMED unassigned document. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with fields array. Returns 409 if document is not yet CONFIRMED."
+    ),
+    response_description="Extracted fields",
+    operation_id="getUnassignedDocumentFields",
+)
 async def get_unassigned_document_fields(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -163,15 +206,26 @@ async def get_unassigned_document_fields(
                           ErrorCode.INVALID_DOCUMENT_STATE)
 
         fields = await _fetch_field_values(session, tenant_id, document_id)
-    return {
+    payload = {
         "documentId": str(document_id),
         "fields": fields,
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── GET /v1/tenants/{tenantId}/unassigned-documents/{documentId}/quality ──────
 
-@router.get("/tenants/{tenant_id}/unassigned-documents/{document_id}/quality")
+@router.get(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/quality",
+    summary="Get Unassigned Document Quality",
+    description=(
+        "Return quality rule evaluation results for an unassigned document. "
+        "Required permission: `di.unassigned_document.read`. "
+        "Returns D8 envelope with qualityResults array."
+    ),
+    response_description="Quality results",
+    operation_id="getUnassignedDocumentQuality",
+)
 async def get_unassigned_document_quality(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -195,7 +249,7 @@ async def get_unassigned_document_quality(
                 {"tid": tenant_id, "doc_id": document_id},
             )
         ).mappings().all()
-    return {
+    payload = {
         "documentId": str(document_id),
         "qualityResults": [
             {
@@ -209,11 +263,23 @@ async def get_unassigned_document_quality(
             for r in rows
         ],
     }
+    return ApiResponse(errorCode="000", errorMessage="Success", data=payload).model_dump()
 
 
 # ── PUT /v1/tenants/{tenantId}/unassigned-documents/{documentId}/subject ──────
 
-@router.put("/tenants/{tenant_id}/unassigned-documents/{document_id}/subject")
+@router.put(
+    "/tenants/{tenant_id}/unassigned-documents/{document_id}/subject",
+    summary="Assign Document to Subject",
+    description=(
+        "Assign an unassigned WhatsApp document to an existing active Subject. "
+        "Required permission: `di.unassigned_document.assign`. "
+        "Returns D8 envelope with the updated document record. "
+        "Returns 409 if the document already has a Subject assigned."
+    ),
+    response_description="Updated document record",
+    operation_id="assignDocumentSubject",
+)
 async def assign_document_subject(
     tenant_id: str,
     document_id: uuid.UUID,
@@ -269,7 +335,15 @@ async def assign_document_subject(
                 {"tid": tenant_id, "doc_id": document_id},
             )
         ).mappings().one()
-    return _fmt_doc(updated)
+
+    logger.info(
+        "subject_identifier_added",
+        tenant_id=tenant_id,
+        actor_id=actor.actor_id,
+        document_id=str(document_id),
+        subject_id=str(subject_id),
+    )
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc(updated)).model_dump()
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
