@@ -26,6 +26,7 @@ import os
 import socket
 import time
 import uuid
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -113,10 +114,10 @@ class ProcessingWorker:
     async def _process_one(
         self,
         *,
-        session_factory: async_sessionmaker,
+        session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        ai_adapter,
-        log,
+        ai_adapter: Any,
+        log: Any,
     ) -> bool:
         """Claim and process one job. Returns True if a job was processed."""
         async with session_factory() as session:
@@ -211,7 +212,7 @@ class ProcessingWorker:
 
 async def _handle_failure(
     *,
-    session_factory: async_sessionmaker,
+    session_factory: async_sessionmaker[AsyncSession],
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -220,7 +221,7 @@ async def _handle_failure(
     error_detail: str | None,
     retryable: bool,
     attempt_no: int,
-    job_log,
+    job_log: Any,
 ) -> None:
     """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path.
 
