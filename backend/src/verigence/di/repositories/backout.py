@@ -97,4 +97,4 @@ async def sweep_expired_backout_jobs(session: AsyncSession) -> int:
         """),
         {"now": now},
     )
-    return cast(CursorResult[Any], result).rowcount
+    return cast("CursorResult[Any]", result).rowcount
