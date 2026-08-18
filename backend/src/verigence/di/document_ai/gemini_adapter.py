@@ -35,7 +35,7 @@ import base64
 import json
 import uuid
 from decimal import Decimal
-from typing import Any, Tuple
+from typing import Any
 
 import httpx
 import structlog
@@ -385,7 +385,7 @@ async def _call_gemini_instrumented(
     artifact_bytes: bytes,
     mime_type: str,
     prompt: str,
-) -> Tuple[str, int, int, int]:
+) -> tuple[str, int, int, int]:
     """Send document bytes + prompt to Gemini. Returns (text, http_status, prompt_tokens, response_tokens).
 
     Uses httpx directly — no google.generativeai SDK dependency.
