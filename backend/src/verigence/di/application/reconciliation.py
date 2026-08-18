@@ -137,11 +137,15 @@ def _r3_date_proximity(
     bank_statements: list[dict[str, Any]],
 ) -> Finding:
     """R3: Payment date on receipt is within ±3 days of bank statement transaction date."""
-    receipt_dates = [_to_date(r.get("payment_date") or r.get("date")) for r in receipts]
-    receipt_dates = [d for d in receipt_dates if d is not None]
+    parsed_receipt_dates = [
+        _to_date(r.get("payment_date") or r.get("date")) for r in receipts
+    ]
+    receipt_dates: list[date] = [d for d in parsed_receipt_dates if d is not None]
 
-    bank_dates = [_to_date(b.get("transaction_date") or b.get("date")) for b in bank_statements]
-    bank_dates = [d for d in bank_dates if d is not None]
+    parsed_bank_dates = [
+        _to_date(b.get("transaction_date") or b.get("date")) for b in bank_statements
+    ]
+    bank_dates: list[date] = [d for d in parsed_bank_dates if d is not None]
 
     if not receipt_dates:
         return Finding("R3_DATE_PROXIMITY", "SKIPPED", "No receipt payment date found")
@@ -190,11 +194,15 @@ def _r6_date_sequence(
     delivery_orders: list[dict[str, Any]],
 ) -> Finding:
     """R6: Delivery order date is after the latest receipt date."""
-    receipt_dates = [_to_date(r.get("payment_date") or r.get("date")) for r in receipts]
-    receipt_dates = [d for d in receipt_dates if d is not None]
+    parsed_receipt_dates = [
+        _to_date(r.get("payment_date") or r.get("date")) for r in receipts
+    ]
+    receipt_dates: list[date] = [d for d in parsed_receipt_dates if d is not None]
 
-    delivery_dates = [_to_date(d.get("delivery_date") or d.get("date")) for d in delivery_orders]
-    delivery_dates = [d for d in delivery_dates if d is not None]
+    parsed_delivery_dates = [
+        _to_date(d.get("delivery_date") or d.get("date")) for d in delivery_orders
+    ]
+    delivery_dates: list[date] = [d for d in parsed_delivery_dates if d is not None]
 
     if not receipt_dates:
         return Finding("R6_DATE_SEQUENCE", "SKIPPED", "No receipt dates found")
