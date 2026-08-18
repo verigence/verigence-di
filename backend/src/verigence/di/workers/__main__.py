@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 async def _main() -> None:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+
     configure_logging()
 
     from verigence.di.scheduler.beat import EODRetryScheduler
@@ -36,6 +37,8 @@ async def _main() -> None:
     logger.info("di_worker_starting")
     worker.start()
     scheduler.start()
+    print("DI_WORKER_STARTED=PASS", flush=True)
+    print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
     await stop_event.wait()
 
