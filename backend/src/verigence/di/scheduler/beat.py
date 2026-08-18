@@ -265,7 +265,7 @@ async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
         """),
         {"cutoff": now_utc - timedelta(minutes=lease_minutes)},
     )
-    return cast(CursorResult[Any], result).rowcount
+    return cast("CursorResult[Any]", result).rowcount
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
