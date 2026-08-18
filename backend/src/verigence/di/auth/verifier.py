@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jose import JWTError, jwt  # type: ignore[import]
+from jose import JWTError, jwt
 
 from verigence.di.auth.jwks import get_jwks_cache
 from verigence.di.auth.permissions import ROLE_PERMISSIONS
