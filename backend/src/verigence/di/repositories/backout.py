@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -95,4 +97,4 @@ async def sweep_expired_backout_jobs(session: AsyncSession) -> int:
         """),
         {"now": now},
     )
-    return result.rowcount  # type: ignore[return-value]
+    return cast(CursorResult[Any], result).rowcount
