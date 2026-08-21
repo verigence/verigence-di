@@ -8,41 +8,43 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+class AuditStorageContextConflict(ValueError):
+    """An immutable external context reference was reused with conflicting IDs."""
+
+
 async def ensure_audit_storage_context(
     session: AsyncSession,
     *,
     tenant_id: str,
     external_context_ref: str,
-    subject_id: uuid.UUID,
     dealer_id: uuid.UUID,
-    outlet_id: uuid.UUID,
+    dealer_outlet_id: uuid.UUID,
     customer_id: uuid.UUID,
-    actor_id: str,
-    project_display_name: str | None = None,
-    dealer_display_name: str | None = None,
-    outlet_display_name: str | None = None,
-    customer_display_name: str | None = None,
-) -> tuple[dict[str, object], bool]:
-    """Create one immutable Audit storage context or return the identical context.
-
-    D28 makes ``external_context_ref`` the idempotent identity. Immutable business
-    IDs and frozen display metadata are never rewritten after creation.
-    """
+    subject_id: uuid.UUID,
+    service_principal_id: str,
+    project_slug: str,
+    dealer_slug: str,
+    dealer_outlet_slug: str,
+    customer_slug: str,
+) -> dict[str, object]:
+    """Create or return the immutable context identified by external_context_ref."""
     existing = await get_audit_storage_context_by_ref(
         session,
         tenant_id=tenant_id,
         external_context_ref=external_context_ref,
     )
     if existing is not None:
-        immutable = {
+        immutable_values = {
             "subject_id": subject_id,
             "dealer_id": dealer_id,
-            "outlet_id": outlet_id,
+            "dealer_outlet_id": dealer_outlet_id,
             "customer_id": customer_id,
         }
-        if any(existing[key] != value for key, value in immutable.items()):
-            raise ValueError("Audit storage context reference conflicts with immutable IDs")
-        return existing, False
+        if any(existing[key] != value for key, value in immutable_values.items()):
+            raise AuditStorageContextConflict(
+                "externalContextRef already identifies a different Audit business context"
+            )
+        return existing
 
     now = datetime.now(UTC)
     row = (
@@ -51,21 +53,19 @@ async def ensure_audit_storage_context(
                 """
                 INSERT INTO docintel.audit_storage_contexts (
                     tenant_id, external_context_ref, subject_id,
-                    dealer_id, outlet_id, customer_id,
-                    project_display_name, dealer_display_name,
-                    outlet_display_name, customer_display_name,
-                    status, created_by_actor_id, created_at_utc, updated_at_utc
+                    dealer_id, dealer_outlet_id, customer_id,
+                    project_slug, dealer_slug, dealer_outlet_slug, customer_slug,
+                    created_by_service_principal, created_at_utc
                 ) VALUES (
                     :tenant_id, :external_context_ref, :subject_id,
-                    :dealer_id, :outlet_id, :customer_id,
-                    :project_name, :dealer_name, :outlet_name, :customer_name,
-                    'ACTIVE', :actor_id, :now, :now
+                    :dealer_id, :dealer_outlet_id, :customer_id,
+                    :project_slug, :dealer_slug, :dealer_outlet_slug, :customer_slug,
+                    :service_principal_id, :now
                 )
-                RETURNING context_id, tenant_id, external_context_ref, subject_id,
-                          dealer_id, outlet_id, customer_id,
-                          project_display_name, dealer_display_name,
-                          outlet_display_name, customer_display_name,
-                          status, created_at_utc, updated_at_utc
+                RETURNING storage_context_id, tenant_id, external_context_ref,
+                          subject_id, dealer_id, dealer_outlet_id, customer_id,
+                          project_slug, dealer_slug, dealer_outlet_slug, customer_slug,
+                          created_by_service_principal, created_at_utc
                 """
             ),
             {
@@ -73,40 +73,40 @@ async def ensure_audit_storage_context(
                 "external_context_ref": external_context_ref,
                 "subject_id": subject_id,
                 "dealer_id": dealer_id,
-                "outlet_id": outlet_id,
+                "dealer_outlet_id": dealer_outlet_id,
                 "customer_id": customer_id,
-                "project_name": project_display_name,
-                "dealer_name": dealer_display_name,
-                "outlet_name": outlet_display_name,
-                "customer_name": customer_display_name,
-                "actor_id": actor_id,
+                "project_slug": project_slug,
+                "dealer_slug": dealer_slug,
+                "dealer_outlet_slug": dealer_outlet_slug,
+                "customer_slug": customer_slug,
+                "service_principal_id": service_principal_id,
                 "now": now,
             },
         )
     ).mappings().one()
-    return dict(row), True
+    return dict(row)
 
 
 async def get_audit_storage_context(
     session: AsyncSession,
     *,
     tenant_id: str,
-    context_id: uuid.UUID,
+    storage_context_id: uuid.UUID,
 ) -> dict[str, object] | None:
     row = (
         await session.execute(
             text(
                 """
-                SELECT context_id, tenant_id, external_context_ref, subject_id,
-                       dealer_id, outlet_id, customer_id,
-                       project_display_name, dealer_display_name,
-                       outlet_display_name, customer_display_name,
-                       status, created_at_utc, updated_at_utc
+                SELECT storage_context_id, tenant_id, external_context_ref,
+                       subject_id, dealer_id, dealer_outlet_id, customer_id,
+                       project_slug, dealer_slug, dealer_outlet_slug, customer_slug,
+                       created_by_service_principal, created_at_utc
                 FROM docintel.audit_storage_contexts
-                WHERE tenant_id=:tenant_id AND context_id=:context_id
+                WHERE tenant_id=:tenant_id
+                  AND storage_context_id=:storage_context_id
                 """
             ),
-            {"tenant_id": tenant_id, "context_id": context_id},
+            {"tenant_id": tenant_id, "storage_context_id": storage_context_id},
         )
     ).mappings().one_or_none()
     return dict(row) if row is not None else None
@@ -122,21 +122,16 @@ async def get_audit_storage_context_by_ref(
         await session.execute(
             text(
                 """
-                SELECT context_id, tenant_id, external_context_ref, subject_id,
-                       dealer_id, outlet_id, customer_id,
-                       project_display_name, dealer_display_name,
-                       outlet_display_name, customer_display_name,
-                       status, created_at_utc, updated_at_utc
+                SELECT storage_context_id, tenant_id, external_context_ref,
+                       subject_id, dealer_id, dealer_outlet_id, customer_id,
+                       project_slug, dealer_slug, dealer_outlet_slug, customer_slug,
+                       created_by_service_principal, created_at_utc
                 FROM docintel.audit_storage_contexts
                 WHERE tenant_id=:tenant_id
                   AND external_context_ref=:external_context_ref
-                  AND status='ACTIVE'
                 """
             ),
-            {
-                "tenant_id": tenant_id,
-                "external_context_ref": external_context_ref,
-            },
+            {"tenant_id": tenant_id, "external_context_ref": external_context_ref},
         )
     ).mappings().one_or_none()
     return dict(row) if row is not None else None
