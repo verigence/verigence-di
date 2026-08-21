@@ -271,6 +271,9 @@ def create_app() -> FastAPI:
     # ── Routers ─────────────────────────────────────────────────────────────
     # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
+    from verigence.di.api.v1.admin_provisioning import (  # noqa: PLC0415
+        router as admin_provisioning_router,
+    )
     from verigence.di.api.v1.analyse import router as analyse_router  # noqa: PLC0415
     from verigence.di.api.v1.audit_storage_contexts import (  # noqa: PLC0415
         router as audit_storage_contexts_router,
@@ -299,6 +302,7 @@ def create_app() -> FastAPI:
     app.include_router(subjects_router)
     app.include_router(documents_router)
     app.include_router(audit_storage_contexts_router)
+    app.include_router(admin_provisioning_router)
     app.include_router(verification_router)
     app.include_router(operations_router)
     app.include_router(entity_links_router)
