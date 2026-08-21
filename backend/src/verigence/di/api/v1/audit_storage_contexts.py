@@ -1,26 +1,37 @@
-"""UC02 trusted Audit Core storage-context API."""
+"""UC02 trusted Audit Core storage-context and document-intake API."""
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+import structlog
+from fastapi import APIRouter, Depends, File, Form, Header, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from verigence.di.api.v1.schemas import ApiResponse
+from verigence.di.api.v1.schemas import (
+    ApiResponse,
+    UploadData,
+    public_processing_status,
+    public_upload_status,
+)
+from verigence.di.application.intake import intake_document
 from verigence.di.auth.service_integration import (
     ServiceIntegrationPrincipal,
     require_service_integration,
 )
+from verigence.di.domain.enums import UploadStatus
 from verigence.di.errors import ErrorCode, http_exception
 from verigence.di.repositories.audit_storage_contexts import (
     AuditStorageContextConflict,
     ensure_audit_storage_context,
+    get_audit_storage_context_by_ref,
 )
-from verigence.di.repositories.database import get_db_session, set_tenant_context
+from verigence.di.repositories.database import get_db_session, set_tenant_context, tenant_session
 from verigence.di.repositories.subjects import subject_exists
+from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.storage.audit_keys import frozen_audit_slugs
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Audit Storage Contexts"])
@@ -63,7 +74,6 @@ async def ensure_storage_context(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
 ) -> ApiResponse[AuditStorageContextData]:
-    # Header is mandatory by D28/LLD. externalContextRef is the stable semantic identity.
     del idempotency_key
     external_ref = externalContextRef.strip()
     if not external_ref:
@@ -81,7 +91,7 @@ async def ensure_storage_context(
     if not await subject_exists(session, tenant_id=tenantId, subject_id=request.subjectId):
         raise http_exception(ErrorCode.SUBJECT_NOT_FOUND)
 
-    slugs = frozen_audit_slugs(
+    project_slug, dealer_slug, outlet_slug, customer_slug = frozen_audit_slugs(
         tenant_id=tenantId,
         project_name=request.displayContext.projectName,
         dealer_name=request.displayContext.dealerName,
@@ -98,11 +108,12 @@ async def ensure_storage_context(
             dealer_outlet_id=request.dealerOutletId,
             customer_id=request.customerId,
             service_principal_id=service.service_id,
-            project_slug=slugs[0],
-            dealer_slug=slugs[1],
-            dealer_outlet_slug=slugs[2],
-            customer_slug=slugs[3],
+            project_slug=project_slug,
+            dealer_slug=dealer_slug,
+            dealer_outlet_slug=outlet_slug,
+            customer_slug=customer_slug,
         )
+        await session.commit()
     except AuditStorageContextConflict as exc:
         raise http_exception(ErrorCode.CONFLICT, detail=str(exc)) from exc
 
@@ -118,3 +129,78 @@ async def ensure_storage_context(
             customerId=context["customer_id"],
         ),
     )
+
+
+@router.post(
+    "/audit-storage-contexts/{externalContextRef}/documents",
+    response_model=ApiResponse[UploadData],
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload Audit Core evidence using the frozen storage context",
+    operation_id="uploadAuditContextDocument",
+)
+async def upload_audit_context_document(
+    tenantId: str,
+    externalContextRef: str,
+    service: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+    file: UploadFile = File(..., description="Raw evidence content"),
+    documentTypeKey: str | None = Form(None),
+) -> ApiResponse[UploadData]:
+    """Normal Audit Core -> DI machine intake.
+
+    The caller supplies an immutable context reference, never an object key. DI resolves
+    the frozen hierarchy and constructs the provider-neutral storage key itself.
+    """
+    external_ref = externalContextRef.strip()
+    if not external_ref:
+        raise http_exception(ErrorCode.INVALID_REQUEST, detail="externalContextRef is required.")
+    correlation_id = str(
+        structlog.contextvars.get_contextvars().get("correlation_id", uuid.uuid4())
+    )
+    async with tenant_session(tenantId) as session:
+        context = await get_audit_storage_context_by_ref(
+            session,
+            tenant_id=tenantId,
+            external_context_ref=external_ref,
+        )
+        if context is None:
+            raise http_exception(
+                ErrorCode.CONFLICT,
+                detail="Audit storage context must be established before document intake.",
+            )
+        doc = await intake_document(
+            session=session,
+            storage=get_storage_adapter(),
+            tenant_id=tenantId,
+            subject_id=context["subject_id"],
+            uploaded_by_actor_id=service.service_id,
+            uploaded_by_actor_type="SERVICE_INTEGRATION",
+            correlation_id=correlation_id,
+            upload=file,
+            document_type_key=documentTypeKey,
+            audit_storage_context=context,
+        )
+
+    internal_upload: UploadStatus = doc["upload_status"]
+    public_upload = public_upload_status(internal_upload)
+    rejected = public_upload == "REJECTED"
+    return ApiResponse(
+        errorCode="000" if not rejected else _upload_error_code(internal_upload, doc.get("upload_issue_code")),
+        errorMessage=("File Uploaded Successfully" if not rejected else "Document intake rejected"),
+        data=UploadData(
+            documentId=doc["document_id"],
+            uploadStatus=public_upload,
+            processingStatus=public_processing_status(doc.get("processing_status"), rejected),
+        ),
+    )
+
+
+def _upload_error_code(upload_status: UploadStatus, issue_code: object) -> str:
+    if upload_status == UploadStatus.UPLOAD_FAILED:
+        if issue_code == "FILE_TOO_LARGE":
+            return "E007"
+        if issue_code == "MIME_TYPE_NOT_ALLOWED":
+            return "E006"
+        return "E003"
+    if upload_status == UploadStatus.CORRUPT:
+        return "E002"
+    return "E001"
