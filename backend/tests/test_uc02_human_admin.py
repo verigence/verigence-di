@@ -121,12 +121,14 @@ def test_admin_context_client_rejects_invalid_response_shape() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"userId": str(uuid4()), "isSuperAdmin": "yes"})
 
-    with human_admin.SecurityAdminClient(
-        base_url="https://security.example.test",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        with pytest.raises(human_admin.SecurityAdminError):
-            client.get_admin_context(human_bearer_token="original-human-token")
+    with (
+        human_admin.SecurityAdminClient(
+            base_url="https://security.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(human_admin.SecurityAdminError),
+    ):
+        client.get_admin_context(human_bearer_token="original-human-token")
 
 
 def test_security_base_url_is_derived_from_configured_jwks_origin() -> None:
