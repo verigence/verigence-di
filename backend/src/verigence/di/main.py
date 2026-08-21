@@ -72,6 +72,7 @@ async def _validate_schema_profile_consistency() -> None:
                 ).mappings().all()
 
                 if not rows:
+                    # No published profile for this schema key — not an error
                     continue
 
                 profile_keys = {r["field_key"] for r in rows}
@@ -95,7 +96,6 @@ async def _validate_schema_profile_consistency() -> None:
 
 def create_app() -> FastAPI:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
-
     configure_logging()
     settings = get_settings()
 
@@ -104,7 +104,6 @@ def create_app() -> FastAPI:
         """Start background worker + EOD scheduler on startup; stop on shutdown."""
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
-
         worker = get_worker()
         scheduler = get_eod_scheduler()
         if settings.worker_enabled:
@@ -124,9 +123,9 @@ def create_app() -> FastAPI:
             "extraction, verification, and reconciliation platform. "
             "Primary lookup key: tenantId + subjectId. "
             "Machine document lifecycle: Upload → Process → Confirm → Verify. "
-            "All protected endpoints require a Bearer JWT issued by the Verigence Security module. "
-            "Human APIs use the Security human audience; approved machine integration APIs use "
-            "Security-issued ServiceIntegration tokens bound to the DI audience. "
+            "All protected endpoints require a Bearer JWT issued by the Verigence Security module "
+            "(iss=verigence-security, aud=verigence-platform). "
+            "Use mock tokens (mock.<tenantId>.<actorId>.<ROLE>) for local dev and CI. "
             "Response envelope (D8): {\"errorCode\":\"000\",\"errorMessage\":\"Success\",\"data\":{...}}. "
             "Non-zero errorCode values indicate business errors; HTTP 4xx/5xx indicate transport errors."
         ),
@@ -136,11 +135,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
     def custom_openapi() -> dict:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
-
         schema = get_openapi(
             title=app.title,
             version=app.version,
@@ -152,7 +151,11 @@ def create_app() -> FastAPI:
                 "type": "http",
                 "scheme": "bearer",
                 "bearerFormat": "JWT",
-                "description": "Security-module-issued JWT for the route's approved actor/audience.",
+                "description": (
+                    "Security-module-issued JWT. "
+                    "Claims: iss=verigence-security, aud=verigence-platform, permissions[]. "
+                    "Dev/CI mock format: mock.<tenantId>.<actorId>.<ROLE>[.<ROLE>...]"
+                ),
             }
         }
         schema["security"] = [{"BearerAuth": []}]
@@ -161,6 +164,7 @@ def create_app() -> FastAPI:
 
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
+    # ── CORS ────────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
         allow_origins=(
@@ -173,6 +177,7 @@ def create_app() -> FastAPI:
         expose_headers=[CORRELATION_ID_HEADER],
     )
 
+    # ── Layer 1: RequestValidationError → Problem INVALID_REQUEST ────────────
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
@@ -191,6 +196,7 @@ def create_app() -> FastAPI:
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
+    # ── Layer 2: HTTPException → Problem (pass-through if already Problem) ───
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(
         request: Request, exc: HTTPException
@@ -198,10 +204,12 @@ def create_app() -> FastAPI:
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
+        # If detail is already a Problem dict (has a 'code' key), attach correlationId
         if isinstance(exc.detail, dict) and "code" in exc.detail:
             body = dict(exc.detail)
             body.setdefault("correlationId", correlation_id)
         else:
+            # Wrap plain string or unexpected dict in a canonical Problem body
             body = problem_response(
                 ErrorCode.INTERNAL_ERROR,
                 detail=str(exc.detail),
@@ -213,6 +221,7 @@ def create_app() -> FastAPI:
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
+    # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
@@ -221,6 +230,7 @@ def create_app() -> FastAPI:
             if incoming and _is_valid_correlation_id(incoming)
             else str(uuid.uuid4())
         )
+        # Bind to structlog context for this request
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
 
@@ -228,6 +238,8 @@ def create_app() -> FastAPI:
         try:
             response: Response = await call_next(request)
         except Exception as exc:  # noqa: BLE001
+            # Layer 3 catch-all: exceptions that escaped both registered handlers.
+            # Must return Problem JSON — never text/plain.
             logger.error(
                 "unhandled_exception",
                 exc_type=type(exc).__name__,
@@ -256,6 +268,8 @@ def create_app() -> FastAPI:
         )
         return response
 
+    # ── Routers ─────────────────────────────────────────────────────────────
+    # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
     from verigence.di.api.v1.analyse import router as analyse_router  # noqa: PLC0415
     from verigence.di.api.v1.audit_storage_contexts import (  # noqa: PLC0415
@@ -263,22 +277,22 @@ def create_app() -> FastAPI:
     )
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
     from verigence.di.api.v1.entity_links import router as entity_links_router  # noqa: PLC0415
-    from verigence.di.api.v1.extraction_profiles import (  # noqa: PLC0415
-        router as extraction_profiles_router,
+    from verigence.di.api.v1.extraction_profiles import (
+        router as extraction_profiles_router,  # noqa: PLC0415
     )
     from verigence.di.api.v1.operations import router as operations_router  # noqa: PLC0415
-    from verigence.di.api.v1.requirement_profiles import (  # noqa: PLC0415
-        router as requirement_profiles_router,
+    from verigence.di.api.v1.requirement_profiles import (
+        router as requirement_profiles_router,  # noqa: PLC0415
     )
-    from verigence.di.api.v1.subject_matching import (  # noqa: PLC0415
-        router as subject_matching_router,
+    from verigence.di.api.v1.subject_matching import (
+        router as subject_matching_router,  # noqa: PLC0415
     )
     from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
     from verigence.di.api.v1.tenant_config import router as tenant_config_router  # noqa: PLC0415
     from verigence.di.api.v1.unassigned import router as unassigned_router  # noqa: PLC0415
     from verigence.di.api.v1.verification import router as verification_router  # noqa: PLC0415
-    from verigence.di.api.v1.whatsapp_system import (  # noqa: PLC0415
-        router as whatsapp_system_router,
+    from verigence.di.api.v1.whatsapp_system import (
+        router as whatsapp_system_router,  # noqa: PLC0415
     )
 
     app.include_router(health_router)
@@ -296,10 +310,10 @@ def create_app() -> FastAPI:
     app.include_router(whatsapp_system_router)
     app.include_router(analyse_router)
 
+    # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
         try:
             import sentry_sdk  # type: ignore[import]
-
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
@@ -311,4 +325,5 @@ def create_app() -> FastAPI:
     return app
 
 
+# Module-level app instance used by uvicorn
 app = create_app()
