@@ -6,7 +6,7 @@
 **Branch:** `dev`  
 **Related authority:** `DI_DECISIONS.md`, `DI_MASTER_REFERENCE.md`, `docs/SECURITY_AUTHORIZATION_ALIGNMENT_INCREMENT_I.md`, `docs/UC02_SUPERADMIN_ATTESTATION_DECISION_2026-08-21.md`
 
-> This document is a narrow UC02 alignment amendment. It does not supersede DI's generic document-processing design except where explicitly stated for UC02 administration. **Owner clarification dated 2026-08-21 is authoritative: Phase 1 uses hard delete. Resumable/process-oriented purge is deferred to Phase 2.** Any older Phase-1 wording that calls the delete operation a purge is superseded by this document.
+> This document is a narrow UC02 alignment amendment. It does not supersede DI's generic document-processing design except where explicitly stated for UC02 administration. **Owner clarification dated 2026-08-21 is authoritative: Phase 1 uses hard delete only. Resumable/process-oriented purge is deferred to Phase 2.** Any older Phase-1 wording that calls the delete operation a purge, or introduces a persistent delete guard/tombstone solely to prevent recreation of a deleted Tenant, is superseded by this document.
 
 ## 1. Human administrative actor rule
 
@@ -24,46 +24,51 @@ with the same forwarded Security human JWT. DI requires the current Security res
 
 Audit Core must not replace the human administrator with a `ServiceIntegration` token for a human-admin-only DI operation.
 
-`ServiceIntegration` remains appropriate for normal non-administrative Audit Core → DI document processing/integration calls.
+`ServiceIntegration` remains appropriate for normal non-administrative Audit Core -> DI document processing/integration calls.
 
 ## 2. Phase-1 Project/Tenant hard delete
 
 UC02 Phase 1 requires an internal/admin **hard-delete** capability because the product is new and a Project may need to be deleted and rebuilt even after activation.
 
-Phase 1 does **not** introduce the later process-oriented purge lifecycle, purge operation receipt, purge retry endpoint, `PURGING/PURGED` lifecycle states, retention-preserving purge, or soft-delete semantics. Those are Phase-2 concerns.
+Phase 1 does **not** introduce:
 
-DI Phase-1 hard delete must:
+- a process-oriented purge lifecycle;
+- purge operation receipts;
+- purge retry/status resources;
+- `PURGING` / `PURGED` / `DELETING` / `DELETED` lifecycle state persisted solely for deletion;
+- a persistent post-delete tombstone/guard whose purpose is to prevent recreation of the old Tenant ID;
+- retention-preserving purge;
+- soft-delete semantics.
+
+Those concepts are outside UC02 Phase 1 and may be considered in Phase 2 only if separately approved.
+
+DI Phase-1 hard delete must do only what is required for the hard-delete operation:
 
 - require the forwarded human SuperAdmin JWT;
 - independently confirm live `isSuperAdmin=true` through Security `/platform/admin-context`;
 - reject `ServiceIntegration` on the human-admin-only hard-delete endpoint;
-- be idempotent: deleting an already hard-deleted Tenant ID returns the successful deleted/zero-state result rather than recreating it;
-- establish a deletion guard/tombstone before deleting Tenant-owned state so stale Tenant-scoped writes cannot auto-provision the deleted Tenant again;
-- fail closed if active RUNNING processing work cannot safely be deleted;
-- delete object-storage bytes before deleting the last metadata that identifies those objects;
-- delete Tenant-owned metadata/configuration in FK-safe order;
+- delete DI-owned object-storage bytes before deleting the last DI metadata that identifies those objects;
+- delete Tenant-owned DI metadata/configuration in FK-safe order;
 - preserve global/system-seeded DI catalogue rows;
-- expose/return zero-state verification to Audit Core;
+- return/allow verification that the target Tenant's DI-owned state is zero before Audit Core proceeds;
 - never delete the canonical Security Tenant; Security deletion is performed later by Audit Core and remains the final cross-module step.
+
+No additional lifecycle or recreation-prevention behavior is implied by this requirement.
 
 ### 2.1 Phase-1 hard-delete sequencing
 
 ```text
 validate current human SuperAdmin
- -> establish Tenant delete guard = DELETING
- -> block new Tenant auto-provision/writes
- -> verify no RUNNING Tenant processing work
+ -> identify target Tenant-owned DI state
  -> enumerate authoritative object keys
  -> delete object bytes
- -> verify object absence
- -> break current/self document references required by FK graph
+ -> verify required object deletion
  -> delete Tenant-owned metadata/configuration in FK-safe order
  -> verify zero Tenant-owned DI state
- -> mark delete guard = DELETED
- -> return zeroStateVerified=true
+ -> return hard-delete result
 ```
 
-If a technical failure occurs after `DELETING` is established, the caller retries the same hard-delete endpoint. Phase 1 does not expose a separate purge-operation resource or process-oriented recovery workflow.
+If implementation inspection exposes a concrete FK, worker, transaction or object-storage safety requirement needed to make the hard delete correct, implement only the smallest source-backed mechanism required for that condition. Do not introduce a persistent purge/deletion lifecycle or recreation-prevention tombstone without a separate approved requirement.
 
 ## 3. Phase-2 direction
 
@@ -71,11 +76,11 @@ Phase 2 may introduce an explicit process-oriented purge model with richer lifec
 
 ## 4. Storage hierarchy change remains a separate locked decision
 
-Current locked D5 uses Tenant → Subject → Documents object keys.
+Current locked D5 uses Tenant -> Subject -> Documents object keys.
 
 UC02 requires Audit Core-originated vehicle-audit documents to follow trusted business context:
 
-`Project → Dealer → Dealer Outlet → Customer → Documents`
+`Project -> Dealer -> Dealer Outlet -> Customer -> Documents`
 
 Before storage-key code changes, the approved UC02 Audit storage-context contract must be used. The browser must never author object-storage paths directly.
 
