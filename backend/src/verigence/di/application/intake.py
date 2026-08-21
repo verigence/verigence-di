@@ -369,14 +369,16 @@ async def intake_document(
 
     duration_ms = round((time.monotonic() - intake_start) * 1000, 1)
     failed_rules = [
-        r.rule_key for r in (validator_result.quality_results or []) if not r.passed
-    ] if hasattr(validator_result, "quality_results") else []
+        result.rule_key
+        for result in validator_result.quality_results
+        if result.outcome == "FAIL"
+    ]
     if validator_result.upload_status == UploadStatus.FIT:
         log.info(
             "quality_verdict",
             document_id=str(document_id),
             upload_status=validator_result.upload_status.value,
-            rules_run=len(validator_result.quality_results or []),
+            rules_run=len(validator_result.quality_results),
             rules_failed=len(failed_rules),
             failed_rule_keys=failed_rules,
             total_duration_ms=duration_ms,
@@ -408,7 +410,7 @@ def _context_string(context: dict[str, object], key: str) -> str:
 
 def _detect_mime(data: bytes, filename: str) -> str:
     try:
-        import magic  # type: ignore[import]
+        import magic
         return magic.from_buffer(data[:2048], mime=True)
     except Exception:
         pass
