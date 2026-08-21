@@ -284,6 +284,7 @@ def create_app() -> FastAPI:
         router as extraction_profiles_router,  # noqa: PLC0415
     )
     from verigence.di.api.v1.operations import router as operations_router  # noqa: PLC0415
+    from verigence.di.api.v1.project_masters import router as project_masters_router  # noqa: PLC0415
     from verigence.di.api.v1.requirement_profiles import (
         router as requirement_profiles_router,  # noqa: PLC0415
     )
@@ -303,6 +304,7 @@ def create_app() -> FastAPI:
     app.include_router(documents_router)
     app.include_router(audit_storage_contexts_router)
     app.include_router(admin_provisioning_router)
+    app.include_router(project_masters_router)
     app.include_router(verification_router)
     app.include_router(operations_router)
     app.include_router(entity_links_router)
