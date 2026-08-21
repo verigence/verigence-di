@@ -81,11 +81,7 @@ async def create_integration_subject(
     body: CreateSubjectRequest,
     service: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
 ) -> ApiResponse[SubjectResponse]:
-    """Create a DI Subject for normal Audit Core machine integration.
-
-    The Security-v2 ServiceIntegration is platform-global; Tenant authority comes
-    from the trusted route context and DI RLS, not from a machine-token tenant claim.
-    """
+    """Create a DI Subject for normal Audit Core machine integration."""
     async with tenant_session(tenantId) as session:
         subject = await create_subject(
             session,
@@ -93,6 +89,7 @@ async def create_integration_subject(
             subject_type=body.subjectType,
             display_name=body.displayName,
             created_by_actor_id=service.service_id,
+            created_by_actor_type="SERVICE",
         )
     logger.info(
         "integration_subject_created",
@@ -154,5 +151,6 @@ async def get_subject_endpoint(
         subject = await get_subject(session, tenant_id=actor.tenant_id, subject_id=subjectId)
     if subject is None:
         from verigence.di.errors import ErrorCode, problem  # noqa: PLC0415
+
         raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
     return ApiResponse(errorCode="000", errorMessage="Success", data=_subject_response(subject))
