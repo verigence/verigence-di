@@ -64,6 +64,13 @@ class AuditStorageContextData(BaseModel):
     customerId: UUID
 
 
+def _context_uuid(context: dict[str, object], key: str) -> UUID:
+    value = context.get(key)
+    if not isinstance(value, UUID):
+        raise RuntimeError(f"Persisted Audit storage context has invalid {key}")
+    return value
+
+
 def _document_data(doc: dict) -> DocumentData:  # type: ignore[type-arg]
     public_upload = public_upload_status(doc["upload_status"])
     rejected = public_upload == "REJECTED"
@@ -138,12 +145,12 @@ async def ensure_storage_context(
         errorCode="000",
         errorMessage="Success",
         data=AuditStorageContextData(
-            storageContextId=context["storage_context_id"],
+            storageContextId=_context_uuid(context, "storage_context_id"),
             externalContextRef=str(context["external_context_ref"]),
-            subjectId=context["subject_id"],
-            dealerId=context["dealer_id"],
-            dealerOutletId=context["dealer_outlet_id"],
-            customerId=context["customer_id"],
+            subjectId=_context_uuid(context, "subject_id"),
+            dealerId=_context_uuid(context, "dealer_id"),
+            dealerOutletId=_context_uuid(context, "dealer_outlet_id"),
+            customerId=_context_uuid(context, "customer_id"),
         ),
     )
 
@@ -189,7 +196,7 @@ async def upload_audit_context_document(
             session=session,
             storage=get_storage_adapter(),
             tenant_id=tenantId,
-            subject_id=context["subject_id"],
+            subject_id=_context_uuid(context, "subject_id"),
             uploaded_by_actor_id=service.service_id,
             uploaded_by_actor_type="SERVICE",
             correlation_id=correlation_id,
@@ -242,7 +249,7 @@ async def get_audit_context_document(
             session,
             tenant_id=tenantId,
             document_id=documentId,
-            subject_id=context["subject_id"],
+            subject_id=_context_uuid(context, "subject_id"),
         )
         if doc is None:
             raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
@@ -256,7 +263,7 @@ async def get_audit_context_document(
                 {"tenant_id": tenantId, "document_id": documentId},
             )
         ).scalar_one_or_none()
-        if storage_context_id != context["storage_context_id"]:
+        if storage_context_id != _context_uuid(context, "storage_context_id"):
             raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
     return ApiResponse(errorCode="000", errorMessage="Success", data=_document_data(doc))
 
