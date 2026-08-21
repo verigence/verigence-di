@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.api.v1.schemas import (
     ApiResponse,
+    DocumentData,
     UploadData,
     public_processing_status,
     public_upload_status,
@@ -30,7 +31,9 @@ from verigence.di.repositories.audit_storage_contexts import (
     get_audit_storage_context_by_ref,
 )
 from verigence.di.repositories.database import get_db_session, set_tenant_context, tenant_session
+from verigence.di.repositories.documents import get_document
 from verigence.di.repositories.subjects import subject_exists
+from verigence.di.repositories.tenants import provision_actor
 from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.storage.audit_keys import frozen_audit_slugs
 
@@ -59,6 +62,20 @@ class AuditStorageContextData(BaseModel):
     dealerId: UUID
     dealerOutletId: UUID
     customerId: UUID
+
+
+def _document_data(doc: dict) -> DocumentData:  # type: ignore[type-arg]
+    public_upload = public_upload_status(doc["upload_status"])
+    rejected = public_upload == "REJECTED"
+    return DocumentData(
+        documentId=doc["document_id"],
+        documentTypeKey=doc.get("document_type_key"),
+        uploadStatus=public_upload,
+        processingStatus=public_processing_status(doc.get("processing_status"), rejected),
+        confirmationStatus=doc.get("confirmation_status"),
+        confidenceScore=doc.get("confidence_score"),
+        registeredAtUtc=doc["registered_at_utc"],
+    )
 
 
 @router.put(
@@ -145,11 +162,6 @@ async def upload_audit_context_document(
     file: UploadFile = File(..., description="Raw evidence content"),
     documentTypeKey: str | None = Form(None),
 ) -> ApiResponse[UploadData]:
-    """Normal Audit Core -> DI machine intake.
-
-    The caller supplies an immutable context reference, never an object key. DI resolves
-    the frozen hierarchy and constructs the provider-neutral storage key itself.
-    """
     external_ref = externalContextRef.strip()
     if not external_ref:
         raise http_exception(ErrorCode.INVALID_REQUEST, detail="externalContextRef is required.")
@@ -167,13 +179,19 @@ async def upload_audit_context_document(
                 ErrorCode.CONFLICT,
                 detail="Audit storage context must be established before document intake.",
             )
+        await provision_actor(
+            session,
+            tenantId,
+            service.service_id,
+            actor_type="SERVICE",
+        )
         doc = await intake_document(
             session=session,
             storage=get_storage_adapter(),
             tenant_id=tenantId,
             subject_id=context["subject_id"],
             uploaded_by_actor_id=service.service_id,
-            uploaded_by_actor_type="SERVICE_INTEGRATION",
+            uploaded_by_actor_type="SERVICE",
             correlation_id=correlation_id,
             upload=file,
             document_type_key=documentTypeKey,
@@ -184,7 +202,11 @@ async def upload_audit_context_document(
     public_upload = public_upload_status(internal_upload)
     rejected = public_upload == "REJECTED"
     return ApiResponse(
-        errorCode="000" if not rejected else _upload_error_code(internal_upload, doc.get("upload_issue_code")),
+        errorCode=(
+            "000"
+            if not rejected
+            else _upload_error_code(internal_upload, doc.get("upload_issue_code"))
+        ),
         errorMessage=("File Uploaded Successfully" if not rejected else "Document intake rejected"),
         data=UploadData(
             documentId=doc["document_id"],
@@ -192,6 +214,51 @@ async def upload_audit_context_document(
             processingStatus=public_processing_status(doc.get("processing_status"), rejected),
         ),
     )
+
+
+@router.get(
+    "/audit-storage-contexts/{externalContextRef}/documents/{documentId}",
+    response_model=ApiResponse[DocumentData],
+    summary="Get an Audit Core evidence document by frozen context",
+    operation_id="getAuditContextDocument",
+)
+async def get_audit_context_document(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    service: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+) -> ApiResponse[DocumentData]:
+    del service
+    external_ref = externalContextRef.strip()
+    async with tenant_session(tenantId) as session:
+        context = await get_audit_storage_context_by_ref(
+            session,
+            tenant_id=tenantId,
+            external_context_ref=external_ref,
+        )
+        if context is None:
+            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+        doc = await get_document(
+            session,
+            tenant_id=tenantId,
+            document_id=documentId,
+            subject_id=context["subject_id"],
+        )
+        if doc is None:
+            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+        storage_context_id = (
+            await session.execute(
+                text("""
+                    SELECT audit_storage_context_id
+                    FROM docintel.documents
+                    WHERE tenant_id=:tenant_id AND document_id=:document_id
+                """),
+                {"tenant_id": tenantId, "document_id": documentId},
+            )
+        ).scalar_one_or_none()
+        if storage_context_id != context["storage_context_id"]:
+            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_document_data(doc))
 
 
 def _upload_error_code(upload_status: UploadStatus, issue_code: object) -> str:
