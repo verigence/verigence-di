@@ -56,59 +56,41 @@ def _make_mappings_row(**kwargs) -> MagicMock:  # type: ignore[no-untyped-def]
     return row
 
 
-def _make_session_mock() -> AsyncMock:
-    """Minimal async session mock matching the new intake flow (D4/D5).
-
-    Call order in intake_document:
-      1. get_active_retention_policy      → mappings().one_or_none()
-      2. SELECT tenant_document_types     → one_or_none()  (type resolution)
-      3. SELECT subjects.display_name     → one_or_none()  (path building)
-      4. INSERT documents                 → plain result
-      5. INSERT document_artifacts        → plain result
-      6+ UPDATE document / quality gate / generic results
-    """
-    session = AsyncMock()
-
-    _retention_policy_id = uuid.uuid4()
-
-    # 1. get_active_retention_policy — mappings().one_or_none()
+def _retention_result() -> MagicMock:
     retention_row = _make_mappings_row(
-        retention_policy_id=_retention_policy_id,
+        retention_policy_id=uuid.uuid4(),
         retention_days=365,
         disposition="PURGE_CONTENT",
     )
     retention_mappings = MagicMock()
     retention_mappings.one_or_none.return_value = retention_row
-    retention_result = MagicMock()
-    retention_result.mappings.return_value = retention_mappings
+    result = MagicMock()
+    result.mappings.return_value = retention_mappings
+    return result
 
-    # 2. SELECT tenant_document_types — one_or_none() returns None (→ ADDITIONAL)
-    tdt_result = MagicMock()
-    tdt_result.one_or_none.return_value = None
 
-    # 3. SELECT subjects.display_name — one_or_none() returns plain row
-    subject_name_row = MagicMock()
-    subject_name_row.__getitem__ = MagicMock(return_value="Test Subject")
-    subject_name_result = MagicMock()
-    subject_name_result.one_or_none.return_value = subject_name_row
+def _subject_name_result() -> MagicMock:
+    row = MagicMock()
+    row.__getitem__ = MagicMock(return_value="Test Subject")
+    result = MagicMock()
+    result.one_or_none.return_value = row
+    return result
 
-    # 4. INSERT documents — plain result
-    insert_doc_result = MagicMock()
 
-    # 5. INSERT document_artifacts — plain result
-    insert_artifact_result = MagicMock()
+def _make_session_mock() -> AsyncMock:
+    """Minimal async session mock for intake without a Document Type hint.
 
-    # 6+ everything else (UPDATE document, quality gate internals, etc.)
+    When no documentTypeKey is supplied there is no Tenant Document Type lookup;
+    the Subject display-name lookup immediately follows retention resolution.
+    """
+    session = AsyncMock()
     generic = MagicMock()
-
     session.execute = AsyncMock(side_effect=[
-        retention_result,       # get_active_retention_policy
-        tdt_result,             # SELECT tenant_document_types (type resolution)
-        subject_name_result,    # SELECT subjects.display_name (path building)
-        insert_doc_result,      # INSERT documents
-        insert_artifact_result, # INSERT document_artifacts
+        _retention_result(),
+        _subject_name_result(),
+        MagicMock(),  # INSERT documents
+        MagicMock(),  # INSERT document_artifacts
     ] + [generic] * 30)
-
     session.commit = AsyncMock()
     return session
 
@@ -117,21 +99,25 @@ def _make_session_mock_with_type(
     physical_form_type: str = "GOVT_ID",
     requires_processing: bool = True,
 ) -> AsyncMock:
-    """Like _make_session_mock but TDT lookup returns a real type row."""
-    session = _make_session_mock()
+    """Session mock where the supplied Document Type resolves for the Tenant."""
+    session = AsyncMock()
     tdt_row = MagicMock()
-    _dt_id = uuid.uuid4()
+    dt_id = uuid.uuid4()
     tdt_row.__getitem__ = MagicMock(
-        side_effect=lambda i: [physical_form_type, requires_processing, _dt_id][i]
+        side_effect=lambda i: [physical_form_type, requires_processing, dt_id][i]
     )
-    # Rebuild side_effect list with real TDT row at position 1
-    original = list(session.execute.side_effect)  # type: ignore[arg-type]
-    original[1] = MagicMock()
-    original[1].one_or_none.return_value = tdt_row
-    session.execute = AsyncMock(side_effect=original)
+    tdt_result = MagicMock()
+    tdt_result.one_or_none.return_value = tdt_row
+    generic = MagicMock()
+    session.execute = AsyncMock(side_effect=[
+        _retention_result(),
+        tdt_result,
+        _subject_name_result(),
+        MagicMock(),  # INSERT documents
+        MagicMock(),  # INSERT document_artifacts
+    ] + [generic] * 30)
+    session.commit = AsyncMock()
     return session
-
-
 
 
 def _make_storage_mock() -> MagicMock:
@@ -181,7 +167,6 @@ async def test_intake_fit_result_creates_processing_job() -> None:
     """A FIT document with a known processable type must trigger create_initial_job."""
     from verigence.di.quality.validator import ValidatorResult
 
-    # Build session mock with TDT returning GOVT_ID (requires_processing=True)
     session = _make_session_mock_with_type(physical_form_type="GOVT_ID", requires_processing=True)
     storage = _make_storage_mock()
     upload = _make_upload(_minimal_pdf())
