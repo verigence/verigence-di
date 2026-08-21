@@ -17,7 +17,7 @@ import httpx
 import structlog
 from fastapi import Depends, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt  # type: ignore[import]
+from jose import JWTError, jwt
 
 from verigence.di.auth.jwks import get_jwks_cache
 from verigence.di.errors import ErrorCode, http_exception
