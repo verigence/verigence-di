@@ -31,33 +31,21 @@ from verigence.di.storage.audit_keys import build_audit_original_key
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_ALLOWED_MIME: frozenset[str] = frozenset({
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/tiff",
-    "image/gif",
-    "image/bmp",
+    "image/jpeg", "image/png", "image/webp", "image/tiff", "image/gif", "image/bmp",
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/msword",
-    "application/vnd.ms-excel",
-    "application/vnd.ms-powerpoint",
+    "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
     "application/vnd.oasis.opendocument.text",
     "application/vnd.oasis.opendocument.spreadsheet",
     "application/vnd.oasis.opendocument.presentation",
-    "text/plain",
-    "text/csv",
-    "application/zip",
+    "text/plain", "text/csv", "application/zip",
 })
 _MAX_BYTES_DEFAULT = 30 * 1024 * 1024
 
 
-async def _stream_and_hash(
-    upload: UploadFile,
-    max_bytes: int,
-) -> tuple[bytes, int, str]:
+async def _stream_and_hash(upload: UploadFile, max_bytes: int) -> tuple[bytes, int, str]:
     hasher = hashlib.sha256()
     chunks: list[bytes] = []
     total = 0
@@ -180,32 +168,31 @@ async def intake_document(
     )
     document_id: uuid.UUID = doc["document_id"]
 
+    storage_context_id: uuid.UUID | None = None
     if audit_storage_context is not None:
-        context_id = audit_storage_context.get("context_id")
-        if not isinstance(context_id, uuid.UUID):
-            raise ValueError("Audit storage context is missing a valid context ID")
+        storage_context_id = _context_uuid(audit_storage_context, "storage_context_id")
         await session.execute(
             text("""
                 UPDATE docintel.documents
-                SET audit_storage_context_id = :context_id,
+                SET audit_storage_context_id = :storage_context_id,
                     updated_at_utc = now()
                 WHERE tenant_id = :tenant_id AND document_id = :document_id
             """),
             {
                 "tenant_id": tenant_id,
                 "document_id": document_id,
-                "context_id": context_id,
+                "storage_context_id": storage_context_id,
             },
         )
         logical_key = build_audit_original_key(
             tenant_id=tenant_id,
-            project_display_name=_context_text(audit_storage_context, "project_display_name"),
             dealer_id=_context_uuid(audit_storage_context, "dealer_id"),
-            dealer_display_name=_context_text(audit_storage_context, "dealer_display_name"),
-            outlet_id=_context_uuid(audit_storage_context, "outlet_id"),
-            outlet_display_name=_context_text(audit_storage_context, "outlet_display_name"),
+            dealer_outlet_id=_context_uuid(audit_storage_context, "dealer_outlet_id"),
             customer_id=_context_uuid(audit_storage_context, "customer_id"),
-            customer_display_name=_context_text(audit_storage_context, "customer_display_name"),
+            project_slug=_context_string(audit_storage_context, "project_slug"),
+            dealer_slug=_context_string(audit_storage_context, "dealer_slug"),
+            dealer_outlet_slug=_context_string(audit_storage_context, "dealer_outlet_slug"),
+            customer_slug=_context_string(audit_storage_context, "customer_slug"),
             document_id=document_id,
             physical_form_type=physical_form_type,
             original_filename=upload.filename,
@@ -343,7 +330,6 @@ async def intake_document(
         declared_mime=upload.content_type,
         filename=upload.filename,
     )
-
     await update_document_upload_complete(
         session,
         tenant_id=tenant_id,
@@ -378,9 +364,7 @@ async def intake_document(
         "detected_mime_type": validator_result.detected_mime or detected_mime,
         "upload_issue_code": validator_result.upload_issue_code,
         "upload_issue_detail": validator_result.upload_issue_detail,
-        "audit_storage_context_id": (
-            audit_storage_context.get("context_id") if audit_storage_context else None
-        ),
+        "audit_storage_context_id": storage_context_id,
     })
 
     duration_ms = round((time.monotonic() - intake_start) * 1000, 1)
@@ -415,9 +399,11 @@ def _context_uuid(context: dict[str, object], key: str) -> uuid.UUID:
     return value
 
 
-def _context_text(context: dict[str, object], key: str) -> str | None:
+def _context_string(context: dict[str, object], key: str) -> str:
     value = context.get(key)
-    return value if isinstance(value, str) and value.strip() else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Audit storage context {key} is invalid")
+    return value
 
 
 def _detect_mime(data: bytes, filename: str) -> str:
