@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 import traceback
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -45,7 +47,7 @@ async def _validate_schema_profile_consistency() -> None:
         from verigence.di.document_ai.schemas import SCHEMA_REGISTRY  # noqa: PLC0415
         from verigence.di.repositories.database import get_engine  # noqa: PLC0415
 
-        engine = get_engine()
+        engine = get_engine()  # type: ignore[no-untyped-call]
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         async with factory() as session:
@@ -100,8 +102,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     @asynccontextmanager
-    async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
+    async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         """Start background worker + EOD scheduler on startup; stop on shutdown."""
+        del fastapi_app
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
         worker = get_worker()
@@ -136,7 +139,7 @@ def create_app() -> FastAPI:
     )
 
     # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
-    def custom_openapi() -> dict:
+    def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
@@ -182,6 +185,7 @@ def create_app() -> FastAPI:
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        del request
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
@@ -201,6 +205,7 @@ def create_app() -> FastAPI:
     async def _http_exception_handler(
         request: Request, exc: HTTPException
     ) -> JSONResponse:
+        del request
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
@@ -223,7 +228,10 @@ def create_app() -> FastAPI:
 
     # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
-    async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
+    async def correlation_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
         correlation_id = (
             incoming
@@ -321,7 +329,7 @@ def create_app() -> FastAPI:
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
         try:
-            import sentry_sdk  # type: ignore[import]
+            import sentry_sdk
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
