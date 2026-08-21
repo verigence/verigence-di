@@ -1,8 +1,4 @@
-"""repositories/subjects.py — Subject repository (async SQLAlchemy).
-
-All queries run within a tenant_session() context manager that sets
-the PostgreSQL RLS app.tenant_id variable.
-"""
+"""repositories/subjects.py — Subject repository (async SQLAlchemy)."""
 from __future__ import annotations
 
 import uuid
@@ -13,12 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.domain.enums import SubjectStatus, SubjectType
 
-# ── ORM-free approach: raw SQL via text() for now ────────────────────────────
-# We intentionally use direct SQL rather than declarative ORM models for the
-# initial implementation to keep things simple and avoid a large ORM mapping
-# layer. SQLAlchemy Core text() calls go through the same async session and
-# benefit from the same connection pool and transaction management.
-
 
 async def create_subject(
     session: AsyncSession,
@@ -27,14 +17,19 @@ async def create_subject(
     subject_type: SubjectType,
     display_name: str | None,
     created_by_actor_id: str,
+    created_by_actor_type: str = "USER",
 ) -> dict:  # type: ignore[type-arg]
-    """Insert a new Subject row and return its data as a dict."""
+    """Insert a Subject after ensuring its creating actor exists."""
     from verigence.di.repositories.tenants import provision_actor  # noqa: PLC0415
-    await provision_actor(session, tenant_id, created_by_actor_id)
 
+    await provision_actor(
+        session,
+        tenant_id,
+        created_by_actor_id,
+        actor_type=created_by_actor_type,
+    )
     now = datetime.now(UTC)
     subject_id = uuid.uuid4()
-
     await session.execute(
         text("""
             INSERT INTO docintel.subjects
@@ -54,7 +49,6 @@ async def create_subject(
         },
     )
     await session.commit()
-
     return {
         "tenant_id": tenant_id,
         "subject_id": subject_id,
@@ -72,7 +66,6 @@ async def get_subject(
     tenant_id: str,
     subject_id: uuid.UUID,
 ) -> dict | None:  # type: ignore[type-arg]
-    """Fetch a single Subject by tenant + id.  Returns None if not found."""
     row = (
         await session.execute(
             text("""
@@ -84,10 +77,8 @@ async def get_subject(
             {"tenant_id": tenant_id, "subject_id": subject_id},
         )
     ).mappings().one_or_none()
-
     if row is None:
         return None
-
     return {
         "tenant_id": row["tenant_id"],
         "subject_id": row["subject_id"],
@@ -108,22 +99,17 @@ async def list_subjects(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:  # type: ignore[type-arg]
-    """List/search subjects within a tenant, with optional cursor pagination."""
     conditions = ["tenant_id = :tenant_id"]
     params: dict = {"tenant_id": tenant_id, "limit": limit + 1}  # type: ignore[type-arg]
-
     if status is not None:
         conditions.append("status = :status")
         params["status"] = status.value
-
     if query:
         conditions.append("display_name ILIKE :query")
         params["query"] = f"%{query}%"
-
     if cursor:
         conditions.append("subject_id > :cursor")
         params["cursor"] = cursor
-
     where_clause = " AND ".join(conditions)
     sql = text(f"""
         SELECT tenant_id, subject_id, subject_type, display_name, status,
@@ -133,7 +119,6 @@ async def list_subjects(
         ORDER BY created_at_utc DESC, subject_id
         LIMIT :limit
     """)
-
     rows = (await session.execute(sql, params)).mappings().all()
     return [
         {
@@ -155,7 +140,6 @@ async def subject_exists(
     tenant_id: str,
     subject_id: uuid.UUID,
 ) -> bool:
-    """Quick existence check for a Subject."""
     row = (
         await session.execute(
             text("""
