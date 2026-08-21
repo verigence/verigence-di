@@ -282,15 +282,18 @@ async def cancel_config_import(
     tenant_id: str,
     import_id: uuid.UUID,
 ) -> None:
-    result = await session.execute(
-        text("""
-            DELETE FROM docintel.config_imports
-            WHERE tenant_id=:tenant_id AND import_id=:import_id
-              AND status IN ('PREVIEW_READY','VALIDATION_FAILED','FAILED')
-        """),
-        {"tenant_id": tenant_id, "import_id": import_id},
-    )
-    if result.rowcount != 1:
+    deleted = (
+        await session.execute(
+            text("""
+                DELETE FROM docintel.config_imports
+                WHERE tenant_id=:tenant_id AND import_id=:import_id
+                  AND status IN ('PREVIEW_READY','VALIDATION_FAILED','FAILED')
+                RETURNING import_id
+            """),
+            {"tenant_id": tenant_id, "import_id": import_id},
+        )
+    ).scalar_one_or_none()
+    if deleted is None:
         raise ConfigImportConflict("Only unconfirmed configuration imports may be removed")
     await session.commit()
 
@@ -471,7 +474,8 @@ def _apply_cross_row_validation(
     rows: list[tuple[int, dict[str, Any], str, list[str]]],
 ) -> None:
     seen: dict[tuple[str, ...], int] = {}
-    for index, (_, parsed, state, messages) in enumerate(rows):
+    for index, (_, parsed, _state, messages) in enumerate(rows):
+        identity: tuple[str, ...]
         if master_key == DOCUMENT_TYPES:
             identity = (str(parsed.get("documentTypeKey") or ""),)
         elif master_key == EXTRACTION_PROFILES:
@@ -655,7 +659,7 @@ async def _effective_document_type_id(session: AsyncSession, tenant_id: str, key
             {"key": key, "tenant_id": tenant_id},
         )
     ).scalar_one()
-    return value
+    return uuid.UUID(str(value))
 
 
 async def _canonical_field_id(session: AsyncSession, tenant_id: str, key: str) -> uuid.UUID:
@@ -672,7 +676,7 @@ async def _canonical_field_id(session: AsyncSession, tenant_id: str, key: str) -
             {"key": key, "tenant_id": tenant_id},
         )
     ).scalar_one()
-    return value
+    return uuid.UUID(str(value))
 
 
 async def _confirm_document_types(
