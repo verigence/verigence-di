@@ -60,6 +60,7 @@ src = ["src"]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
 ignore = [
     "E501",
+    "B007",
     "B008",
     "TC001",
     "TC002",
