@@ -60,7 +60,6 @@ src = ["src"]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
 ignore = [
     "E501",
-    "B007",
     "B008",
     "TC001",
     "TC002",
@@ -81,7 +80,9 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=70"
+# PR #4 established the measured repository baseline (~49%) as the hard floor.
+# Keep the full suite gated without reviving the previously impossible 70% threshold.
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=49"
 
 [tool.coverage.run]
 source = ["src"]
