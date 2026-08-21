@@ -18,23 +18,22 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE TABLE docintel.audit_storage_contexts (
-            context_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            storage_context_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id varchar(128) NOT NULL
                 REFERENCES docintel.tenant_settings(tenant_id),
-            dealer_id uuid NOT NULL,
-            outlet_id uuid NOT NULL,
-            customer_id uuid NOT NULL,
+            external_context_ref text NOT NULL,
             subject_id uuid NOT NULL,
-            dealer_display_name varchar(240),
-            outlet_display_name varchar(240),
-            customer_display_name varchar(240),
-            status varchar(20) NOT NULL DEFAULT 'ACTIVE'
-                CHECK (status IN ('ACTIVE','INACTIVE')),
-            created_by_actor_id varchar(160) NOT NULL,
+            dealer_id uuid NOT NULL,
+            dealer_outlet_id uuid NOT NULL,
+            customer_id uuid NOT NULL,
+            project_slug varchar(40) NOT NULL,
+            dealer_slug varchar(30) NOT NULL,
+            dealer_outlet_slug varchar(30) NOT NULL,
+            customer_slug varchar(30) NOT NULL,
+            created_by_service_principal varchar(160) NOT NULL,
             created_at_utc timestamptz NOT NULL DEFAULT now(),
-            updated_at_utc timestamptz NOT NULL DEFAULT now(),
-            UNIQUE (tenant_id, customer_id),
-            UNIQUE (tenant_id, context_id),
+            UNIQUE (tenant_id, external_context_ref),
+            UNIQUE (tenant_id, storage_context_id),
             FOREIGN KEY (tenant_id, subject_id)
                 REFERENCES docintel.subjects(tenant_id, subject_id)
         )
@@ -44,7 +43,7 @@ def upgrade() -> None:
         """
         CREATE INDEX ix_audit_storage_contexts_scope
         ON docintel.audit_storage_contexts
-            (tenant_id, dealer_id, outlet_id, customer_id, status)
+            (tenant_id, dealer_id, dealer_outlet_id, customer_id)
         """
     )
     op.execute(
@@ -63,7 +62,7 @@ def upgrade() -> None:
         ALTER TABLE docintel.documents
         ADD CONSTRAINT fk_documents_audit_storage_context
         FOREIGN KEY (tenant_id, audit_storage_context_id)
-        REFERENCES docintel.audit_storage_contexts(tenant_id, context_id);
+        REFERENCES docintel.audit_storage_contexts(tenant_id, storage_context_id);
         CREATE INDEX ix_documents_audit_storage_context
         ON docintel.documents (tenant_id, audit_storage_context_id)
         WHERE audit_storage_context_id IS NOT NULL;
