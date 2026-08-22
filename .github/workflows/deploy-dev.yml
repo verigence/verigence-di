@@ -209,28 +209,65 @@ jobs:
           echo 'DI_WORKER=PASS'
           echo 'DI_EOD_SCHEDULER=PASS'
 
-      - name: Smoke test DI health and readiness
+      - name: Resolve or create DI API public domain
         shell: bash
         run: |
           set -euo pipefail
-          railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars.json
-          domain="$(python - <<'PY'
+          resolve_domain() {
+            railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars.json
+            python - <<'PY'
           import json
           from pathlib import Path
           data=json.loads(Path('/tmp/di-api-vars.json').read_text())
           print(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '')
           PY
-          )"
+          }
+
+          domain="$(resolve_domain)"
           if [[ -z "$domain" ]]; then
-            echo '::error::DI Railway DEV API has no public domain configured.'
-            exit 1
+            echo 'DI_PUBLIC_DOMAIN=CREATE'
+            railway domain \
+              --project "$PLATFORM_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --service "$DI_API_SERVICE" \
+              --json >/tmp/di-domain-create.json
+            for attempt in $(seq 1 20); do
+              domain="$(resolve_domain)"
+              if [[ -n "$domain" ]]; then
+                break
+              fi
+              echo "Waiting for DI public domain to become available (attempt $attempt/20)"
+              sleep 3
+            done
           fi
+
+          [[ -n "$domain" ]] || {
+            cat /tmp/di-domain-create.json 2>/dev/null || true
+            echo '::error::DI Railway DEV API public domain could not be resolved or created.'
+            exit 1
+          }
           case "$domain" in
             http://*|https://*) base="${domain%/}" ;;
             *) base="https://${domain%/}" ;;
           esac
-          curl --fail --silent --show-error "$base/health" >/tmp/di-health.json
-          curl --fail --silent --show-error "$base/ready" >/tmp/di-ready.json
-          echo 'DI_PUBLIC_HEALTH=PASS'
-          echo 'DI_PUBLIC_READY=PASS'
-          echo "DI_DEPLOYED_SHA=${DEPLOY_SHA}"
+          echo "DI_PUBLIC_BASE=$base" >> "$GITHUB_ENV"
+          echo "DI_PUBLIC_DOMAIN=PASS|$base"
+
+      - name: Smoke test DI health and readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            health="$(curl --silent --show-error --output /tmp/di-health.json --write-out '%{http_code}' "$DI_PUBLIC_BASE/health" || true)"
+            ready="$(curl --silent --show-error --output /tmp/di-ready.json --write-out '%{http_code}' "$DI_PUBLIC_BASE/ready" || true)"
+            if [[ "$health" == "200" && "$ready" == "200" ]]; then
+              echo 'DI_PUBLIC_HEALTH=PASS'
+              echo 'DI_PUBLIC_READY=PASS'
+              echo "DI_DEPLOYED_SHA=${DEPLOY_SHA}"
+              exit 0
+            fi
+            echo "Waiting for DI public smoke readiness: health=$health ready=$ready (attempt $attempt/20)"
+            sleep 3
+          done
+          echo '::error::DI public /health or /ready did not reach HTTP 200.'
+          exit 1
