@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 10
     environment: di-dev
     env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_TOKEN_DEV }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
       API_SERVICE: di-api
@@ -29,10 +30,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::DI Railway token missing'; exit 1; }
-          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/tmp/link.json
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::DI RAILWAY_API_TOKEN missing'; exit 1; }
+          env -u RAILWAY_TOKEN railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/tmp/link.json
           for service in "$API_SERVICE" "$WORKER_SERVICE"; do
-            railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}.json"
+            env -u RAILWAY_TOKEN railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}.json"
           done
           python - <<'PY'
           import json, os
@@ -68,7 +69,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          railway logs --service "$WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/worker.log
+          env -u RAILWAY_TOKEN railway logs --service "$WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/worker.log
           grep -q 'DI_WORKER_STARTED=PASS' /tmp/worker.log
           grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/worker.log
           echo 'DI_WORKER_RUNTIME=PASS'
@@ -77,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          railway variable list --service "$API_SERVICE" --json >/tmp/vars.json
+          env -u RAILWAY_TOKEN railway variable list --service "$API_SERVICE" --json >/tmp/vars.json
           domain="$(python - <<'PY'
           import json
           from pathlib import Path
