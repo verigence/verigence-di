@@ -127,3 +127,14 @@ jobs:
         if: steps.ui.outputs.exists == 'true'
         working-directory: ops-ui
         run: npm run build
+
+  deploy-dev:
+    name: Deploy tested DI SHA to Railway DEV
+    needs: [backend, frontend]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/dev' &&
+      needs.backend.result == 'success' &&
+      needs.frontend.result == 'success'
+    uses: ./.github/workflows/deploy-dev.yml
+    secrets: inherit
