@@ -1,10 +1,7 @@
 name: Deploy DI DEV
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [dev]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -16,20 +13,18 @@ concurrency:
 
 jobs:
   deploy:
-    if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev')
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment: di-dev
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_TOKEN_DEV }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
       RAILWAY_ENVIRONMENT: dev
       DI_API_SERVICE: di-api
       DI_WORKER_SERVICE: di-worker
       DB_SERVICE: Postgres
-      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      DEPLOY_SHA: ${{ github.sha }}
 
     steps:
       - name: Check out exact tested DI revision
@@ -44,8 +39,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
-            echo '::error::RAILWAY_TOKEN or RAILWAY_TOKEN_DEV is required.'
+          if [[ -z "${RAILWAY_API_TOKEN:-}" ]]; then
+            echo '::error::RAILWAY_API_TOKEN is required for DI DEV deployment.'
             exit 1
           fi
           railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
@@ -57,7 +52,7 @@ jobs:
           project=json.loads(Path('/tmp/status.json').read_text())
           services=json.loads(Path('/tmp/services.json').read_text())
           if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
-              raise SystemExit('Railway token does not target the approved shared DEV project')
+              raise SystemExit('Railway API token does not target the approved shared DEV project')
           names={row.get('name') for row in services}
           required={os.environ['DI_API_SERVICE'], os.environ['DI_WORKER_SERVICE'], os.environ['DB_SERVICE']}
           missing=required-names
