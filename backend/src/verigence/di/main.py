@@ -47,7 +47,7 @@ async def _validate_schema_profile_consistency() -> None:
         from verigence.di.document_ai.schemas import SCHEMA_REGISTRY  # noqa: PLC0415
         from verigence.di.repositories.database import get_engine  # noqa: PLC0415
 
-        engine = get_engine()  # type: ignore[no-untyped-call]
+        engine = get_engine()
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         async with factory() as session:
