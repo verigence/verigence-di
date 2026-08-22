@@ -227,17 +227,36 @@ async def db_session(db_url: str) -> AsyncGenerator[AsyncSession, None]:
 # ── HTTP test client (unit tests) ─────────────────────────────────────────────
 @pytest_asyncio.fixture
 async def client(db_url: str) -> AsyncGenerator[AsyncClient, None]:
-    """Async HTTP test client wired to the FastAPI app (unit/docker tests)."""
+    """Async HTTP test client wired to the migrated PostgreSQL test database."""
     os.environ["DI_DATABASE_URL"] = db_url
     from verigence.di.settings import get_settings
     get_settings.cache_clear()
 
+    import verigence.di.repositories.database as _db_mod
+
+    test_engine = create_async_engine(_async_db_url(db_url), poolclass=NullPool, echo=False)
+    _db_mod._engine = test_engine
+    _db_mod.AsyncSessionFactory = async_sessionmaker(
+        test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    # health.py historically imported the factory by value. Keep it synchronized
+    # when that module was imported by an earlier test in the same process.
+    import verigence.di.api.health as _health_mod
+    _health_mod.AsyncSessionFactory = _db_mod.AsyncSessionFactory
+
     from verigence.di.main import create_app
     app = create_app()
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        yield c
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            yield c
+    finally:
+        await test_engine.dispose()
 
 
 # ── Integration test fixtures (smoke + extended) ─────────────────────────────

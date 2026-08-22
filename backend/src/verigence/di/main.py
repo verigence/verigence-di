@@ -10,7 +10,9 @@ from __future__ import annotations
 import time
 import traceback
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -100,8 +102,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     @asynccontextmanager
-    async def lifespan(fastapi_app: FastAPI):  # type: ignore[arg-type]
+    async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         """Start background worker + EOD scheduler on startup; stop on shutdown."""
+        del fastapi_app
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
         worker = get_worker()
@@ -136,7 +139,7 @@ def create_app() -> FastAPI:
     )
 
     # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
-    def custom_openapi() -> dict:
+    def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
@@ -182,6 +185,7 @@ def create_app() -> FastAPI:
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        del request
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
@@ -201,6 +205,7 @@ def create_app() -> FastAPI:
     async def _http_exception_handler(
         request: Request, exc: HTTPException
     ) -> JSONResponse:
+        del request
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
@@ -223,7 +228,10 @@ def create_app() -> FastAPI:
 
     # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
-    async def correlation_middleware(request: Request, call_next) -> Response:  # type: ignore[type-arg]
+    async def correlation_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
         correlation_id = (
             incoming
@@ -271,13 +279,22 @@ def create_app() -> FastAPI:
     # ── Routers ─────────────────────────────────────────────────────────────
     # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
+    from verigence.di.api.v1.admin_provisioning import (  # noqa: PLC0415
+        router as admin_provisioning_router,
+    )
     from verigence.di.api.v1.analyse import router as analyse_router  # noqa: PLC0415
+    from verigence.di.api.v1.audit_storage_contexts import (  # noqa: PLC0415
+        router as audit_storage_contexts_router,
+    )
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
     from verigence.di.api.v1.entity_links import router as entity_links_router  # noqa: PLC0415
     from verigence.di.api.v1.extraction_profiles import (
         router as extraction_profiles_router,  # noqa: PLC0415
     )
     from verigence.di.api.v1.operations import router as operations_router  # noqa: PLC0415
+    from verigence.di.api.v1.project_masters import (
+        router as project_masters_router,  # noqa: PLC0415
+    )
     from verigence.di.api.v1.requirement_profiles import (
         router as requirement_profiles_router,  # noqa: PLC0415
     )
@@ -295,6 +312,9 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(subjects_router)
     app.include_router(documents_router)
+    app.include_router(audit_storage_contexts_router)
+    app.include_router(admin_provisioning_router)
+    app.include_router(project_masters_router)
     app.include_router(verification_router)
     app.include_router(operations_router)
     app.include_router(entity_links_router)
@@ -309,7 +329,7 @@ def create_app() -> FastAPI:
     # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
         try:
-            import sentry_sdk  # type: ignore[import]
+            import sentry_sdk
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,

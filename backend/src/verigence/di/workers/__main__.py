@@ -1,12 +1,13 @@
 """workers/__main__.py — Standalone entry point for the processing worker.
 
 Run as:  python -m verigence.di.workers
-Used by: Docker container with START_MODE=worker
+Used by: dedicated Railway worker service
 """
 from __future__ import annotations
 
 import asyncio
 import signal
+from contextlib import suppress
 
 import structlog
 
@@ -31,18 +32,26 @@ async def _main() -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _handle_signal, sig)
+        with suppress(NotImplementedError):  # pragma: no cover - non-POSIX fallback
+            loop.add_signal_handler(sig, _handle_signal, sig)
 
     logger.info("di_worker_starting")
     worker.start()
-    scheduler.start()
+    scheduler_started = False
+    try:
+        scheduler.start()
+        scheduler_started = True
+        # Stable deployment verification markers consumed by deploy-dev.yml.
+        print("DI_WORKER_STARTED=PASS", flush=True)
+        print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
-    await stop_event.wait()
-
-    logger.info("di_worker_stopping")
-    await worker.stop()
-    scheduler.stop()
-    logger.info("di_worker_stopped")
+        await stop_event.wait()
+    finally:
+        logger.info("di_worker_stopping")
+        await worker.stop()
+        if scheduler_started:
+            scheduler.stop()
+        logger.info("di_worker_stopped")
 
 
 if __name__ == "__main__":

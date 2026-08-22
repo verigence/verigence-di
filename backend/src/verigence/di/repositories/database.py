@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -19,7 +20,7 @@ from verigence.di.settings import get_settings
 
 
 # ── Engine (module singleton) ─────────────────────────────────────────────────
-def _make_engine():  # type: ignore[no-untyped-def]
+def _make_engine() -> AsyncEngine:
     settings = get_settings()
     return create_async_engine(
         settings.database_url,
@@ -45,17 +46,16 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set transaction-local tenant_id for PostgreSQL RLS.
 
     Must be called at the start of every tenant-scoped transaction.
-    Uses SET LOCAL so the value is cleared automatically at transaction end.
-    PostgreSQL SET LOCAL does not accept bind parameters — value is
-    sanitised and interpolated directly.
+    ``set_config(..., true)`` accepts the tenant ID as a safe bind parameter and
+    is transaction-local, matching the intended semantics of ``SET LOCAL``.
     """
-    # Strip any characters that are not alphanumeric, hyphen, or underscore
-    # to prevent SQL injection via tenant_id.
-    safe_tid = "".join(c for c in str(tenant_id) if c.isalnum() or c in "-_")
-    await session.execute(text(f"SET LOCAL app.tenant_id = '{safe_tid}'"))
+    await session.execute(
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
+        {"tid": tenant_id},
+    )
 
 
-def get_engine():  # type: ignore[no-untyped-def]
+def get_engine() -> AsyncEngine:
     """Return the module-level engine (for non-FastAPI use in workers/schedulers)."""
     return _engine
 

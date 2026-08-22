@@ -556,7 +556,6 @@ This supersedes the D4 rule that `ADDITIONAL` documents skip processing.
 
 ### Status: AGREED — 2026-08-19
 
-
 ---
 
 ## D19 — Switch OCR/AI provider to Gemini 2.5 Flash (2026-08-19)
@@ -684,7 +683,6 @@ All changes additive. No existing table altered destructively.
 ### Status: AGREED — implemented 2026-08-19
 
 ---
-
 
 ## D24 — Processing Backout Queue (today's session)
 
@@ -862,7 +860,7 @@ request path.
 
 | Env var | Type | Default | Purpose |
 |---|---|---|---|
-| `DI_LOG_LEVEL` | `DEBUG\|INFO\|WARNING\|ERROR` | `INFO` | Gates all output — both channels |
+| `DI_LOG_LEVEL` | `DEBUG|INFO|WARNING|ERROR` | `INFO` | Gates all output — both channels |
 | `DI_LOG_STDOUT` | `bool` | `true` | Stdout channel on/off |
 | `DI_LOG_AXIOM` | `bool` | `false` | Axiom channel on/off |
 | `DI_AXIOM_TOKEN` | `str` | `""` | Axiom API token (required if DI_LOG_AXIOM=true) |
@@ -899,3 +897,193 @@ from the Railway log viewer.
 ### Status: AGREED — implementation in progress 2026-08-19
 
 ---
+
+## D28 — Audit Core-originated hierarchical storage context (2026-08-21)
+
+### Decision
+D5 remains the generic DI storage-path decision for non-Audit DI usage, but it is **superseded for Audit Core-originated vehicle-audit documents**.
+
+For Audit Core-originated documents, DI must reflect the trusted business hierarchy:
+
+```text
+Project
+  -> Dealer
+      -> Dealer Outlet
+          -> Customer
+              -> Documents
+```
+
+This hierarchy is not a SuperAdmin-configurable storage-path setting.
+
+### Trusted-context rule
+
+The browser/client never supplies an R2/S3 object key or path string.
+
+Audit Core supplies authenticated/trusted context containing the immutable business IDs required by DI:
+
+- canonical Tenant/Project ID;
+- Dealer ID;
+- Dealer Outlet ID;
+- Customer ID;
+- Subject ID / external Subject reference as required by DI;
+- an immutable Audit Core external context reference (for example the Journey/context that owns the evidence relationship);
+- safe display names only for human-readable path slugs.
+
+DI constructs the object key itself.
+
+### Canonical Phase-1 Audit path shape
+
+The Audit-specific path shall be ID-backed and human-readable, conceptually:
+
+```text
+{project_slug}-{tenant_id_short}/
+  dealers/{dealer_slug}-{dealer_id_short}/
+    outlets/{outlet_slug}-{outlet_id_short}/
+      customers/{customer_slug}-{customer_id_short}/
+        documents/{physical_form_type_folder}/
+          {doc_id_short}_{sanitised_filename}
+```
+
+IDs are authoritative; slugs are readability only.
+
+Display-name changes do not move or rename already-written objects.
+
+### Storage context separate from Subject identity
+
+A DI Subject/customer identity can participate in more than one Audit Core business context over time. Therefore the Subject identity alone is not sufficient to choose an Audit storage path.
+
+DI shall persist an immutable Audit storage context keyed by the Audit Core external context reference and linked to:
+
+```text
+tenant/project
+subject/customer
+Dealer
+Dealer Outlet
+frozen readable slugs/context used for object-key construction
+```
+
+An existing context is resolved idempotently. Historical objects remain under the context/path used when they were created.
+
+### Status: AGREED — design only; implementation pending after v2.3 design review
+
+---
+
+## D29 — UC02 human-admin identity propagation (2026-08-21)
+
+### Decision
+DI must distinguish human administrative operations from normal machine integration.
+
+#### Human administrative operation
+
+When a SuperAdmin action originates in the Web UI and reaches DI through Audit Core, Audit Core passes the same Security-issued human JWT to the DI administrative endpoint.
+
+Examples include:
+
+- explicit UC02 DI Tenant/Project provisioning administration where required;
+- Project/Tenant purge/preflight/status administration;
+- DI-owned configuration/master administration surfaced through Project Masters.
+
+DI validates the Security-issued human JWT, derives the global USER identity, and obtains the current Security authorization decision through DI's own `ServiceIntegration` identity when required by the Security v2 contract.
+
+DI must not accept Audit Core's machine identity as a substitute for the human administrator on a human-admin-only endpoint.
+
+#### Normal machine integration
+
+Audit Core document upload/processing/status/facts integration and background continuation use a Security-issued `ServiceIntegration` JWT with `aud=di`.
+
+### Clerk rule
+
+DI has no Clerk integration. Security is the Verigence human-token issuer/authentication boundary.
+
+### Status: AGREED — supersedes older DI text that treats Clerk JWT/embedded human permissions as the final Phase-1 authority
+
+---
+
+## D30 — UC02 Project provisioning and Phase-1 hard purge (2026-08-21)
+
+### Project provisioning
+
+Existing idempotent DI tenant provisioning helpers remain the implementation base.
+
+UC02 requires Audit Core to be able to **ensure and verify** that DI is provisioned for the canonical Security Tenant/Project during automatic Project onboarding. The normal UI does not show a separate provisioning step.
+
+If DI exposes an explicit provisioning admin API for this purpose, it is a human administrative operation under D29 and uses the same forwarded SuperAdmin human JWT.
+
+No second Tenant ID is generated by DI.
+
+### Phase-1 Project purge
+
+Because UC02 Phase 1 permits whole-Project hard rollback, DI must provide an idempotent/resumable human-SuperAdmin administrative purge contract for the canonical Tenant/Project.
+
+Purge is invoked by Audit Core before Audit Core data and before Security Tenant deletion.
+
+Required purge behavior:
+
+1. validate current human SuperAdmin authorization;
+2. establish/resume a purge operation identified by an idempotency/operation key;
+3. stop, drain, cancel or safely invalidate Tenant-scoped active processing work so new/continuing writes cannot recreate data during purge;
+4. enumerate Tenant-owned object-storage keys from authoritative DI metadata;
+5. delete object bytes before deleting the metadata needed to find those object keys;
+6. delete Project/Tenant-owned DI document/artifact/processing/search/verification/entity-link/storage-context/configuration/Subject data in dependency-safe order;
+7. verify zero live DI state for the target Tenant/Project;
+8. return a durable purge receipt/status to Audit Core.
+
+The exact table-by-table delete graph is generated from the approved DI physical schema during implementation design; it is not guessed in this decision.
+
+A purge operation must survive caller timeout/retry and must never report completion while target object bytes or live Tenant rows remain according to the approved zero-state definition.
+
+DI owns no global Verigence USER, so Project purge never deletes a Security USER.
+
+### Phase 2
+
+Phase 2 may replace broad rollback-oriented purge with stronger retention/process controls. Phase 1 keeps the explicitly approved rollback behavior.
+
+### Status: AGREED — design only; implementation pending
+
+---
+
+## D31 — UC02 DI-owned Project Masters administration boundary (2026-08-21)
+
+### Decision
+UC02 Project Masters is a cross-module administration view, but DI remains authority for DI-owned configuration.
+
+Current DI configuration/master domains remain the source of truth, including the existing design areas for:
+
+- Document Types;
+- Extraction Profiles;
+- Requirement Profiles;
+- Tenant Settings / Retention Policies;
+- Quality configuration.
+
+UC02 does **not** force every DI configuration entity into Excel or effective dating.
+
+DI shall expose a master/configuration descriptor to Audit Core that identifies, per DI-owned administration type:
+
+```text
+master key
+display name
+administration mode (existing form/API or Excel where explicitly supported)
+whether WEF/effective dating is required
+template/version metadata where applicable
+current lifecycle/version summary where applicable
+```
+
+For any DI-owned descriptor explicitly declared `EXCEL` + effective-dated, the UC02 upload rule applies:
+
+```text
+explicit WEF selected by SuperAdmin
+ -> upload
+ -> staging/validation
+ -> parsed preview
+ -> explicit confirmation
+ -> DRAFT/version creation
+ -> separate publish where the DI domain has publish lifecycle
+```
+
+WEF must not be invented/defaulted for such an Excel effective-dated import.
+
+Existing DI native form/config APIs remain valid for configuration domains that are not designated Excel-driven.
+
+Audit Core acts as the Web-facing facade and must not duplicate DI configuration as a second authoritative store.
+
+### Status: AGREED — design only; exact DI descriptors remain derived from the existing DI configuration catalogue, not invented by UC02
