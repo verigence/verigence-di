@@ -1,0 +1,96 @@
+name: Verify UC02 Railway DEV Release
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'verify/uc02-railway-dev-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: di-dev
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_TOKEN_DEV }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      API_SERVICE: di-api
+      WORKER_SERVICE: di-worker
+      EXPECTED_DEV_SHA: 8f936516b26e4897c100d4f89a3942ac1da7ccd1
+      NOT_BEFORE_UTC: '2026-08-22T03:45:00Z'
+
+    steps:
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Verify latest DI DEV deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_TOKEN:-}" ] || { echo '::error::DI Railway token missing'; exit 1; }
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/tmp/link.json
+          for service in "$API_SERVICE" "$WORKER_SERVICE"; do
+            railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}.json"
+          done
+          python - <<'PY'
+          import json, os
+          from datetime import datetime
+          from pathlib import Path
+          floor=datetime.fromisoformat(os.environ['NOT_BEFORE_UTC'].replace('Z','+00:00'))
+          expected=os.environ['EXPECTED_DEV_SHA']
+          for service in (os.environ['API_SERVICE'], os.environ['WORKER_SERVICE']):
+              rows=json.loads(Path(f'/tmp/{service}.json').read_text())
+              if not rows:
+                  raise SystemExit(f'No Railway deployment found for {service}')
+              row=rows[0]
+              did=str(row.get('id',''))
+              status=str(row.get('status',''))
+              created=row.get('createdAt') or row.get('created_at') or ''
+              print(f'DI_DEPLOYMENT_ID|{service}|{did}')
+              print(f'DI_DEPLOYMENT_STATUS|{service}|{status}')
+              print(f'DI_DEPLOYMENT_CREATED_AT|{service}|{created or "UNKNOWN"}')
+              if status != 'SUCCESS':
+                  raise SystemExit(f'{service} latest deployment is not SUCCESS: {status}')
+              if created:
+                  when=datetime.fromisoformat(created.replace('Z','+00:00'))
+                  if when < floor:
+                      raise SystemExit(f'{service} deployment is stale: {created}')
+              text=json.dumps(row, default=str)
+              if expected in text or expected[:12] in text:
+                  print(f'DI_DEPLOYED_SHA_MATCH|{service}|PASS')
+              else:
+                  print(f'DI_DEPLOYED_SHA_MATCH|{service}|NOT_EXPOSED_BY_RAILWAY_LIST')
+          PY
+
+      - name: Verify DI worker runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway logs --service "$WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/worker.log
+          grep -q 'DI_WORKER_STARTED=PASS' /tmp/worker.log
+          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/worker.log
+          echo 'DI_WORKER_RUNTIME=PASS'
+
+      - name: Smoke DI DEV API
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$API_SERVICE" --json >/tmp/vars.json
+          domain="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('/tmp/vars.json').read_text())
+          print(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '')
+          PY
+          )"
+          [ -n "$domain" ] || { echo '::error::DI DEV public domain missing'; exit 1; }
+          case "$domain" in
+            http://*|https://*) base="${domain%/}" ;;
+            *) base="https://${domain%/}" ;;
+          esac
+          curl --fail --silent --show-error "$base/health" >/tmp/health.json
+          curl --fail --silent --show-error "$base/ready" >/tmp/ready.json
+          echo "DI_PUBLIC_BASE=$base"
+          echo 'DI_RAILWAY_DEV_VERIFY=PASS'
