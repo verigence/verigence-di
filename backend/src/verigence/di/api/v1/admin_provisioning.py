@@ -1,9 +1,9 @@
-"""UC02 explicit DI Tenant provisioning ensure/status API."""
+"""UC02 synchronous DI Tenant provisioning ensure/status/compensation API."""
 from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,11 @@ class ProvisioningData(BaseModel):
     tenantId: str
     provisioningStatus: Literal["READY", "INCOMPLETE"]
     checks: list[ProvisioningCheck]
+
+
+class ProvisioningCleanupData(BaseModel):
+    tenantId: str
+    provisioningStatus: Literal["REMOVED"]
 
 
 async def _status(session: AsyncSession, tenant_id: str) -> ProvisioningData:
@@ -122,6 +127,8 @@ async def ensure_provisioning(
     await provision_retention_policy(session, tenantId)
     await provision_tenant_document_types(session, tenantId)
     data = await _status(session, tenantId)
+    if data.provisioningStatus != "READY":
+        raise RuntimeError("DI Tenant provisioning did not reach READY state")
     return ApiResponse(errorCode="000", errorMessage="Success", data=data)
 
 
@@ -134,3 +141,76 @@ async def get_provisioning(
     del admin
     data = await _status(session, tenantId)
     return ApiResponse(errorCode="000", errorMessage="Success", data=data)
+
+
+@router.delete("/provisioning", response_model=ApiResponse[ProvisioningCleanupData])
+async def remove_provisioning(
+    tenantId: str,
+    admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[ProvisioningCleanupData]:
+    """Synchronously remove UC02 provisioning state for a failed new-Project create.
+
+    This is intentionally narrow compensation, not a Tenant purge API. It refuses
+    cleanup once DI document/operational data exists for the Tenant. The request
+    transaction rolls back automatically if any delete or zero-state check fails.
+    """
+    del admin
+    await set_tenant_context(session, tenantId)
+    has_documents = bool(
+        (
+            await session.execute(
+                text("SELECT EXISTS (SELECT 1 FROM docintel.documents WHERE tenant_id=:tid)"),
+                {"tid": tenantId},
+            )
+        ).scalar_one()
+    )
+    if has_documents:
+        raise HTTPException(
+            status_code=409,
+            detail="Tenant provisioning cannot be compensated after operational data exists.",
+        )
+
+    await session.execute(
+        text("DELETE FROM docintel.tenant_document_types WHERE tenant_id=:tid"),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text(
+            "UPDATE docintel.tenant_settings "
+            "SET active_retention_policy_id=NULL WHERE tenant_id=:tid"
+        ),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text("DELETE FROM docintel.retention_policies WHERE tenant_id=:tid"),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text("DELETE FROM docintel.tenant_settings WHERE tenant_id=:tid"),
+        {"tid": tenantId},
+    )
+
+    remaining = int(
+        (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM docintel.tenant_settings WHERE tenant_id=:tid) +
+                      (SELECT count(*) FROM docintel.retention_policies WHERE tenant_id=:tid) +
+                      (SELECT count(*) FROM docintel.tenant_document_types WHERE tenant_id=:tid)
+                    """
+                ),
+                {"tid": tenantId},
+            )
+        ).scalar_one()
+    )
+    if remaining != 0:
+        raise RuntimeError("DI Tenant provisioning compensation did not reach zero state")
+
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=ProvisioningCleanupData(tenantId=tenantId, provisioningStatus="REMOVED"),
+    )
