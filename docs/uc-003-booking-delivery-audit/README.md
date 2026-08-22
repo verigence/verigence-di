@@ -3,18 +3,23 @@
 **Planning branch:** `planning/uc-003-booking-delivery-audit`  
 **Frozen baseline:** `dev@c97b3f3e5f8577160c88af1080496808189206fb`
 
-The canonical UC03 design set is maintained in:
+The canonical UC03 cross-module design set is maintained in:
 
 `verigence-audit-core / planning/uc-003-booking-delivery-audit / docs/uc-003-booking-delivery-audit/`
 
-Current canonical documents:
+Canonical Audit Core documents include:
 
 - `UC03_SOLUTION_DESIGN_v1.1.md`
 - `UC03_WORKFLOW_STATE_EVENT_CATALOG_v1.1.md`
 - `UC03_RULE_FLAG_CATALOG_v1.0.md`
 - `UC03_DOCUMENT_123_FIELD_MATRIX_v1.0.md`
+- `UC03_RECONCILIATION_DECISIONS_v1.0.md`
 
-DI is a controlled supporting module for UC03.
+## DI working artifact
+
+- [`UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md`](./UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md) — maps all 57 source fields marked Extracted to candidate evidence sources and classifies each mapping as `SUPPORTED`, `PROVISIONAL`, or `TBD`.
+
+A `TBD` field is not authorized for a production extraction profile until its source is reconciled.
 
 ## DI responsibility
 
@@ -44,8 +49,9 @@ DI does **not** own:
 - Audit Core uses DI for evidence/document processing.
 - Extraction is asynchronous; Audit Core exposes an aggregate processing read model for Web/Android polling.
 - Extracted values are proposals with provenance; they are not silent overwrites.
-- The current document catalogue is provisional: source prose says 26 while the numbered applicability diagram contains 29 entries.
-- The 123-field matrix identifies 57 extracted fields; exact field-to-document extraction profiles and precedence still require DI review.
-- VIN/chassis reconciliation logic is owned by Audit Core Rule Engine; DI supplies evidence/facts only.
+- The current document catalogue retains all 29 numbered source requirements provisionally pending UAT reconciliation against the source's 26-document wording.
+- Source precedence must be explicit where two documents can supply the same field; processing order is not precedence.
+- Aadhaar is not added to the 57-field extraction profile by assumption; any future Aadhaar extraction requires explicit privacy/security approval.
+- VIN/chassis reconciliation logic is owned by Audit Core Rule Engine; DI supplies source-specific identifier facts only.
 
-No DI production implementation is authorized by this planning pointer.
+No DI production implementation is authorized by these planning documents.
