@@ -1,9 +1,9 @@
-# UC03 — Booking & Delivery Audit — DI Planning Pointer
+# UC03 — Booking & Delivery Audit — DI Pointer
 
-**Planning branch:** `planning/uc-003-booking-delivery-audit`  
-**Frozen baseline:** `dev@c97b3f3e5f8577160c88af1080496808189206fb`
+**Unified UC03 branch:** `planning/uc-003-booking-delivery-audit`  
+**Original frozen baseline:** `dev@c97b3f3e5f8577160c88af1080496808189206fb`
 
-The canonical UC03 cross-module design set is maintained in:
+The canonical UC03 cross-module design/execution set is maintained in:
 
 `verigence-audit-core / planning/uc-003-booking-delivery-audit / docs/uc-003-booking-delivery-audit/`
 
@@ -14,7 +14,21 @@ Canonical Audit Core documents include:
 - `UC03_RULE_FLAG_CATALOG_v1.0.md`
 - `UC03_DOCUMENT_123_FIELD_MATRIX_v1.0.md`
 - `UC03_RECONCILIATION_DECISIONS_v1.0.md`
-- `UC03_IMPLEMENTATION_DESIGN_v0.1.md` — current cross-module implementation blueprint.
+- `UC03_IMPLEMENTATION_DESIGN_v0.1.md`
+- `UC03_IMPLEMENTATION_HANDOFF_v1.1.md` — current single-branch sequential execution contract.
+
+## Single-branch execution rule
+
+DI implementation continues on this existing UC03 branch. Do not create a separate Booking, Delivery, Audit, extraction or `work/uc-003-*` branch.
+
+DI participates only when the active sequential checkpoint needs DI work:
+
+```text
+C0 Foundation / Project Context    no DI runtime change expected
+C1 Booking                         Booking extraction/profile work
+C2 Delivery                        Delivery extraction/profile work
+C3 Audit / Review / Hardening      provenance/contract hardening only if required
+```
 
 ## DI working artifact
 
@@ -34,7 +48,7 @@ DI owns document/evidence intelligence:
 - confidence;
 - extraction correction/provenance under the approved DI contract.
 
-DI does **not** own:
+DI does not own:
 
 - Project operational selection/authorization;
 - Booking/Delivery business status;
@@ -42,20 +56,22 @@ DI does **not** own:
 - Booking/Delivery workflow progression;
 - audit-rule outcome;
 - VIN business reconciliation result;
-- audit flag review/resolution.
+- Audit Flag review/resolution.
 
-## Current UC03 implementation direction
+## Frozen DI direction
 
 - Delivery business status is `STARTED -> IN_PROGRESS -> COMPLETED`; no Delivery Closed state exists.
-- Web/Android communicates with Audit Core as the workflow boundary.
+- Web/Android communicates with Audit Core, never DI directly.
 - Audit Core uses DI for evidence/document processing.
-- Extraction is asynchronous; Audit Core exposes an aggregate processing read model for Web/Android polling.
-- Extracted values are proposals with provenance; they are not silent overwrites.
-- Requirement/evidence linkage must retain Journey + stage + `requirementKey` semantics.
-- The current document catalogue retains all 29 numbered source requirements provisionally pending UAT reconciliation.
-- Source precedence must be explicit where two documents can supply the same field; processing order is not precedence.
-- Aadhaar is not added to the 57-field extraction profile by assumption; future Aadhaar extraction requires explicit privacy/security approval.
-- VIN/chassis reconciliation logic is owned by Audit Core Rule Engine; DI supplies source-specific identifier facts only.
-- Only `SUPPORTED` or business-reconciled `PROVISIONAL` mappings may become published production profiles; unresolved `TBD` mappings stay disabled.
+- Extraction is asynchronous and surfaced through Audit Core aggregate processing state.
+- Extracted values are proposals with provenance, never silent overwrites.
+- Requirement/evidence linkage retains Journey + stage + `requirementKey` semantics.
+- The provisional document catalogue retains all 29 numbered source requirements pending UAT reconciliation.
+- Source precedence is explicit; processing order is not precedence.
+- Aadhaar is not added to extraction/raw-retention by assumption.
+- VIN/chassis business reconciliation belongs to Audit Core Rule Engine.
+- Only `SUPPORTED` or explicitly reconciled `PROVISIONAL` mappings may become production profiles; unresolved `TBD` stays disabled.
 
-No DI production implementation is authorized until the UC03 Implementation Design is approved and the final Implementation Handoff is issued.
+## Immediate implementation gate
+
+C0 requires no DI runtime work unless a real contract dependency is discovered. DI implementation begins with the C1 Booking extraction slice after C0 is formally closed.
