@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
@@ -16,20 +16,23 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev')
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment: di-dev
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_TOKEN_DEV }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
       DI_API_SERVICE: di-api
       DI_WORKER_SERVICE: di-worker
       DB_SERVICE: Postgres
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
     steps:
-      - name: Check out tested DI revision
+      - name: Check out exact tested DI revision
         uses: actions/checkout@v6
         with:
           ref: ${{ env.DEPLOY_SHA }}
@@ -37,7 +40,7 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Verify DI Railway target
+      - name: Link and verify DI Railway DEV target
         shell: bash
         run: |
           set -euo pipefail
@@ -45,6 +48,7 @@ jobs:
             echo '::error::RAILWAY_TOKEN or RAILWAY_TOKEN_DEV is required.'
             exit 1
           fi
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
           railway status --json >/tmp/status.json
           railway service list --json >/tmp/services.json
           python - <<'PY'
@@ -60,6 +64,7 @@ jobs:
           if missing:
               raise SystemExit('DI Railway target is missing services: '+','.join(sorted(missing)))
           print('DI_RAILWAY_TARGET=PASS')
+          print('DI_RAILWAY_ENVIRONMENT=dev')
           PY
 
       - name: Validate persisted DI configuration
@@ -123,7 +128,23 @@ jobs:
           restartPolicyMaxRetries = 10
           TOML
 
-      - name: Deploy DI API only
+      - name: Record current DI deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do
+            railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-before.json"
+          done
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          for service in (os.environ['DI_API_SERVICE'], os.environ['DI_WORKER_SERVICE']):
+              rows=json.loads(Path(f'/tmp/{service}-before.json').read_text())
+              previous=rows[0].get('id','') if rows else ''
+              print(f'DI_PREVIOUS_DEPLOYMENT|{service}|{previous or "NONE"}')
+          PY
+
+      - name: Deploy DI API
         shell: bash
         run: |
           set -euo pipefail
@@ -131,7 +152,7 @@ jobs:
           railway up backend --path-as-root --service "$DI_API_SERVICE" --detach --yes \
             --message "DI API DEV ${DEPLOY_SHA}" >/dev/null
 
-      - name: Deploy DI worker only
+      - name: Deploy DI worker
         shell: bash
         run: |
           set -euo pipefail
@@ -139,36 +160,53 @@ jobs:
           railway up backend --path-as-root --service "$DI_WORKER_SERVICE" --detach --yes \
             --message "DI worker DEV ${DEPLOY_SHA}" >/dev/null
 
-      - name: Verify DI deployments and worker topology
+      - name: Verify fresh DI deployments and worker topology
         shell: bash
         run: |
           set -euo pipefail
           for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do
-            for attempt in $(seq 1 10); do
-              railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-deployment.json"
-              status="$(SERVICE_FILE="/tmp/${service}-deployment.json" python - <<'PY'
+            previous_id="$(SERVICE_FILE="/tmp/${service}-before.json" python - <<'PY'
           import json, os
           from pathlib import Path
           rows=json.loads(Path(os.environ['SERVICE_FILE']).read_text())
-          print(rows[0].get('status','') if rows else '')
+          print(rows[0].get('id','') if rows else '')
           PY
           )"
+            for attempt in $(seq 1 30); do
+              railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-deployment.json"
+              read -r deployment_id status <<<"$(SERVICE_FILE="/tmp/${service}-deployment.json" python - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows=json.loads(Path(os.environ['SERVICE_FILE']).read_text())
+          if rows:
+              print(rows[0].get('id',''), rows[0].get('status',''))
+          else:
+              print(' ')
+          PY
+          )"
+              if [[ -z "$deployment_id" || "$deployment_id" == "$previous_id" ]]; then
+                echo "Waiting for fresh $service deployment (attempt $attempt/30)"
+                sleep 10
+                continue
+              fi
               case "$status" in
-                SUCCESS) break ;;
+                SUCCESS)
+                  echo "DI_DEPLOYMENT=PASS|$service|$deployment_id"
+                  break
+                  ;;
                 FAILED|CRASHED|REMOVED)
                   railway logs --service "$service" --latest --deployment --lines 240 || true
                   echo "$service deployment failed: $status" >&2
                   exit 1
                   ;;
               esac
-              if [[ "$attempt" == "10" ]]; then
+              if [[ "$attempt" == "30" ]]; then
                 railway logs --service "$service" --latest --deployment --lines 240 || true
-                echo "$service deployment did not reach SUCCESS: $status" >&2
+                echo "$service fresh deployment did not reach SUCCESS: $status" >&2
                 exit 1
               fi
-              sleep 15
+              sleep 10
             done
-            echo "DI_DEPLOYMENT=PASS|$service"
           done
           railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/di-worker.log
           grep -q 'DI_WORKER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }
@@ -176,7 +214,7 @@ jobs:
           echo 'DI_WORKER=PASS'
           echo 'DI_EOD_SCHEDULER=PASS'
 
-      - name: Smoke test DI health and readiness when public domain exists
+      - name: Smoke test DI health and readiness
         shell: bash
         run: |
           set -euo pipefail
@@ -189,8 +227,8 @@ jobs:
           PY
           )"
           if [[ -z "$domain" ]]; then
-            echo 'DI_PUBLIC_SMOKE=SKIPPED|no public domain configured'
-            exit 0
+            echo '::error::DI Railway DEV API has no public domain configured.'
+            exit 1
           fi
           case "$domain" in
             http://*|https://*) base="${domain%/}" ;;
@@ -198,4 +236,6 @@ jobs:
           esac
           curl --fail --silent --show-error "$base/health" >/tmp/di-health.json
           curl --fail --silent --show-error "$base/ready" >/tmp/di-ready.json
-          echo 'DI_PUBLIC_SMOKE=PASS'
+          echo 'DI_PUBLIC_HEALTH=PASS'
+          echo 'DI_PUBLIC_READY=PASS'
+          echo "DI_DEPLOYED_SHA=${DEPLOY_SHA}"
