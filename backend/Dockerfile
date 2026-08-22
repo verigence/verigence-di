@@ -15,18 +15,18 @@ RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml .
 
-# ── Development target (includes dev deps, src mounted as volume) ──────────────
+# ── Development target (includes dev deps) ────────────────────────────────────
 FROM base AS development
-RUN uv pip install --system -e ".[dev]"
 COPY src/ ./src/
+RUN uv pip install --system -e ".[dev]"
 CMD ["uvicorn", "verigence.di.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 # ── Production build target ────────────────────────────────────────────────────
 FROM base AS production
-RUN uv pip install --system .
 COPY src/ ./src/
+RUN uv pip install --system .
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 
-# Default to API; override CMD in Railway for worker / scheduler
+# Default to API; Railway overrides the start command for the factory app.
 CMD ["uvicorn", "verigence.di.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
