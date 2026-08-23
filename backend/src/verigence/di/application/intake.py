@@ -272,7 +272,7 @@ async def intake_document(
             document_id=str(document_id),
             logical_key=logical_key,
             bytes_written=byte_count,
-            sha256=sha256_hex[:16] + "…",
+            sha256=sha256_hex[:16] + "\u2026",
         )
     except Exception as exc:
         log.error(
@@ -354,6 +354,18 @@ async def intake_document(
             document_id=str(document_id),
             processing_job_id=str(job),
             job_type="INITIAL",
+        )
+        # Fire pg_notify within the same transaction so the worker wakes
+        # immediately after commit instead of waiting for the next poll tick.
+        # Auto-suppressed if this transaction rolls back — no spurious wakes.
+        await session.execute(
+            text("SELECT pg_notify('di_processing_jobs', :payload)"),
+            {"payload": str(job)},
+        )
+        log.info(
+            "notify_sent",
+            document_id=str(document_id),
+            processing_job_id=str(job),
         )
 
     await session.commit()

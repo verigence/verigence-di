@@ -22,7 +22,8 @@ Update this file whenever a secret is added, rotated, or confirmed.
 | `DI_SECRET_KEY` | App secret key — minimum 32 chars | ⚠️ placeholder | ✅ set |
 | `DI_LOG_LEVEL` | Logging level | ⚠️ `INFO` | ⚠️ not set (defaults to INFO) |
 | **Database** ||||
-| `DI_DATABASE_URL` | asyncpg PostgreSQL connection string | ⚠️ local docker | ✅ Neon URL set |
+| `DI_DATABASE_URL` | asyncpg PostgreSQL connection string — **pooler endpoint** | ⚠️ local docker | ✅ Neon URL set |
+| `DI_WORKER_NOTIFY_DB_URL` | Direct Neon endpoint for LISTEN connection — **no `-pooler.` in host** | N/A (poll-only locally) | ❌ must set on di-worker service |
 | **Object Storage** ||||
 | `DI_STORAGE_PROVIDER` | `minio` or `r2` | ⚠️ `minio` | ⚠️ `minio` (placeholder — R2 not yet configured) |
 | `DI_STORAGE_ENDPOINT` | S3-compatible endpoint URL | ⚠️ `http://localhost:9000` | ⚠️ placeholder |
@@ -85,6 +86,27 @@ The matching public key is committed to the repo at:
 ---
 
 ## How to get each secret
+
+### DI_WORKER_NOTIFY_DB_URL — direct Neon connection for LISTEN
+
+This is the **direct** Neon endpoint — without the PgBouncer pooler in the path.
+LISTEN/NOTIFY does not work through PgBouncer (transaction pooling mode blocks it).
+
+1. Neon dashboard → your `verigence_di` project → **Connection Details**
+2. Select connection type: **Direct** (not Pooled)
+3. Copy the connection string
+4. Replace `postgresql://` with `postgresql+asyncpg://`
+5. Replace `?sslmode=require` with `?ssl=require`
+6. Set on Railway → **di-worker** service Variables only
+   (the API service does not need this — it only fires NOTIFY, not LISTEN)
+
+Example format (direct — no `-pooler.` in hostname):
+```
+postgresql+asyncpg://user:pass@ep-xxx-yyy.ap-southeast-1.aws.neon.tech/verigence_di?ssl=require
+```
+
+Leave empty (`DI_WORKER_NOTIFY_DB_URL=`) to disable push trigger and
+fall back to poll-only mode (safe — no code change required).
 
 ### Cloudflare R2 (`DI_STORAGE_*`) — next priority
 1. Cloudflare dashboard → R2 → Create bucket named `verigence-di-prod`

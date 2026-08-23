@@ -7,14 +7,17 @@ Implements the outer loop of DI_LLD_v2.2 §Processing Worker:
   - On any failure (retryable or non-retryable): D24 backout path —
       set Document FAILED/NOT_CONFIRMED, mark job FAILED,
       insert backout_jobs row with TTL=DI_BACKOUT_TTL_HOURS (default 12 h)
-  - Sleep poll_interval when no jobs are available
+  - When idle: wake immediately via pg_notify (DI_WORKER_NOTIFY_DB_URL set)
+    or sleep poll_interval as fallback
 
 Lifecycle:
   - start()  — begins the background task (called from FastAPI lifespan)
   - stop()   — signals graceful shutdown (called from FastAPI lifespan)
 
 Configuration:
-  - DI_WORKER_POLL_INTERVAL_SECONDS  (default: 5)
+  - DI_WORKER_POLL_INTERVAL_SECONDS  (default: 30 — fallback when notify active)
+  - DI_WORKER_NOTIFY_DB_URL          (direct Neon endpoint for LISTEN;
+                                       empty string = poll-only mode)
   - DI_WORKER_ID                     (default: hostname + PID)
   - DI_BACKOUT_TTL_HOURS             (default: 12)
 """
@@ -43,6 +46,8 @@ from verigence.di.workers.job_runner import run_processing_job
 
 logger = structlog.get_logger(__name__)
 
+_NOTIFY_CHANNEL = "di_processing_jobs"
+
 
 def _default_worker_id() -> str:
     try:
@@ -52,40 +57,123 @@ def _default_worker_id() -> str:
     return f"{hostname}.{os.getpid()}"
 
 
+def _asyncpg_url(url: str) -> str:
+    """Strip SQLAlchemy driver prefix so asyncpg.connect() accepts the URL."""
+    return (
+        url
+        .replace("postgresql+asyncpg://", "postgresql://")
+        .replace("postgres+asyncpg://", "postgresql://")
+    )
+
+
 class ProcessingWorker:
     """Background processing worker — runs as a long-lived asyncio task."""
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._stop_event = asyncio.Event()
+        self._notify_event = asyncio.Event()
+        self._notify_conn: object | None = None  # asyncpg Connection
 
     def start(self) -> None:
         """Start the background poll loop. Called from FastAPI lifespan."""
         self._stop_event.clear()
+        self._notify_event.clear()
         self._task = asyncio.create_task(self._run(), name="processing-worker")
         logger.info("processing_worker_started")
 
     async def stop(self) -> None:
         """Signal stop and wait for graceful shutdown."""
         self._stop_event.set()
+        # Wake any pending notify wait so the loop exits cleanly
+        self._notify_event.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=30.0)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
+        # Close dedicated LISTEN connection if open
+        if self._notify_conn is not None:
+            try:
+                await self._notify_conn.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._notify_conn = None
         logger.info("processing_worker_stopped")
+
+    async def _open_notify_conn(self, notify_db_url: str) -> bool:
+        """Open a dedicated raw asyncpg connection for LISTEN.
+
+        Must use the Neon direct endpoint (no PgBouncer) — LISTEN/NOTIFY
+        does not work through PgBouncer in transaction pooling mode.
+
+        Returns True if the listener was started successfully, False otherwise.
+        The caller falls back to poll-only mode on any failure.
+        """
+        try:
+            import asyncpg  # type: ignore[import]
+        except ImportError:
+            logger.warning("notify_listener_unavailable", reason="asyncpg_not_installed")
+            return False
+
+        def _on_notify(
+            connection: object,
+            pid: int,
+            channel: str,
+            payload: str,
+        ) -> None:
+            logger.info(
+                "notify_received",
+                channel=channel,
+                processing_job_id=payload,
+            )
+            self._notify_event.set()
+
+        try:
+            conn = await asyncpg.connect(_asyncpg_url(notify_db_url))
+            await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
+            self._notify_conn = conn
+            logger.info(
+                "notify_listener_started",
+                channel=_NOTIFY_CHANNEL,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "notify_listener_failed",
+                reason=str(exc),
+                fallback="poll_only",
+            )
+            return False
 
     async def _run(self) -> None:
         settings = get_settings()
-        poll_interval: int = getattr(settings, "worker_poll_interval_seconds", 5)
+        poll_interval: int = getattr(settings, "worker_poll_interval_seconds", 30)
         worker_id = getattr(settings, "worker_id", None) or _default_worker_id()
+        notify_db_url: str = getattr(settings, "worker_notify_db_url", "") or ""
 
         engine = create_async_engine(str(settings.database_url), echo=False)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         ai_adapter = get_document_ai_adapter()
 
         log = logger.bind(worker_id=worker_id)
-        log.info("processing_worker_loop_started", poll_interval=poll_interval)
+
+        # ── Open LISTEN connection if notify URL is configured ────────────────
+        notify_active = False
+        if notify_db_url.strip():
+            notify_active = await self._open_notify_conn(notify_db_url)
+        else:
+            log.info(
+                "notify_listener_fallback",
+                reason="DI_WORKER_NOTIFY_DB_URL_not_set",
+                poll_interval_seconds=poll_interval,
+            )
+
+        log.info(
+            "processing_worker_loop_started",
+            poll_interval=poll_interval,
+            notify_active=notify_active,
+        )
 
         try:
             while not self._stop_event.is_set():
@@ -101,10 +189,12 @@ class ProcessingWorker:
                     did_work = False
 
                 if not did_work:
-                    # No jobs available — sleep before next poll
+                    # No jobs available — wait for NOTIFY, stop signal, or
+                    # poll_interval timeout (fallback / safety net for missed notifies)
+                    self._notify_event.clear()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(
-                            self._stop_event.wait(),
+                            asyncio.shield(self._notify_event.wait()),
                             timeout=poll_interval,
                         )
         finally:
@@ -158,8 +248,6 @@ class ProcessingWorker:
                     )
 
                 if result.success:
-                    # Commit already happened via session.begin() context manager
-                    # Complete the job
                     async with session_factory() as s2, s2.begin():
                         await complete_job(
                             s2,
@@ -173,9 +261,6 @@ class ProcessingWorker:
                                  human_verification_status=result.human_verification_status,
                                  total_duration_ms=_total_ms)
                 else:
-                    # The run_processing_job already handled its own rollback via
-                    # the ProcessingError handler inside it; we need to clean up
-                    # the job and document
                     await _handle_failure(
                         session_factory=session_factory,
                         tenant_id=tenant_id,
@@ -190,8 +275,6 @@ class ProcessingWorker:
                     )
 
             except Exception as exc:
-                # Catch anything that escaped run_processing_job (should not happen)
-                # processing_run_id is unknown here — the run may not have been created
                 job_log.exception("job_runner_unexpected_escape", error=str(exc))
                 await _handle_failure(
                     session_factory=session_factory,
@@ -222,21 +305,13 @@ async def _handle_failure(
     attempt_no: int,
     job_log,
 ) -> None:
-    """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path.
-
-    - retryable=True, attempt_no==1: mark job FAILED + set document RETRY_PENDING
-      (EOD Scheduler will pick this up and create an EOD_RETRY job at attempt_no=2)
-    - retryable=True, attempt_no>=2: D24 backout (EOD retry also failed)
-    - retryable=False (any attempt): D24 backout immediately
-    """
+    """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path."""
     from datetime import UTC, datetime
-
     from sqlalchemy import text
 
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
 
     if retryable and attempt_no == 1:
-        # Retry budget path: mark job FAILED and document RETRY_PENDING
         async with session_factory() as session, session.begin():
             await retry_job(
                 session,
@@ -254,12 +329,10 @@ async def _handle_failure(
         )
         return
 
-    # D24 backout path — retryable attempt>=2 or non-retryable
     settings = get_settings()
     ttl_hours: int = settings.backout_ttl_hours
 
     async with session_factory() as session, session.begin():
-        # 1a. Mark job FAILED
         await fail_job(
             session,
             tenant_id=tenant_id,
@@ -268,10 +341,6 @@ async def _handle_failure(
             error_code=error_code,
             error_detail=error_detail,
         )
-
-        # 1b. Ensure document is FAILED/NOT_CONFIRMED (fail_job already does this,
-        #     but be explicit in case the document was left in PROCESSING state
-        #     by a crash before fail_job was called)
         await session.execute(
             text("""
                 UPDATE docintel.documents
@@ -291,8 +360,6 @@ async def _handle_failure(
                 "now": datetime.now(UTC),
             },
         )
-
-        # 2. Insert backout row (upsert — safe on second attempt for same document)
         await insert_backout_job(
             session,
             tenant_id=tenant_id,
@@ -315,7 +382,6 @@ async def _handle_failure(
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
-# The FastAPI lifespan imports this to start/stop the worker.
 
 _worker = ProcessingWorker()
 

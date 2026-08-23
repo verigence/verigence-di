@@ -65,9 +65,17 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     # Processing Worker
-    worker_poll_interval_seconds: int = 5
+    # Default poll interval is 30s — used as fallback safety net only when
+    # DI_WORKER_NOTIFY_DB_URL is set and pg_notify is active.
+    # Set to 5s if running in poll-only mode (DI_WORKER_NOTIFY_DB_URL empty).
+    worker_poll_interval_seconds: int = 30
     worker_enabled: bool = True
     worker_id: str = ""   # auto-generated from hostname+PID when empty
+    # Direct Neon endpoint URL for the dedicated LISTEN connection.
+    # Must NOT use the PgBouncer pooler endpoint — LISTEN/NOTIFY requires a
+    # persistent direct connection (Neon: ep-xxx.region.neon.tech, no -pooler.).
+    # Empty string disables pg_notify and falls back to poll-only mode.
+    worker_notify_db_url: str = ""
 
     # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24)
     backout_ttl_hours: int = 12
@@ -87,12 +95,10 @@ class Settings(BaseSettings):
     def safety_rules(self) -> Settings:
         """Block unsafe configurations at startup — fail fast before serving traffic."""
         if self.is_production:
-            # Real JWKS URL required in production
             if not self.security_jwks_url or "mock" in self.security_jwks_url.lower():
                 raise ValueError(
                     "DI_SECURITY_JWKS_URL must be a real JWKS endpoint in production"
                 )
-            # Real Gemini API key required in production
             if not self.docai_mock and not self.docai_gemini_api_key:
                 raise ValueError(
                     "DI_DOCAI_GEMINI_API_KEY must be set when DI_DOCAI_MOCK=false in production"
@@ -107,7 +113,6 @@ class Settings(BaseSettings):
             v.replace("postgresql://", "postgresql+asyncpg://")
             .replace("postgres://", "postgresql+asyncpg://")
         )
-        # asyncpg does not accept ?sslmode=require — replace with ?ssl=require
         v = v.replace("?sslmode=require", "?ssl=require")
         v = v.replace("&sslmode=require", "&ssl=require")
         return v
