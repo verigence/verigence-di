@@ -10,7 +10,7 @@ Implements the LLD §Document Intake Service contract:
 7.  Persist to storage + artifact row
 8.  Quality gate (validate_upload) — structural + tenant quality-policy rules
 9.  Update Document to final upload status (FIT | NOT_FIT | CORRUPT)
-10. For FIT: create INITIAL processing job
+10. For FIT: create INITIAL processing job + fire pg_notify to wake worker
 11. Return Document data dict
 
 The caller (router) is responsible for:
@@ -373,7 +373,7 @@ async def intake_document(
         upload_issue_detail=validator_result.upload_issue_detail,
     )
 
-    # ── Step 10: For FIT documents — create processing job if required ────────
+    # ── Step 10: For FIT documents — create processing job + notify worker ────
     # requires_processing=False (ADDITIONAL) → skip Document AI entirely (D4)
     if validator_result.upload_status == UploadStatus.FIT and requires_processing:
         job = await create_initial_job(
@@ -387,6 +387,18 @@ async def intake_document(
             document_id=str(document_id),
             processing_job_id=str(job),
             job_type="INITIAL",
+        )
+        # Fire pg_notify within the same transaction so the worker wakes
+        # immediately after commit instead of waiting for the next poll tick.
+        # Auto-suppressed if this transaction rolls back — no spurious wakes.
+        await session.execute(
+            text("SELECT pg_notify('di_processing_jobs', :payload)"),
+            {"payload": str(job)},
+        )
+        log.info(
+            "notify_sent",
+            document_id=str(document_id),
+            processing_job_id=str(job),
         )
 
     await session.commit()

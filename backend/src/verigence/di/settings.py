@@ -65,9 +65,17 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     # Processing Worker
-    worker_poll_interval_seconds: int = 5
+    # Default poll interval is 30s — used as fallback safety net only when
+    # DI_WORKER_NOTIFY_DB_URL is set and pg_notify is active.
+    # Set to 5s if running in poll-only mode (DI_WORKER_NOTIFY_DB_URL empty).
+    worker_poll_interval_seconds: int = 30
     worker_enabled: bool = True
     worker_id: str = ""   # auto-generated from hostname+PID when empty
+    # Direct Neon endpoint URL for the dedicated LISTEN connection.
+    # Must NOT use the PgBouncer pooler endpoint — LISTEN/NOTIFY requires a
+    # persistent direct connection (Neon: ep-xxx.region.neon.tech, no -pooler.).
+    # Empty string disables pg_notify and falls back to poll-only mode.
+    worker_notify_db_url: str = ""
 
     # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24)
     backout_ttl_hours: int = 12
