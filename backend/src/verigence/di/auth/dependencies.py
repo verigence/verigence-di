@@ -16,6 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.auth.verifier import verify_token
+from verigence.di.otel import attach_identity_context
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def require_actor(
     principal = verify_token(creds.credentials)
     if principal is None:
         raise _unauthorized("Invalid or expired token")
+    attach_identity_context(actor_id=principal.actor_id, tenant_id=principal.tenant_id)
     return principal
 
 
@@ -83,6 +85,7 @@ async def require_system_actor(
     principal = verify_token(creds.credentials, system=True)
     if principal is None:
         raise _unauthorized("Invalid or expired system token")
+    attach_identity_context(actor_id=principal.actor_id, tenant_id=principal.tenant_id)
     if not principal.can(Permission.PLATFORM_WHATSAPP_ADMIN):
         raise _forbidden("di.platform.whatsapp.admin permission required")
     return principal
