@@ -1,0 +1,185 @@
+name: UC03 C1 DI DEV Validation
+
+on:
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - '.github/workflows/uc03-c1-dev-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uc03-c1-di-dev-validation
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy C1 DI branch to Railway DEV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      DI_API_SERVICE: di-api
+      DI_WORKER_SERVICE: di-worker
+      DB_SERVICE: Postgres
+      DEPLOY_SHA: ${{ github.event.pull_request.head.sha }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify C1 publication profile
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python - <<'PY'
+          from verigence.di.document_ai.uc03_booking_profile import UC03_BOOKING_SUPPORTED_FIELDS
+          expected_booking={'customer_name','customer_phone','vehicle_model','vehicle_variant','vehicle_color'}
+          expected_pan={'pan_number','pan_name'}
+          if set(UC03_BOOKING_SUPPORTED_FIELDS['booking_form']) != expected_booking:
+              raise SystemExit('booking_form C1 publication boundary drift')
+          if set(UC03_BOOKING_SUPPORTED_FIELDS['pan_card']) != expected_pan:
+              raise SystemExit('pan_card C1 publication boundary drift')
+          print('DI_C1_PUBLICATION_BOUNDARY=PASS')
+          PY
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+      - name: Link and verify approved shared DEV target
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN is required.'; exit 1; }
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/tmp/link.json
+          railway status --json >/tmp/status.json
+          railway service list --json >/tmp/services.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          project=json.loads(Path('/tmp/status.json').read_text())
+          services=json.loads(Path('/tmp/services.json').read_text())
+          if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
+              raise SystemExit('Wrong Railway project')
+          names={row.get('name') for row in services}
+          required={os.environ['DI_API_SERVICE'],os.environ['DI_WORKER_SERVICE'],os.environ['DB_SERVICE']}
+          missing=required-names
+          if missing:
+              raise SystemExit('Missing DI DEV service(s): '+','.join(sorted(missing)))
+          print('DI_C1_RAILWAY_TARGET=PASS')
+          PY
+      - name: Verify persisted DI config parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$DI_API_SERVICE" --json >/tmp/api-vars.json
+          railway variable list --service "$DI_WORKER_SERVICE" --json >/tmp/worker-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          api=json.loads(Path('/tmp/api-vars.json').read_text())
+          worker=json.loads(Path('/tmp/worker-vars.json').read_text())
+          required=['DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT','DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY','DI_DATABASE_URL','DI_SECURITY_JWKS_URL']
+          for name,data in [('di-api',api),('di-worker',worker)]:
+              missing=[key for key in required if not data.get(key)]
+              if missing: raise SystemExit(name+' missing '+','.join(missing))
+          shared=['DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT','DI_STORAGE_REGION','DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY','DI_DOCAI_MOCK','DI_DOCAI_GEMINI_API_KEY','DI_DATABASE_URL','DI_SECURITY_JWKS_URL']
+          drift=[key for key in shared if (api.get(key) or '') != (worker.get(key) or '')]
+          if drift: raise SystemExit('DI API/worker config drift: '+','.join(drift))
+          print('DI_C1_PERSISTED_CONFIG=PASS')
+          PY
+      - name: Prepare Railway configs
+        shell: bash
+        run: |
+          cat > /tmp/di-api-railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile"
+          [deploy]
+          preDeployCommand = ["alembic upgrade head"]
+          startCommand = "sh -c 'uvicorn verigence.di.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8000}'"
+          healthcheckPath = "/health"
+          healthcheckTimeout = 100
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 3
+          TOML
+          cat > /tmp/di-worker-railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile.worker"
+          [deploy]
+          startCommand = "python -m verigence.di.workers"
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 10
+          TOML
+      - name: Record previous deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-before.json"; done
+      - name: Deploy C1 DI API and worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/di-api-railway.toml backend/railway.toml
+          railway up backend --path-as-root --service "$DI_API_SERVICE" --detach --yes --message "UC03 C1 DI API DEV ${DEPLOY_SHA}" >/dev/null
+          cp /tmp/di-worker-railway.toml backend/railway.toml
+          railway up backend --path-as-root --service "$DI_WORKER_SERVICE" --detach --yes --message "UC03 C1 DI worker DEV ${DEPLOY_SHA}" >/dev/null
+      - name: Verify fresh deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do
+            previous="$(SERVICE_FILE="/tmp/${service}-before.json" python - <<'PY'
+          import json,os
+          from pathlib import Path
+          rows=json.loads(Path(os.environ['SERVICE_FILE']).read_text())
+          print(rows[0].get('id','') if rows else '')
+          PY
+          )"
+            for attempt in $(seq 1 30); do
+              railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-deployment.json"
+              read -r deployment_id status <<<"$(SERVICE_FILE="/tmp/${service}-deployment.json" python - <<'PY'
+          import json,os
+          from pathlib import Path
+          rows=json.loads(Path(os.environ['SERVICE_FILE']).read_text())
+          print((rows[0].get('id','')+' '+rows[0].get('status','')) if rows else ' ')
+          PY
+          )"
+              if [[ -z "$deployment_id" || "$deployment_id" == "$previous" ]]; then sleep 10; continue; fi
+              case "$status" in SUCCESS) echo "DI_C1_DEPLOYMENT=PASS|$service|$deployment_id"; break ;; FAILED|CRASHED|REMOVED) railway logs --service "$service" --latest --deployment --lines 240 || true; exit 1 ;; esac
+              [[ "$attempt" != 30 ]] || { railway logs --service "$service" --latest --deployment --lines 240 || true; exit 1; }
+              sleep 10
+            done
+          done
+          railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/worker.log
+          grep -q 'DI_WORKER_STARTED=PASS' /tmp/worker.log || { tail -n 180 /tmp/worker.log; exit 1; }
+          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/worker.log || { tail -n 180 /tmp/worker.log; exit 1; }
+          echo 'DI_C1_WORKER_TOPOLOGY=PASS'
+      - name: Smoke DI API
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$DI_API_SERVICE" --json >/tmp/api-vars.json
+          domain="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('/tmp/api-vars.json').read_text())
+          print(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '')
+          PY
+          )"
+          [ -n "$domain" ] || { echo '::error::No DI public domain'; exit 1; }
+          case "$domain" in http://*|https://*) base="${domain%/}" ;; *) base="https://${domain%/}" ;; esac
+          for attempt in $(seq 1 20); do
+            health="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' "$base/health" || true)"
+            ready="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "$base/ready" || true)"
+            if [[ "$health" == 200 && "$ready" == 200 ]]; then echo "DI_C1_PUBLIC_BASE=$base"; echo 'DI_C1_PUBLIC_HEALTH_READY=PASS'; echo "DI_C1_DEPLOYED_SHA=$DEPLOY_SHA"; exit 0; fi
+            sleep 3
+          done
+          exit 1
