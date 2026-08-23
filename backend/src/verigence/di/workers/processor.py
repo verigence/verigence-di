@@ -86,10 +86,8 @@ class ProcessingWorker:
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
         if self._notify_conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._notify_conn.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
             self._notify_conn = None
         logger.info("processing_worker_stopped")
 
