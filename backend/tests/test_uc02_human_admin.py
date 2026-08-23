@@ -10,6 +10,9 @@ from verigence.di.auth import human_admin
 
 pytestmark = pytest.mark.no_docker
 
+# DEV regression guard: DI must accept the current minimal Security human token
+# and attest SuperAdmin against Security's live /platform/admin-context endpoint.
+
 
 class _JWKSCache:
     def get_key(self, kid: str) -> str | None:
