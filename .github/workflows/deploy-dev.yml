@@ -3,11 +3,6 @@ name: Deploy DI DEV
 on:
   workflow_call:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - dev
-    paths:
-      - '.github/workflows/deploy-dev.yml'
 
 permissions:
   contents: read
@@ -18,7 +13,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/dev' || (github.event_name == 'pull_request' && github.head_ref == 'planning/uc-003-booking-delivery-audit')
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment: di-dev
@@ -29,7 +24,7 @@ jobs:
       DI_API_SERVICE: di-api
       DI_WORKER_SERVICE: di-worker
       DB_SERVICE: Postgres
-      DEPLOY_SHA: 26ae5098c84c9db8b0177605de2a41f74733fafb
+      DEPLOY_SHA: ${{ github.sha }}
 
     steps:
       - name: Check out exact tested DI revision
@@ -150,7 +145,7 @@ jobs:
           set -euo pipefail
           cp /tmp/di-api-railway.toml backend/railway.toml
           railway up backend --path-as-root --service "$DI_API_SERVICE" --detach --yes \
-            --message "DI API UC03 C2 DEV ${DEPLOY_SHA}" >/dev/null
+            --message "DI API DEV ${DEPLOY_SHA}" >/dev/null
 
       - name: Deploy DI worker
         shell: bash
@@ -158,7 +153,7 @@ jobs:
           set -euo pipefail
           cp /tmp/di-worker-railway.toml backend/railway.toml
           railway up backend --path-as-root --service "$DI_WORKER_SERVICE" --detach --yes \
-            --message "DI worker UC03 C2 DEV ${DEPLOY_SHA}" >/dev/null
+            --message "DI worker DEV ${DEPLOY_SHA}" >/dev/null
 
       - name: Verify fresh DI deployments and worker topology
         shell: bash
