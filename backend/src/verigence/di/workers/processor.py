@@ -13,13 +13,6 @@ Implements the outer loop of DI_LLD_v2.2 §Processing Worker:
 Lifecycle:
   - start()  — begins the background task (called from FastAPI lifespan)
   - stop()   — signals graceful shutdown (called from FastAPI lifespan)
-
-Configuration:
-  - DI_WORKER_POLL_INTERVAL_SECONDS  (default: 30 — fallback when notify active)
-  - DI_WORKER_NOTIFY_DB_URL          (direct Neon endpoint for LISTEN;
-                                       empty string = poll-only mode)
-  - DI_WORKER_ID                     (default: hostname + PID)
-  - DI_BACKOUT_TTL_HOURS             (default: 12)
 """
 from __future__ import annotations
 
@@ -31,9 +24,11 @@ import time
 import uuid
 
 import structlog
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.document_ai.adapter import get_document_ai_adapter
+from verigence.di.otel import processing_job_span, record_processing_job
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
     claim_next_job,
@@ -60,8 +55,7 @@ def _default_worker_id() -> str:
 def _asyncpg_url(url: str) -> str:
     """Strip SQLAlchemy driver prefix so asyncpg.connect() accepts the URL."""
     return (
-        url
-        .replace("postgresql+asyncpg://", "postgresql://")
+        url.replace("postgresql+asyncpg://", "postgresql://")
         .replace("postgres+asyncpg://", "postgresql://")
     )
 
@@ -73,7 +67,7 @@ class ProcessingWorker:
         self._task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
-        self._notify_conn: object | None = None  # asyncpg Connection
+        self._notify_conn: object | None = None
 
     def start(self) -> None:
         """Start the background poll loop. Called from FastAPI lifespan."""
@@ -85,14 +79,12 @@ class ProcessingWorker:
     async def stop(self) -> None:
         """Signal stop and wait for graceful shutdown."""
         self._stop_event.set()
-        # Wake any pending notify wait so the loop exits cleanly
         self._notify_event.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=30.0)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-        # Close dedicated LISTEN connection if open
         if self._notify_conn is not None:
             try:
                 await self._notify_conn.close()  # type: ignore[union-attr]
@@ -102,14 +94,7 @@ class ProcessingWorker:
         logger.info("processing_worker_stopped")
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
-        """Open a dedicated raw asyncpg connection for LISTEN.
-
-        Must use the Neon direct endpoint (no PgBouncer) — LISTEN/NOTIFY
-        does not work through PgBouncer in transaction pooling mode.
-
-        Returns True if the listener was started successfully, False otherwise.
-        The caller falls back to poll-only mode on any failure.
-        """
+        """Open a dedicated raw asyncpg connection for LISTEN."""
         try:
             import asyncpg  # type: ignore[import]
         except ImportError:
@@ -122,6 +107,7 @@ class ProcessingWorker:
             channel: str,
             payload: str,
         ) -> None:
+            del connection, pid
             logger.info(
                 "notify_received",
                 channel=channel,
@@ -133,10 +119,7 @@ class ProcessingWorker:
             conn = await asyncpg.connect(_asyncpg_url(notify_db_url))
             await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
             self._notify_conn = conn
-            logger.info(
-                "notify_listener_started",
-                channel=_NOTIFY_CHANNEL,
-            )
+            logger.info("notify_listener_started", channel=_NOTIFY_CHANNEL)
             return True
         except Exception as exc:
             logger.warning(
@@ -158,7 +141,6 @@ class ProcessingWorker:
 
         log = logger.bind(worker_id=worker_id)
 
-        # ── Open LISTEN connection if notify URL is configured ────────────────
         notify_active = False
         if notify_db_url.strip():
             notify_active = await self._open_notify_conn(notify_db_url)
@@ -189,8 +171,6 @@ class ProcessingWorker:
                     did_work = False
 
                 if not did_work:
-                    # No jobs available — wait for NOTIFY, stop signal, or
-                    # poll_interval timeout (fallback / safety net for missed notifies)
                     self._notify_event.clear()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(
@@ -210,7 +190,6 @@ class ProcessingWorker:
     ) -> bool:
         """Claim and process one job. Returns True if a job was processed."""
         async with session_factory() as session:
-            # Claim inside a transaction so SKIP LOCKED works correctly
             async with session.begin():
                 job = await claim_next_job(session, worker_id=worker_id)
 
@@ -222,6 +201,7 @@ class ProcessingWorker:
         document_id: uuid.UUID = job["document_id"]
         correlation_id: str = job["correlation_id"]
         job_type: str = job["job_type"]
+        attempt_no: int = job["attempt_no"]
 
         job_log = log.bind(
             tenant_id=tenant_id,
@@ -229,65 +209,103 @@ class ProcessingWorker:
             processing_job_id=str(job_id),
             correlation_id=correlation_id,
             job_type=job_type,
+            attempt_no=attempt_no,
         )
         job_log.info("job_claimed")
 
-        # Run the job in its own session/transaction
-        _job_start = time.monotonic()
-        async with session_factory() as session:
-            try:
-                async with session.begin():
-                    result = await run_processing_job(
-                        session=session,
-                        tenant_id=tenant_id,
-                        document_id=document_id,
-                        processing_job_id=job_id,
-                        job_type=job_type,
-                        correlation_id=correlation_id,
-                        ai_adapter=ai_adapter,
-                    )
-
-                if result.success:
-                    async with session_factory() as s2, s2.begin():
-                        await complete_job(
-                            s2,
+        job_start = time.monotonic()
+        with processing_job_span(
+            correlation_id=correlation_id,
+            tenant_id=tenant_id,
+            document_id=str(document_id),
+            processing_job_id=str(job_id),
+            job_type=job_type,
+        ) as span:
+            async with session_factory() as session:
+                try:
+                    async with session.begin():
+                        result = await run_processing_job(
+                            session=session,
                             tenant_id=tenant_id,
+                            document_id=document_id,
                             processing_job_id=job_id,
-                            success=True,
+                            job_type=job_type,
+                            correlation_id=correlation_id,
+                            ai_adapter=ai_adapter,
                         )
-                    _total_ms = round((time.monotonic() - _job_start) * 1000, 1)
-                    job_log.info("job_completed",
-                                 confidence_score=str(result.confidence_score),
-                                 human_verification_status=result.human_verification_status,
-                                 total_duration_ms=_total_ms)
-                else:
+
+                    if result.success:
+                        async with session_factory() as s2, s2.begin():
+                            await complete_job(
+                                s2,
+                                tenant_id=tenant_id,
+                                processing_job_id=job_id,
+                                success=True,
+                            )
+                        total_ms = round((time.monotonic() - job_start) * 1000, 1)
+                        span.set_attribute("verigence.outcome", "completed")
+                        record_processing_job(
+                            outcome="completed",
+                            job_type=job_type,
+                            duration_ms=total_ms,
+                        )
+                        job_log.info(
+                            "job_completed",
+                            confidence_score=str(result.confidence_score),
+                            human_verification_status=result.human_verification_status,
+                            total_duration_ms=total_ms,
+                        )
+                    else:
+                        await _handle_failure(
+                            session_factory=session_factory,
+                            tenant_id=tenant_id,
+                            job_id=job_id,
+                            document_id=document_id,
+                            processing_run_id=result.processing_run_id,
+                            error_code=result.error_code,
+                            error_detail=result.error_detail,
+                            retryable=result.retryable,
+                            attempt_no=attempt_no,
+                            job_log=job_log,
+                        )
+                        total_ms = round((time.monotonic() - job_start) * 1000, 1)
+                        outcome = (
+                            "retry_pending" if result.retryable and attempt_no == 1 else "failed"
+                        )
+                        span.set_attribute("verigence.outcome", outcome)
+                        if result.error_code:
+                            span.set_attribute("verigence.error.code", result.error_code)
+                        span.set_status(Status(StatusCode.ERROR, result.error_code or outcome))
+                        record_processing_job(
+                            outcome=outcome,
+                            job_type=job_type,
+                            duration_ms=total_ms,
+                        )
+
+                except Exception as exc:
+                    job_log.exception("job_runner_unexpected_escape", error=str(exc))
                     await _handle_failure(
                         session_factory=session_factory,
                         tenant_id=tenant_id,
                         job_id=job_id,
                         document_id=document_id,
-                        processing_run_id=result.processing_run_id,
-                        error_code=result.error_code,
-                        error_detail=result.error_detail,
-                        retryable=result.retryable,
-                        attempt_no=job["attempt_no"],
+                        processing_run_id=None,
+                        error_code="WORKER_INTERNAL_ERROR",
+                        error_detail=str(exc),
+                        retryable=True,
+                        attempt_no=attempt_no,
                         job_log=job_log,
                     )
-
-            except Exception as exc:
-                job_log.exception("job_runner_unexpected_escape", error=str(exc))
-                await _handle_failure(
-                    session_factory=session_factory,
-                    tenant_id=tenant_id,
-                    job_id=job_id,
-                    document_id=document_id,
-                    processing_run_id=None,
-                    error_code="WORKER_INTERNAL_ERROR",
-                    error_detail=str(exc),
-                    retryable=True,
-                    attempt_no=job["attempt_no"],
-                    job_log=job_log,
-                )
+                    total_ms = round((time.monotonic() - job_start) * 1000, 1)
+                    outcome = "retry_pending" if attempt_no == 1 else "failed"
+                    span.set_attribute("verigence.outcome", outcome)
+                    span.set_attribute("verigence.error.code", "WORKER_INTERNAL_ERROR")
+                    span.set_status(Status(StatusCode.ERROR, "WORKER_INTERNAL_ERROR"))
+                    record_processing_job(
+                        outcome=outcome,
+                        job_type=job_type,
+                        duration_ms=total_ms,
+                    )
 
         return True
 
@@ -307,6 +325,7 @@ async def _handle_failure(
 ) -> None:
     """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path."""
     from datetime import UTC, datetime
+
     from sqlalchemy import text
 
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
@@ -380,8 +399,6 @@ async def _handle_failure(
         ttl_hours=ttl_hours,
     )
 
-
-# ── Module-level singleton ────────────────────────────────────────────────────
 
 _worker = ProcessingWorker()
 
