@@ -22,12 +22,13 @@ import os
 import socket
 import time
 import uuid
+from typing import Any
 
 import structlog
 from opentelemetry.trace import Status, StatusCode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from verigence.di.document_ai.adapter import get_document_ai_adapter
+from verigence.di.document_ai.adapter import DocumentAIAdapter, get_document_ai_adapter
 from verigence.di.otel import processing_job_span, record_processing_job
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
@@ -64,10 +65,10 @@ class ProcessingWorker:
     """Background processing worker — runs as a long-lived asyncio task."""
 
     def __init__(self) -> None:
-        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
-        self._notify_conn: object | None = None
+        self._notify_conn: Any | None = None
 
     def start(self) -> None:
         """Start the background poll loop. Called from FastAPI lifespan."""
@@ -87,14 +88,14 @@ class ProcessingWorker:
                 self._task.cancel()
         if self._notify_conn is not None:
             with contextlib.suppress(Exception):
-                await self._notify_conn.close()  # type: ignore[union-attr]
+                await self._notify_conn.close()
             self._notify_conn = None
         logger.info("processing_worker_stopped")
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
         """Open a dedicated raw asyncpg connection for LISTEN."""
         try:
-            import asyncpg  # type: ignore[import]
+            import asyncpg
         except ImportError:
             logger.warning("notify_listener_unavailable", reason="asyncpg_not_installed")
             return False
@@ -181,10 +182,10 @@ class ProcessingWorker:
     async def _process_one(
         self,
         *,
-        session_factory: async_sessionmaker,
+        session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        ai_adapter,
-        log,
+        ai_adapter: DocumentAIAdapter,
+        log: Any,
     ) -> bool:
         """Claim and process one job. Returns True if a job was processed."""
         async with session_factory() as session:
@@ -310,7 +311,7 @@ class ProcessingWorker:
 
 async def _handle_failure(
     *,
-    session_factory: async_sessionmaker,
+    session_factory: async_sessionmaker[AsyncSession],
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -319,7 +320,7 @@ async def _handle_failure(
     error_detail: str | None,
     retryable: bool,
     attempt_no: int,
-    job_log,
+    job_log: Any,
 ) -> None:
     """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path."""
     from datetime import UTC, datetime
