@@ -1,0 +1,50 @@
+name: DI live DEV baseline
+
+on:
+  push:
+    branches: [dev]
+    paths: ['.github/workflows/live-dev-baseline.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  baseline:
+    if: ${{ !contains(github.event.head_commit.message, '[skip live-baseline]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SERVICE: di-api
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: dev}
+      - run: npm install --global @railway/cli
+      - name: Capture live DI state
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/tmp/link.json
+          railway deployment list --service "$SERVICE" --limit 1 --json >/tmp/deploy.json
+          railway variable list --service "$SERVICE" --json >/tmp/vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/deploy.json').read_text()); row=rows[0] if rows else {}; meta=row.get('meta') if isinstance(row.get('meta'),dict) else {}
+          v=json.loads(Path('/tmp/vars.json').read_text())
+          out=['DI_LIVE_BASELINE',f'DEPLOYMENT_STATUS={row.get("status","")}',f'DEPLOYMENT_CREATED_AT={row.get("createdAt","")}',f'DEPLOYMENT_COMMIT={meta.get("commitHash") or meta.get("commit") or "UNKNOWN"}',f'DEPLOYMENT_BRANCH={meta.get("branch") or "UNKNOWN"}']
+          domain=v.get('RAILWAY_PUBLIC_DOMAIN') or v.get('RAILWAY_STATIC_URL') or ''
+          Path('docs/runtime').mkdir(parents=True,exist_ok=True); Path('docs/runtime/di-live-baseline.txt').write_text('\n'.join(out)+f'\nPUBLIC_DOMAIN_PRESENT={str(bool(domain)).lower()}\n')
+          Path('/tmp/domain').write_text(str(domain))
+          PY
+          domain="$(cat /tmp/domain)"
+          if [[ -n "$domain" ]]; then case "$domain" in http://*|https://*) base="${domain%/}";; *) base="https://${domain%/}";; esac; code="$(curl -sS -o /tmp/health -w '%{http_code}' "$base/health" || true)"; echo "LIVE_HEALTH_HTTP=$code" >> docs/runtime/di-live-baseline.txt; fi
+      - name: Commit evidence
+        run: |
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/di-live-baseline.txt
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'chore(dev): record DI live baseline [skip live-baseline]'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
