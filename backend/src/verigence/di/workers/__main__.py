@@ -16,7 +16,10 @@ logger = structlog.get_logger(__name__)
 
 async def _main() -> None:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+    from verigence.di.otel import configure_otel  # noqa: PLC0415
+
     configure_logging()
+    configure_otel(service_name="verigence-di-worker")
 
     from verigence.di.scheduler.beat import EODRetryScheduler
     from verigence.di.workers.processor import ProcessingWorker
@@ -41,7 +44,6 @@ async def _main() -> None:
     try:
         scheduler.start()
         scheduler_started = True
-        # Stable deployment verification markers consumed by deploy-dev.yml.
         print("DI_WORKER_STARTED=PASS", flush=True)
         print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
