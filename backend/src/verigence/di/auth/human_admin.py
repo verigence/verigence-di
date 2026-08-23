@@ -1,17 +1,18 @@
-"""UC02 human SuperAdmin attestation against live Security state.
+"""UC02 human authorization against Security state.
 
 This module is intentionally separate from the Baseline-2.2 Tenant JWT verifier.
-UC02 control-plane operations receive the original Security-issued human JWT,
+UC02 control-plane mutations receive the original Security-issued human JWT,
 validate it as identity/session evidence, and ask Security for the current
 administrative classification. No embedded role/permission/Tenant claim is
-accepted as live authority for these operations.
+accepted as live authority for those operations.
 
-The DEV Project Administration path deliberately forwards the exact human token
-from Audit Core; this file remains the single DI authorization boundary for that
-synchronous provisioning request.
+Approved read-only Project Master catalogue/template/version requests use the
+same locally verified human JWT but do not perform a live SuperAdmin round-trip.
+Mutations remain SuperAdmin-only.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Self
 from urllib.parse import urlsplit
@@ -19,7 +20,7 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
@@ -34,6 +35,11 @@ _AUDIENCE = "verigence-platform"
 _REQUIRED_HUMAN_CLAIMS = frozenset({"iss", "sub", "aud", "iat", "exp", "jti", "actor_type"})
 _FORBIDDEN_AUTHORITY_CLAIMS = frozenset(
     {"tenant_id", "permissions", "roles", "device_id", "location_id", "act"}
+)
+_LIGHTWEIGHT_MASTER_READS = (
+    re.compile(r"^/v1/tenants/[^/]+/project-masters/?$"),
+    re.compile(r"^/v1/tenants/[^/]+/project-masters/[^/]+/template/?$"),
+    re.compile(r"^/v1/tenants/[^/]+/project-masters/[^/]+/versions/?$"),
 )
 
 
@@ -71,7 +77,7 @@ security_human_bearer = HTTPBearer(
     auto_error=False,
     scheme_name="SecurityHumanAccessToken",
     bearerFormat="JWT",
-    description="Security-issued human access JWT for UC02 control-plane administration.",
+    description="Security-issued human access JWT for UC02 administration.",
 )
 
 
@@ -236,11 +242,22 @@ def _parse_admin_context(payload: Any) -> SecurityAdminContext:
     )
 
 
+def _is_lightweight_master_read(request: Request) -> bool:
+    if request.method.upper() != "GET":
+        return False
+    return any(pattern.fullmatch(request.url.path) for pattern in _LIGHTWEIGHT_MASTER_READS)
+
+
 def require_uc02_super_admin(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(security_human_bearer),
     settings: Settings = Depends(get_settings),
 ) -> HumanAdminRequest:
-    """FastAPI dependency for UC02 human-SuperAdmin-only DI control-plane routes."""
+    """Authorize UC02 Project Master requests.
+
+    Read-only catalogue/template/version requests stop after local human JWT
+    verification. All other routes retain live Security SuperAdmin attestation.
+    """
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise http_exception(ErrorCode.UNAUTHORIZED, detail="Security human access token is required.")
@@ -248,6 +265,17 @@ def require_uc02_super_admin(
     principal = verify_security_human_token(bearer_token)
     if principal is None:
         raise http_exception(ErrorCode.UNAUTHORIZED, detail="Security human access token is invalid.")
+
+    if _is_lightweight_master_read(request):
+        return HumanAdminRequest(
+            user_id=principal.user_id,
+            bearer_token=bearer_token,
+            admin_context=SecurityAdminContext(
+                user_id=principal.user_id,
+                is_super_admin=False,
+                admin_scopes=(),
+            ),
+        )
 
     try:
         base_url = security_base_url_from_jwks_url(settings.security_jwks_url)
