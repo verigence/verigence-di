@@ -1,5 +1,6 @@
 name: UC03 C1 DI DEV Validation
 
+# Branch-safe C1 DI deployment evidence; no merge to dev occurs here.
 on:
   pull_request:
     branches:
