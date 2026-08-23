@@ -5,6 +5,10 @@ UC02 control-plane operations receive the original Security-issued human JWT,
 validate it as identity/session evidence, and ask Security for the current
 administrative classification. No embedded role/permission/Tenant claim is
 accepted as live authority for these operations.
+
+The DEV Project Administration path deliberately forwards the exact human token
+from Audit Core; this file remains the single DI authorization boundary for that
+synchronous provisioning request.
 """
 from __future__ import annotations
 
