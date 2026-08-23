@@ -1,0 +1,4 @@
+DEV_BUILD_TRIGGER
+reason=Deploy merged UC02 DI lightweight master-read changes
+source_merge=2c0d1f9d5c52aec539aa425bada964554363cd3b
+requested_at=2026-08-24
