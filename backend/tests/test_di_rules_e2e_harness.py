@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from e2e.di_rules.models import RuleExpectations, load_scenario
 from e2e.di_rules.runner import (
     validate_expected_fields,
