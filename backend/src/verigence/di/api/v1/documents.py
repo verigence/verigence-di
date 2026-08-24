@@ -8,7 +8,7 @@ D12: New /document-types summary endpoint.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
@@ -80,7 +80,7 @@ def _upload_error_message(internal_status: UploadStatus, issue_code: str | None)
     return "File did not meet quality requirements"
 
 
-def _doc_data(doc: dict) -> DocumentData:
+def _doc_data(doc: dict[str, Any]) -> DocumentData:
     """Build slim public DocumentData from internal doc dict."""
     internal_upload = doc["upload_status"]
     pub_upload = public_upload_status(internal_upload)
@@ -376,8 +376,9 @@ async def get_subject_document_content(
         raise problem(410, "Document content purged", ErrorCode.DOCUMENT_CONTENT_PURGED)
 
     storage = get_storage_adapter()
-    chunks = []
-    async for chunk in storage.get_stream(art_row[0]):
+    chunks: list[bytes] = []
+    stream = await storage.get_stream(art_row[0])
+    async for chunk in stream:
         chunks.append(chunk)
     data = b"".join(chunks)
 
