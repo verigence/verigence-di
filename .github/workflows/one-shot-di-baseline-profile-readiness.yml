@@ -1,4 +1,4 @@
-name: One-shot DI baseline profile readiness
+name: One-shot DI extraction bench readiness
 
 on:
   push:
@@ -52,12 +52,12 @@ jobs:
           print('DI_ENDPOINT=RESOLVED')
           PY
 
-      - name: Wait for published baseline profiles
+      - name: Wait for published extraction-bench profiles
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, os, time
+          import os, time
           from pathlib import Path
           import httpx
 
@@ -66,8 +66,14 @@ jobs:
           actor=os.environ['ACTOR_ID']
           token=f'mock.{tenant}.{actor}.TENANT_ADMIN'
           headers={'Authorization':f'Bearer {token}'}
-          keys=('booking_form','pan_card','aadhaar')
-          lines=['DI_BASELINE_PROFILE_READINESS',f'TENANT_ID={tenant}']
+          keys=(
+              'booking_form','booking_docket','pan_card','aadhaar','passport','voter_id',
+              'corporate_id','bank_statement','bank_statement_extract','loan_statement',
+              'customer_ledger','insurance_cover','utility_bill','salary_slip',
+              'signed_declaration','supporting_document','dealer_receipt','upi_transaction',
+              'delivery_order_cover','upi_screenshot',
+          )
+          lines=['DI_EXTRACTION_BENCH_PROFILE_READINESS',f'TENANT_ID={tenant}',f'EXPECTED_TYPES={len(keys)}']
           last={}
 
           with httpx.Client(timeout=30, follow_redirects=True) as client:
@@ -97,16 +103,20 @@ jobs:
               else:
                   ready=False
 
+          passing=0
           for key in keys:
               http_status,count=last.get(key,(0,0))
               lines.append(f'{key.upper()}_HTTP={http_status}')
               lines.append(f'{key.upper()}_PUBLISHED_PROFILE_COUNT={count}')
+              if http_status == 200 and count > 0:
+                  passing += 1
+          lines.append(f'READY_TYPES={passing}')
           lines.append('RESULT='+('PASS' if ready else 'FAIL'))
           Path('docs/runtime').mkdir(parents=True,exist_ok=True)
           Path('docs/runtime/di-baseline-profile-readiness.txt').write_text('\n'.join(lines)+'\n')
           print('\n'.join(lines))
           if not ready:
-              raise SystemExit('Baseline extraction profiles did not become ready in DEV')
+              raise SystemExit('Extraction-bench profiles did not become ready in DEV')
           PY
 
       - name: Record readiness evidence
@@ -118,6 +128,6 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/runtime/di-baseline-profile-readiness.txt 2>/dev/null || true
           if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'docs(dev): record DI baseline profile readiness [skip ci]'
+          git commit -m 'docs(dev): record DI extraction bench readiness [skip ci]'
           git pull --rebase origin dev
           git push origin HEAD:dev
