@@ -31,6 +31,9 @@ htmlcov/
 .coverage
 coverage.xml
 
+# Live E2E evidence generated locally
+backend/e2e/results/
+
 # Node / frontend
 node_modules/
 .vite/
