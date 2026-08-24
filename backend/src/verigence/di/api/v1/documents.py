@@ -265,8 +265,7 @@ async def get_subject_document_types(
         errorMessage="Success",
         data=DocumentTypeSummaryData(
             subjectId=subjectId,
-            totalDocuments=len(doc_list),
-            documents=doc_list,
+            documentTypes=[DocumentTypeCount(**c) for c in counts],
         ),
     )
 
