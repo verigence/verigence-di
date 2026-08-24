@@ -1,0 +1,23 @@
+{
+  "name": "pan-card-real-extraction",
+  "subject": {
+    "displayName": "ABHISHEK KHUNTIA",
+    "subjectType": "PERSON"
+  },
+  "requireConfirmed": true,
+  "documents": [
+    {
+      "name": "pan-card",
+      "documentTypeKey": "pan_card",
+      "path": "../../scripts/pan_card_test.jpg",
+      "expectFields": {
+        "pan_number": "DJFPK8448P",
+        "pan_name": "ABHISHEK KHUNTIA",
+        "date_of_birth": "1990-02-13"
+      }
+    }
+  ],
+  "rules": {
+    "enabled": false
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "name": "booking-payment-delivery-reconciliation",
+  "subject": {
+    "displayName": "TEST CUSTOMER NAME",
+    "subjectType": "PERSON"
+  },
+  "requireConfirmed": true,
+  "numericTolerance": 1.0,
+  "documents": [
+    {
+      "name": "booking",
+      "documentTypeKey": "booking_form",
+      "path": "../../YOUR_FIXTURES/booking_form.pdf",
+      "expectFields": {
+        "total_price": 500000
+      }
+    },
+    {
+      "name": "receipt-1",
+      "documentTypeKey": "dealer_receipt",
+      "path": "../../YOUR_FIXTURES/dealer_receipt_1.pdf",
+      "expectFields": {
+        "amount": 500000,
+        "rtgs_reference": "123456"
+      }
+    },
+    {
+      "name": "bank-statement",
+      "documentTypeKey": "bank_statement",
+      "path": "../../YOUR_FIXTURES/bank_statement.pdf",
+      "expectFields": {
+        "utr_number": "BANKUTR123456"
+      }
+    },
+    {
+      "name": "delivery-order",
+      "documentTypeKey": "delivery_order",
+      "path": "../../YOUR_FIXTURES/delivery_order.pdf",
+      "expectFields": {}
+    }
+  ],
+  "rules": {
+    "enabled": true,
+    "expectedSummary": "RECONCILED",
+    "expect": {
+      "R1_AMOUNT_MATCH": "PASS",
+      "R2_UTR_SUFFIX_MATCH": "PASS",
+      "R3_DATE_PROXIMITY": "PASS",
+      "R4_NAME_MATCH": "PASS",
+      "R5_TOTAL_CHECK": "PASS",
+      "R6_DATE_SEQUENCE": "PASS",
+      "R7_DUPLICATE_DETECTION": "PASS"
+    }
+  }
+}

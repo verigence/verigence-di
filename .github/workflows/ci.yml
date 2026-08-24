@@ -45,10 +45,10 @@ jobs:
           fi
 
           if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
-            find backend/src backend/tests -type f -name '*.py' | sed 's#^backend/##' | sort > /tmp/changed-python-files.txt
+            find backend/src backend/tests backend/e2e -type f -name '*.py' | sed 's#^backend/##' | sort > /tmp/changed-python-files.txt
           else
-            git diff --name-only --diff-filter=ACMRT "$base"...HEAD -- backend/src backend/tests \
-              | grep -E '^backend/(src|tests)/.*\.py$' \
+            git diff --name-only --diff-filter=ACMRT "$base"...HEAD -- backend/src backend/tests backend/e2e \
+              | grep -E '^backend/(src|tests|e2e)/.*\.py$' \
               | sed 's#^backend/##' \
               | sort -u > /tmp/changed-python-files.txt || true
           fi
@@ -77,6 +77,9 @@ jobs:
             exit 0
           fi
           mypy "${files[@]}"
+
+      - name: Compile live E2E harness
+        run: python -m compileall -q e2e
 
       - name: Run tests
         env:
