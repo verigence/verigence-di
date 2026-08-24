@@ -1,0 +1,95 @@
+name: One-shot DI worker runtime diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-di-worker-runtime-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      DOCUMENT_ID: 039ded02-3dc7-4796-8d59-876757ad1d2c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - run: npm install --global @railway/cli
+      - name: Inspect non-secret worker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-worker --json >/dev/null
+          railway variable list --service di-worker --environment dev --json >/tmp/worker-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          v=json.loads(Path('/tmp/worker-vars.json').read_text())
+          def present(k): return 'SET' if str(v.get(k) or '').strip() else 'MISSING'
+          mock=str(v.get('DI_DOCAI_MOCK') or '').strip().lower()
+          lines=[
+            'DI_WORKER_RUNTIME_DIAGNOSTIC',
+            'DI_ENV='+str(v.get('DI_ENV') or ''),
+            'DI_DOCAI_MOCK='+str(mock or 'UNSET'),
+            'DI_DOCAI_GEMINI_API_KEY='+present('DI_DOCAI_GEMINI_API_KEY'),
+            'DI_DATABASE_URL='+present('DI_DATABASE_URL'),
+            'DI_STORAGE_PROVIDER='+str(v.get('DI_STORAGE_PROVIDER') or ''),
+            'DI_STORAGE_ENDPOINT='+present('DI_STORAGE_ENDPOINT'),
+            'DI_STORAGE_ACCESS_KEY_ID='+present('DI_STORAGE_ACCESS_KEY_ID'),
+            'DI_STORAGE_SECRET_ACCESS_KEY='+present('DI_STORAGE_SECRET_ACCESS_KEY'),
+            'DI_STORAGE_BUCKET='+str(v.get('DI_STORAGE_BUCKET') or ''),
+            'DI_WORKER_ENABLED='+str(v.get('DI_WORKER_ENABLED') or 'UNSET'),
+            'DI_WORKER_NOTIFY_DB_URL='+present('DI_WORKER_NOTIFY_DB_URL'),
+          ]
+          Path('docs/runtime/di-worker-runtime-diagnostic.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
+          PY
+      - name: Collect recent worker failure logs
+        shell: bash
+        run: |
+          set +e
+          railway logs --service di-worker --environment dev -n 1500 >/tmp/worker.log 2>/tmp/log.err
+          rc=$?
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          target='039ded02-3dc7-4796-8d59-876757ad1d2c'.lower()
+          raw=Path('/tmp/worker.log').read_text(errors='replace') if Path('/tmp/worker.log').exists() else ''
+          selected=[]
+          for line in raw.splitlines():
+              low=line.lower()
+              if target in low or any(k in low for k in ('error','exception','failed','failure','gemini','google','docai','quota','429','401','403','backout')):
+                  # redact common secret/token shapes defensively
+                  line=re.sub(r'AIza[0-9A-Za-z_-]{20,}', '[REDACTED_GOOGLE_KEY]', line)
+                  line=re.sub(r'(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*', r'\1[REDACTED]', line)
+                  line=re.sub(r'(?i)(api[_-]?key["\'=: ]+)[^ ,}"\']+', r'\1[REDACTED]', line)
+                  selected.append(line[:1800])
+          p=Path('docs/runtime/di-worker-runtime-diagnostic.txt')
+          with p.open('a',encoding='utf-8') as f:
+              f.write('WORKER_LOG_MATCH_COUNT='+str(len(selected))+'\n')
+              f.write('WORKER_LOG_MATCHES_BEGIN\n')
+              for line in selected[-120:]: f.write(line+'\n')
+              f.write('WORKER_LOG_MATCHES_END\n')
+          PY
+          if (( rc != 0 )); then
+            echo "RAILWAY_LOG_COMMAND_FAILED=$(tail -n 1 /tmp/log.err | cut -c1-500)" >> docs/runtime/di-worker-runtime-diagnostic.txt
+          fi
+      - name: Record diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/di-worker-runtime-diagnostic.txt
+          git commit -m 'docs(dev): record worker runtime diagnostic [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
