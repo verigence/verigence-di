@@ -1,0 +1,49 @@
+{
+  "scenario": "pan-card-real-extraction",
+  "startedAtUtc": "2026-08-24T04:14:57.536948+00:00",
+  "baseUrl": "https://di-api-dev.up.railway.app",
+  "tenantId": "70c5661e-bab2-46e7-8199-0f9c32acbac3",
+  "subject": {
+    "displayName": "ABHISHEK KHUNTIA",
+    "subjectType": "PERSON",
+    "subjectId": "d26c269e-c973-4cd9-8d08-9e3a54e1440c"
+  },
+  "documents": [
+    {
+      "name": "pan-card",
+      "documentTypeKey": "pan_card",
+      "path": "/home/runner/work/verigence-di/verigence-di/backend/scripts/pan_card_test.jpg",
+      "expectedFields": {
+        "pan_number": "DJFPK8448P",
+        "pan_name": "ABHISHEK KHUNTIA",
+        "date_of_birth": "1990-02-13"
+      },
+      "fields": [],
+      "errors": [],
+      "upload": {
+        "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+        "uploadStatus": "ACCEPTED",
+        "processingStatus": "PENDING",
+        "errorCode": "000",
+        "errorMessage": "File Uploaded Successfully"
+      },
+      "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+      "document": {
+        "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+        "documentTypeKey": "pan_card",
+        "uploadStatus": "ACCEPTED",
+        "processingStatus": "FAILED",
+        "confirmationStatus": "NOT_CONFIRMED",
+        "confidenceScore": null,
+        "registeredAtUtc": "2026-08-24T04:14:58.396177Z"
+      }
+    }
+  ],
+  "analysis": null,
+  "errors": [
+    "pan-card: extraction failed; processingStatus=FAILED"
+  ],
+  "passed": false,
+  "finishedAtUtc": "2026-08-24T04:15:23.303159+00:00",
+  "durationSeconds": 25.766
+}
