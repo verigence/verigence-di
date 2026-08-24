@@ -132,10 +132,7 @@ class DiClient:
             f"/v1/tenants/{tenant_id}/subjects/{subject_id}/documents/{document_id}/fields"
         )
         data = self._success_data(response, "get extracted fields")
-        if isinstance(data, dict):
-            fields = data.get("fields", [])
-        else:
-            fields = data
+        fields = data.get("fields", []) if isinstance(data, dict) else data
         if not isinstance(fields, list):
             raise DiApiError("get extracted fields returned no fields array")
         return [field for field in fields if isinstance(field, dict)]
