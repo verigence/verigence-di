@@ -16,8 +16,9 @@ import io
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -323,7 +324,8 @@ async def test_configuration_proposal_endpoint(
         raise problem(409, f"Proposal in {row['status']} state cannot be tested", ErrorCode.CONFLICT)
     chunks: list[bytes] = []
     try:
-        async for chunk in storage.get_stream(row["sample_storage_key"]):
+        stream = cast(AsyncIterator[bytes], storage.get_stream(row["sample_storage_key"]))
+        async for chunk in stream:
             chunks.append(chunk)
     except Exception as exc:  # noqa: BLE001
         raise problem(503, f"Unable to read authoring sample: {type(exc).__name__}", ErrorCode.STORAGE_READ_FAILED) from exc
@@ -374,7 +376,7 @@ async def _resolve_or_create_document_type(session: Any, tenant_id: str, actor_i
     if row is not None:
         if row[2] == "RETIRED":
             raise problem(409, f"Document Type {key} is RETIRED", ErrorCode.INVALID_DOCUMENT_TYPE_STATE)
-        return row[0]
+        return cast(uuid.UUID, row[0])
 
     document_type_id = uuid.uuid4()
     await session.execute(
@@ -418,7 +420,7 @@ async def _resolve_or_create_canonical_field(session: Any, tenant_id: str, item:
                 f"Canonical field {item['fieldKey']} already exists as {row[1]}, not {item['dataType']}",
                 ErrorCode.INVALID_CONFIGURATION,
             )
-        return row[0]
+        return cast(uuid.UUID, row[0])
 
     canonical_id = uuid.uuid4()
     await session.execute(
@@ -467,7 +469,9 @@ async def approve_configuration_proposal(
     async with tenant_session(tenant_id) as session:
         document_type_id = await _resolve_or_create_document_type(session, tenant_id, actor.actor_id, proposal, now)
 
-        # Ensure exactly one active tenant mapping for this key.
+        # Approval must not alter current runtime availability. A newly created DRAFT
+        # Document Type remains inactive; an already ACTIVE type stays active while
+        # the new tenant-scoped profile is reviewed as DRAFT.
         await session.execute(
             text("""
                 UPDATE docintel.tenant_document_types tdt
@@ -477,6 +481,7 @@ async def approve_configuration_proposal(
                   AND tdt.tenant_id=:tid
                   AND dt.document_type_key=:key
                   AND tdt.document_type_id<>:dtid
+                  AND dt.status<>'ACTIVE'
             """),
             {"now": now, "tid": tenant_id, "key": proposal["documentTypeKey"], "dtid": document_type_id},
         )
@@ -485,10 +490,19 @@ async def approve_configuration_proposal(
                 INSERT INTO docintel.tenant_document_types (
                     tenant_id, document_type_id, physical_form_type, requires_processing,
                     is_active, display_order, created_at_utc, updated_at_utc
-                ) VALUES (:tid, :dtid, :form_type, true, true, 100, :now, :now)
+                ) VALUES (
+                    :tid, :dtid, :form_type, true,
+                    EXISTS (
+                        SELECT 1 FROM docintel.document_types
+                        WHERE document_type_id=:dtid AND status='ACTIVE'
+                    ),
+                    100, :now, :now
+                )
                 ON CONFLICT (tenant_id, document_type_id) DO UPDATE
                 SET physical_form_type=EXCLUDED.physical_form_type,
-                    requires_processing=true, is_active=true, updated_at_utc=EXCLUDED.updated_at_utc
+                    requires_processing=true,
+                    is_active=EXCLUDED.is_active,
+                    updated_at_utc=EXCLUDED.updated_at_utc
             """),
             {"tid": tenant_id, "dtid": document_type_id, "form_type": proposal["physicalFormType"], "now": now},
         )
@@ -624,6 +638,14 @@ async def publish_configuration_proposal(
         await session.execute(
             text("UPDATE docintel.document_types SET status='ACTIVE', updated_at_utc=:now WHERE document_type_id=:dtid AND status='DRAFT'"),
             {"now": now, "dtid": document_type_id},
+        )
+        await session.execute(
+            text("""
+                UPDATE docintel.tenant_document_types
+                SET is_active=true, requires_processing=true, updated_at_utc=:now
+                WHERE tenant_id=:tid AND document_type_id=:dtid
+            """),
+            {"now": now, "tid": tenant_id, "dtid": document_type_id},
         )
         await session.execute(
             text("""
