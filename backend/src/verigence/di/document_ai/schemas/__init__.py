@@ -14,6 +14,7 @@ docintel.document_types (global seed or tenant-owned).
 from __future__ import annotations
 
 from verigence.di.document_ai.schemas._fallback import FALLBACK_SCHEMA
+from verigence.di.document_ai.schemas.aadhaar import AADHAAR_SCHEMA
 from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEMA
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
@@ -31,39 +32,20 @@ __all__ = [
     "get_schema",
 ]
 
-# ── Registry ──────────────────────────────────────────────────────────────────
 # Keys must match document_types.document_type_key in the DB exactly.
-# Display names must match document_types.display_name.
-#
-# Existing types (seeded migration 0005 — insurance_cover already in DB):
-#   insurance_cover → Insurance Cover Note
-#
-# New types (seeded migration 0007):
-#   booking_form           → Booking Form
-#   dealer_receipt         → Dealer Receipt
-#   bank_statement_extract → Bank Statement Extract
-#   upi_transaction        → UPI Transaction
-#   delivery_order_cover   → Delivery Order Cover
-#   upi_screenshot         → UPI Screenshot
-
 SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
-    # ── Dealer audit domain (new — migration 0007) ───────────────────────────
     "booking_form":           BOOKING_FORM_SCHEMA,
     "dealer_receipt":         DEALER_RECEIPT_SCHEMA,
     "bank_statement_extract": BANK_STATEMENT_SCHEMA,
     "upi_transaction":        UPI_TRANSACTION_SCHEMA,
     "delivery_order_cover":   DELIVERY_ORDER_SCHEMA,
     "upi_screenshot":         UPI_SCREENSHOT_SCHEMA,
-    # ── Existing global types with Gemini schemas ────────────────────────────
     "insurance_cover":        INSURANCE_COVER_SCHEMA,
     "pan_card":               PAN_CARD_SCHEMA,
+    "aadhaar":                AADHAAR_SCHEMA,
 }
 
 
 def get_schema(document_type_key: str) -> SchemaDefinition:
-    """Return the registered SchemaDefinition for document_type_key.
-
-    Returns FALLBACK_SCHEMA when the key is not registered.
-    Never raises. Safe to call with any string.
-    """
+    """Return the registered schema, or the generic fallback for unknown keys."""
     return SCHEMA_REGISTRY.get(document_type_key, FALLBACK_SCHEMA)
