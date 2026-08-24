@@ -1,15 +1,7 @@
-"""document_ai/schemas/bank_statement.py — Bank Statement Extract schema.
+"""document_ai/schemas/bank_statement.py — Indian bank-statement extract schema.
 
-document_type_key : bank_statement_extract
-display_name      : Bank Statement Extract
-DB category       : PRINTABLE
-schema_version    : 1.0
-
-Characteristics: screenshot or scanned excerpt of a bank statement
-transaction table. May include manual annotations (highlighting, circles,
-underlines) indicating a verified match.
-
-reference_no is the PRIMARY JOIN KEY against dealer_receipt.payment_reference_no.
+This schema represents a statement excerpt/transaction evidence page, not a full
+statement summary. Extraction is evidence-only and preserves masked identifiers.
 """
 from __future__ import annotations
 
@@ -18,44 +10,31 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 BANK_STATEMENT_SCHEMA = SchemaDefinition(
     document_type_key="bank_statement_extract",
     display_name="Bank Statement Extract",
-    schema_version="1.0",
+    schema_version="1.1",
     fields=[
-        FieldSpec(key="transaction_date",  field_type="date",    required=True,  description="Date of the transaction", normalization="date_dd_mm_yyyy"),
-        FieldSpec(key="value_date",        field_type="date",    required=False, description="Value date of the transaction", normalization="date_dd_mm_yyyy"),
-        FieldSpec(key="description",       field_type="string",  required=True,  description="Full transaction description text as printed"),
-        FieldSpec(key="reference_no",      field_type="string",  required=False, description="Reference number extracted from description (NEFT/RTGS/UTR/IMPS) — PRIMARY JOIN KEY"),
-        FieldSpec(key="counterparty_name", field_type="string",  required=False, description="Counterparty name extracted from description if identifiable"),
-        FieldSpec(key="debit_amount",      field_type="number",  required=False, description="Amount debited in this transaction", normalization="indian_currency"),
-        FieldSpec(key="credit_amount",     field_type="number",  required=False, description="Amount credited in this transaction", normalization="indian_currency"),
-        FieldSpec(key="running_balance",   field_type="number",  required=False, description="Account balance after this transaction", normalization="indian_currency"),
-        FieldSpec(key="manually_flagged",  field_type="boolean", required=False, description="True if the row has visible manual annotation (highlight, circle, underline)"),
+        FieldSpec(key="bank_name", field_type="string", required=False, description="Bank/financial institution name if visible"),
+        FieldSpec(key="account_holder_name", field_type="string", required=False, description="Account holder/customer name if visible"),
+        FieldSpec(key="account_number", field_type="string", required=False, description="Account number exactly as visible; preserve masking and never reconstruct hidden digits"),
+        FieldSpec(key="transaction_date", field_type="date", required=True, description="Transaction date exactly as printed", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="value_date", field_type="date", required=False, description="Value date if separately printed", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="transaction_description", field_type="string", required=True, description="Full narration/transaction description exactly as printed"),
+        FieldSpec(key="reference_no", field_type="string", required=False, description="Reference/RRN/UTR/NEFT/RTGS/IMPS identifier explicitly present in the narration or reference column"),
+        FieldSpec(key="counterparty_name", field_type="string", required=False, description="Counterparty name only when explicitly identifiable from the printed transaction row"),
+        FieldSpec(key="debit_amount", field_type="number", required=False, description="Debit amount for the selected row", normalization="indian_currency"),
+        FieldSpec(key="credit_amount", field_type="number", required=False, description="Credit amount for the selected row", normalization="indian_currency"),
+        FieldSpec(key="running_balance", field_type="number", required=False, description="Running/account balance printed for the selected row", normalization="indian_currency"),
+        FieldSpec(key="manually_flagged", field_type="boolean", required=False, description="True only when a visible highlight/circle/underline/tick or other manual mark clearly identifies the row"),
     ],
     system_prompt=(
-        "You are a document data extraction assistant specialising in Indian "
-        "bank statement transaction rows.\n"
-        "You will be shown a screenshot or scan of a bank statement — it may show "
-        "one or more transaction rows from a table.\n\n"
-        "Extract each field listed below from the document.\n"
-        "Output ONLY valid JSON. For each field use this exact structure:\n"
-        '  "<field_key>": {"value": <extracted value or null>, "confidence": "high"|"medium"|"low"}\n\n'
-        "Confidence rules:\n"
-        '  "high"   — value is clearly visible and unambiguous\n'
-        '  "medium" — value is partially visible or inferred\n'
-        '  "low"    — value is absent or unclear\n\n'
-        "If a field is not found, return: "
-        '{"value": null, "confidence": "low"}'
+        "You are a document data extraction assistant specialising in Indian bank statement transaction evidence.\n"
+        "Extract only values explicitly visible in the supplied statement image/PDF. Never infer hidden account digits, a counterparty, or a transaction reference.\n"
+        "If multiple rows are visible, prefer the visibly highlighted/marked row; if no row is marked and the requested row is ambiguous, return null for row-specific values rather than guessing.\n"
+        "Return ONLY valid JSON using the requested field structure."
     ),
     prompt_notes=[
-        "description strings often contain embedded reference numbers, for example: "
-        "'BY TRANSFER-NEFT*ICIC0SF0002*IN42613257395659*DIBYENDU KUNDU*B-'. "
-        "Extract the alphanumeric reference after the NEFT/RTGS/IMPS/UTR marker "
-        "into reference_no (e.g. 'IN42613257395659' or 'KKBK0007395659').",
-        "counterparty_name: extract the sender/receiver name from the description "
-        "text if identifiable (e.g. 'DIBYENDU KUNDU' in the example above).",
-        "manually_flagged: set to true if any part of the transaction row has a "
-        "visible manual annotation — yellow highlight, circle, underline, or "
-        "handwritten tick mark.",
-        "If multiple transaction rows are visible, extract the one that is "
-        "highlighted or most prominent. If ambiguous, extract the first row.",
+        "Preserve account-number masking exactly as shown.",
+        "reference_no may be an RRN, UTR, NEFT, RTGS, IMPS, or other explicit bank reference; preserve it exactly.",
+        "Do not merge debit and credit. Populate only the column that contains a visible amount.",
+        "manually_flagged is true only when a visible annotation is present.",
     ],
 )
