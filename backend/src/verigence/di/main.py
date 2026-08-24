@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from verigence.di.errors import ErrorCode, problem_response
+from verigence.di.otel import attach_request_context, configure_otel
 from verigence.di.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -74,7 +75,6 @@ async def _validate_schema_profile_consistency() -> None:
                 ).mappings().all()
 
                 if not rows:
-                    # No published profile for this schema key — not an error
                     continue
 
                 profile_keys = {r["field_key"] for r in rows}
@@ -98,6 +98,7 @@ async def _validate_schema_profile_consistency() -> None:
 
 def create_app() -> FastAPI:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+
     configure_logging()
     settings = get_settings()
 
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
         del fastapi_app
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
+
         worker = get_worker()
         scheduler = get_eod_scheduler()
         if settings.worker_enabled:
@@ -138,11 +140,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ── OpenAPI security scheme (D8 Bearer JWT) ──────────────────────────────
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
+
         schema = get_openapi(
             title=app.title,
             version=app.version,
@@ -167,12 +169,10 @@ def create_app() -> FastAPI:
 
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
-    # ── CORS ────────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
         allow_origins=(
-            ["*"] if not settings.is_production
-            else ["https://di-ops.verigence.app"]
+            ["*"] if not settings.is_production else ["https://di-ops.verigence.app"]
         ),
         allow_credentials=True,
         allow_methods=["*"],
@@ -180,7 +180,6 @@ def create_app() -> FastAPI:
         expose_headers=[CORRELATION_ID_HEADER],
     )
 
-    # ── Layer 1: RequestValidationError → Problem INVALID_REQUEST ────────────
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
@@ -200,7 +199,6 @@ def create_app() -> FastAPI:
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
-    # ── Layer 2: HTTPException → Problem (pass-through if already Problem) ───
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(
         request: Request, exc: HTTPException
@@ -209,12 +207,10 @@ def create_app() -> FastAPI:
         correlation_id = structlog.contextvars.get_contextvars().get(
             "correlation_id", str(uuid.uuid4())
         )
-        # If detail is already a Problem dict (has a 'code' key), attach correlationId
         if isinstance(exc.detail, dict) and "code" in exc.detail:
             body = dict(exc.detail)
             body.setdefault("correlationId", correlation_id)
         else:
-            # Wrap plain string or unexpected dict in a canonical Problem body
             body = problem_response(
                 ErrorCode.INTERNAL_ERROR,
                 detail=str(exc.detail),
@@ -226,7 +222,6 @@ def create_app() -> FastAPI:
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
-    # ── Layer 3: Correlation ID middleware + catch-all ───────────────────────
     @app.middleware("http")
     async def correlation_middleware(
         request: Request,
@@ -234,20 +229,16 @@ def create_app() -> FastAPI:
     ) -> Response:
         incoming = request.headers.get(CORRELATION_ID_HEADER, "")
         correlation_id = (
-            incoming
-            if incoming and _is_valid_correlation_id(incoming)
-            else str(uuid.uuid4())
+            incoming if incoming and _is_valid_correlation_id(incoming) else str(uuid.uuid4())
         )
-        # Bind to structlog context for this request
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
+        attach_request_context(correlation_id)
 
         start = time.perf_counter()
         try:
             response: Response = await call_next(request)
         except Exception as exc:  # noqa: BLE001
-            # Layer 3 catch-all: exceptions that escaped both registered handlers.
-            # Must return Problem JSON — never text/plain.
             logger.error(
                 "unhandled_exception",
                 exc_type=type(exc).__name__,
@@ -267,17 +258,16 @@ def create_app() -> FastAPI:
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
 
         response.headers[CORRELATION_ID_HEADER] = correlation_id
-        logger.info(
-            "http_request",
-            method=request.method,
-            path=request.url.path,
-            status=response.status_code,
-            duration_ms=duration_ms,
-        )
+        if response.status_code >= 400:
+            logger.warning(
+                "http_request_failed",
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+            )
         return response
 
-    # ── Routers ─────────────────────────────────────────────────────────────
-    # Import here to avoid circular imports
     from verigence.di.api.health import router as health_router  # noqa: PLC0415
     from verigence.di.api.v1.admin_provisioning import (  # noqa: PLC0415
         router as admin_provisioning_router,
@@ -330,10 +320,10 @@ def create_app() -> FastAPI:
     app.include_router(whatsapp_system_router)
     app.include_router(analyse_router)
 
-    # ── Sentry ───────────────────────────────────────────────────────────────
     if settings.sentry_dsn:
         try:
             import sentry_sdk
+
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
@@ -342,8 +332,8 @@ def create_app() -> FastAPI:
         except ImportError:
             logger.warning("sentry_sdk not installed; error tracking disabled")
 
+    configure_otel(service_name="verigence-di-api", app=app)
     return app
 
 
-# Module-level app instance used by uvicorn
 app = create_app()
