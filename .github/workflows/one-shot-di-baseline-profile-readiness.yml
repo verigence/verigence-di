@@ -1,0 +1,123 @@
+name: One-shot DI baseline profile readiness
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-di-baseline-profile-readiness.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      TENANT_ID: 70c5661e-bab2-46e7-8199-0f9c32acbac3
+      ACTOR_ID: e2e-di-rules
+      SERVICE: di-api
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - run: |
+          python -m pip install 'httpx>=0.27,<1'
+          npm install --global @railway/cli
+
+      - name: Resolve DI DEV endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/dev/null
+          railway variable list --service "$SERVICE" --environment dev --json >/tmp/di-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          values=json.loads(Path('/tmp/di-vars.json').read_text())
+          domain=str(values.get('RAILWAY_PUBLIC_DOMAIN') or values.get('RAILWAY_STATIC_URL') or '').strip()
+          if not domain:
+              raise SystemExit('DI public domain is unavailable')
+          if not domain.startswith(('http://','https://')):
+              domain='https://'+domain
+          with open('/tmp/di-base','w') as fh: fh.write(domain.rstrip('/'))
+          print('DI_ENDPOINT=RESOLVED')
+          PY
+
+      - name: Wait for published baseline profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          import httpx
+
+          base=Path('/tmp/di-base').read_text().strip()
+          tenant=os.environ['TENANT_ID']
+          actor=os.environ['ACTOR_ID']
+          token=f'mock.{tenant}.{actor}.TENANT_ADMIN'
+          headers={'Authorization':f'Bearer {token}'}
+          keys=('booking_form','pan_card','aadhaar')
+          lines=['DI_BASELINE_PROFILE_READINESS',f'TENANT_ID={tenant}']
+          last={}
+
+          with httpx.Client(timeout=30, follow_redirects=True) as client:
+              for attempt in range(1,61):
+                  ready=True
+                  current={}
+                  health=client.get(base+'/ready')
+                  if health.status_code != 200:
+                      ready=False
+                  for key in keys:
+                      url=base+f'/v1/tenants/{tenant}/document-types/{key}/extraction-profiles'
+                      response=client.get(url,headers=headers)
+                      published=[]
+                      if response.status_code == 200:
+                          body=response.json()
+                          data=body.get('data') if isinstance(body,dict) else None
+                          if isinstance(data,list):
+                              published=[item for item in data if str(item.get('status','')).upper()=='PUBLISHED']
+                      current[key]=(response.status_code,len(published))
+                      if response.status_code != 200 or not published:
+                          ready=False
+                  last=current
+                  print(f'ATTEMPT={attempt} READY={ready} STATE={current}')
+                  if ready:
+                      break
+                  time.sleep(10)
+              else:
+                  ready=False
+
+          for key in keys:
+              http_status,count=last.get(key,(0,0))
+              lines.append(f'{key.upper()}_HTTP={http_status}')
+              lines.append(f'{key.upper()}_PUBLISHED_PROFILE_COUNT={count}')
+          lines.append('RESULT='+('PASS' if ready else 'FAIL'))
+          Path('docs/runtime').mkdir(parents=True,exist_ok=True)
+          Path('docs/runtime/di-baseline-profile-readiness.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
+          if not ready:
+              raise SystemExit('Baseline extraction profiles did not become ready in DEV')
+          PY
+
+      - name: Record readiness evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/di-baseline-profile-readiness.txt 2>/dev/null || true
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'docs(dev): record DI baseline profile readiness [skip ci]'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
