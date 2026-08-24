@@ -1,0 +1,149 @@
+name: One-shot DI PAN DB diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-di-pan-db-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      TENANT_ID: 70c5661e-bab2-46e7-8199-0f9c32acbac3
+      DOCUMENT_ID: 039ded02-3dc7-4796-8d59-876757ad1d2c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install 'psycopg[binary]>=3.2,<4'
+          npm install --global @railway/cli
+      - name: Collect Postgres DEV variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service Postgres --json >/dev/null
+          railway variable list --service Postgres --environment dev --json >/tmp/postgres.json
+      - name: Query processing failure details
+        shell: bash
+        run: |
+          set +e
+          python - <<'PY' 2>/tmp/dbdiag.err
+          import json, os
+          from pathlib import Path
+          from urllib.parse import quote
+          import psycopg
+
+          v=json.loads(Path('/tmp/postgres.json').read_text())
+          url=str(v.get('DATABASE_PUBLIC_URL') or '').strip()
+          if not url:
+              host=str(v.get('RAILWAY_TCP_PROXY_DOMAIN') or '').strip()
+              port=str(v.get('RAILWAY_TCP_PROXY_PORT') or '').strip()
+              user=str(v.get('POSTGRES_USER') or v.get('PGUSER') or '').strip()
+              password=str(v.get('POSTGRES_PASSWORD') or v.get('PGPASSWORD') or '').strip()
+              db=str(v.get('POSTGRES_DB') or v.get('PGDATABASE') or '').strip()
+              if host and port and user and password and db:
+                  url=f'postgresql://{quote(user)}:{quote(password)}@{host}:{port}/{quote(db)}'
+          if not url:
+              safe_keys=sorted(k for k in v if any(x in k.upper() for x in ('PUBLIC','PROXY','POSTGRES','PGHOST','PGPORT','PGUSER','PGDATABASE')))
+              raise RuntimeError('No public Postgres connection available; candidate variable keys='+','.join(safe_keys))
+
+          tenant=os.environ['TENANT_ID']; doc=os.environ['DOCUMENT_ID']
+          lines=['DI_PAN_DB_DIAGNOSTIC',f'DOCUMENT_ID={doc}']
+          def clean(value):
+              if value is None: return 'None'
+              return str(value).replace('\n',' ')[:900]
+          with psycopg.connect(url, connect_timeout=15) as conn:
+              with conn.cursor() as cur:
+                  cur.execute('''
+                    SELECT upload_status, processing_status, confirmation_status,
+                           upload_issue_code, upload_issue_detail,
+                           processing_failure_code, processing_failure_detail,
+                           current_processing_run_id::text
+                    FROM docintel.documents
+                    WHERE tenant_id=%s AND document_id=%s::uuid
+                  ''',(tenant,doc))
+                  row=cur.fetchone()
+                  if not row: raise RuntimeError('Document not found')
+                  keys=['UPLOAD_STATUS','PROCESSING_STATUS','CONFIRMATION_STATUS','UPLOAD_ISSUE_CODE','UPLOAD_ISSUE_DETAIL','PROCESSING_FAILURE_CODE','PROCESSING_FAILURE_DETAIL','CURRENT_PROCESSING_RUN_ID']
+                  lines += [f'{k}={clean(v)}' for k,v in zip(keys,row)]
+
+                  cur.execute('''
+                    SELECT job_type, job_status, attempt_no, error_code, error_detail,
+                           started_at_utc, completed_at_utc, processing_job_id::text
+                    FROM docintel.processing_jobs
+                    WHERE tenant_id=%s AND document_id=%s::uuid
+                    ORDER BY created_at_utc
+                  ''',(tenant,doc))
+                  jobs=cur.fetchall()
+                  lines.append(f'PROCESSING_JOB_COUNT={len(jobs)}')
+                  for i,r in enumerate(jobs,1):
+                      lines.append('JOB_%d=%s' % (i,' | '.join(clean(x) for x in r)))
+
+                  cur.execute('''
+                    SELECT run_type, run_status, error_class, error_code, error_detail,
+                           extraction_profile_id::text, started_at_utc, completed_at_utc,
+                           processing_run_id::text
+                    FROM docintel.processing_runs
+                    WHERE tenant_id=%s AND document_id=%s::uuid
+                    ORDER BY created_at_utc
+                  ''',(tenant,doc))
+                  runs=cur.fetchall()
+                  lines.append(f'PROCESSING_RUN_COUNT={len(runs)}')
+                  for i,r in enumerate(runs,1):
+                      lines.append('RUN_%d=%s' % (i,' | '.join(clean(x) for x in r)))
+
+                  cur.execute('''
+                    SELECT capability, adapter_key, engine_key, outcome, error_code, error_detail,
+                           provider_request_id, started_at_utc, completed_at_utc
+                    FROM docintel.processor_invocations
+                    WHERE tenant_id=%s AND processing_run_id IN (
+                      SELECT processing_run_id FROM docintel.processing_runs
+                      WHERE tenant_id=%s AND document_id=%s::uuid
+                    )
+                    ORDER BY started_at_utc
+                  ''',(tenant,tenant,doc))
+                  inv=cur.fetchall()
+                  lines.append(f'PROCESSOR_INVOCATION_COUNT={len(inv)}')
+                  for i,r in enumerate(inv,1):
+                      lines.append('INVOCATION_%d=%s' % (i,' | '.join(clean(x) for x in r)))
+
+                  cur.execute('''
+                    SELECT error_class, error_code, error_detail, expires_at_utc
+                    FROM docintel.backout_jobs
+                    WHERE tenant_id=%s AND document_id=%s::uuid
+                  ''',(tenant,doc))
+                  back=cur.fetchone()
+                  lines.append('BACKOUT='+('NONE' if not back else ' | '.join(clean(x) for x in back)))
+
+          Path('docs/runtime/di-rules-pan-db-diagnostic.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
+          PY
+          rc=$?
+          if (( rc != 0 )); then
+            msg="$(tail -n 1 /tmp/dbdiag.err | tr '\n' ' ' | cut -c1-900)"
+            printf 'DI_PAN_DB_DIAGNOSTIC\nDOCUMENT_ID=%s\nRESULT=FAIL\nFAILURE=%s\n' "$DOCUMENT_ID" "$msg" > docs/runtime/di-rules-pan-db-diagnostic.txt
+            exit "$rc"
+          fi
+      - name: Record diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/di-rules-pan-db-diagnostic.txt
+          git commit -m 'docs(dev): record PAN DB diagnostic [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
