@@ -6,7 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, Header, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,6 +83,43 @@ def _document_data(doc: dict) -> DocumentData:  # type: ignore[type-arg]
         confidenceScore=doc.get("confidence_score"),
         registeredAtUtc=doc["registered_at_utc"],
     )
+
+
+async def _context_document(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    external_context_ref: str,
+    document_id: UUID,
+) -> tuple[dict[str, object], dict]:  # type: ignore[type-arg]
+    context = await get_audit_storage_context_by_ref(
+        session,
+        tenant_id=tenant_id,
+        external_context_ref=external_context_ref,
+    )
+    if context is None:
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    doc = await get_document(
+        session,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        subject_id=_context_uuid(context, "subject_id"),
+    )
+    if doc is None:
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    storage_context_id = (
+        await session.execute(
+            text("""
+                SELECT audit_storage_context_id
+                FROM docintel.documents
+                WHERE tenant_id=:tenant_id AND document_id=:document_id
+            """),
+            {"tenant_id": tenant_id, "document_id": document_id},
+        )
+    ).scalar_one_or_none()
+    if storage_context_id != _context_uuid(context, "storage_context_id"):
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    return context, doc
 
 
 @router.put(
@@ -238,34 +275,162 @@ async def get_audit_context_document(
     del service
     external_ref = externalContextRef.strip()
     async with tenant_session(tenantId) as session:
-        context = await get_audit_storage_context_by_ref(
+        _, doc = await _context_document(
             session,
             tenant_id=tenantId,
             external_context_ref=external_ref,
+            document_id=documentId,
         )
-        if context is None:
-            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
-        doc = await get_document(
+    return ApiResponse(errorCode="000", errorMessage="Success", data=_document_data(doc))
+
+
+@router.get(
+    "/audit-storage-contexts/{externalContextRef}/documents/{documentId}/fields",
+    summary="Get trusted Audit Core evidence fields",
+    operation_id="getAuditContextDocumentFields",
+)
+async def get_audit_context_document_fields(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    service: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+) -> ApiResponse[dict]:  # type: ignore[type-arg]
+    del service
+    external_ref = externalContextRef.strip()
+    async with tenant_session(tenantId) as session:
+        _, doc = await _context_document(
             session,
             tenant_id=tenantId,
+            external_context_ref=external_ref,
             document_id=documentId,
-            subject_id=_context_uuid(context, "subject_id"),
         )
-        if doc is None:
-            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
-        storage_context_id = (
+        if doc.get("confirmation_status") != "CONFIRMED":
+            return ApiResponse(
+                errorCode="E008",
+                errorMessage="Document is not yet confirmed — fields not available",
+                data=None,
+            )
+        rows = (
             await session.execute(
                 text("""
-                    SELECT audit_storage_context_id
-                    FROM docintel.documents
-                    WHERE tenant_id=:tenant_id AND document_id=:document_id
+                    SELECT dfv.canonical_field_id, cf.field_key,
+                           dfv.current_value, dfv.value_source,
+                           dfv.confidence_score, dfv.version_no, dfv.accepted_at_utc,
+                           source_fact.page_no, source_fact.evidence_region
+                    FROM docintel.document_field_values dfv
+                    JOIN docintel.canonical_fields cf
+                      ON cf.canonical_field_id=dfv.canonical_field_id
+                    LEFT JOIN LATERAL (
+                        SELECT ef.page_no, ef.evidence_region
+                        FROM docintel.extracted_facts ef
+                        WHERE ef.tenant_id=dfv.tenant_id
+                          AND ef.document_id=dfv.document_id
+                          AND ef.canonical_field_id=dfv.canonical_field_id
+                          AND ef.found_status='FOUND'
+                        ORDER BY ef.created_at_utc DESC, ef.extracted_fact_id DESC
+                        LIMIT 1
+                    ) source_fact ON true
+                    WHERE dfv.tenant_id=:tenant_id AND dfv.document_id=:document_id
+                      AND dfv.is_current=true
+                    ORDER BY cf.field_key
                 """),
                 {"tenant_id": tenantId, "document_id": documentId},
             )
-        ).scalar_one_or_none()
-        if storage_context_id != _context_uuid(context, "storage_context_id"):
-            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
-    return ApiResponse(errorCode="000", errorMessage="Success", data=_document_data(doc))
+        ).mappings().all()
+
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data={
+            "documentId": str(documentId),
+            "fields": [
+                {
+                    "canonicalFieldId": str(row["canonical_field_id"]),
+                    "fieldKey": row["field_key"],
+                    "currentValue": row["current_value"],
+                    "valueSource": row["value_source"],
+                    "confidenceScore": (
+                        float(row["confidence_score"])
+                        if row.get("confidence_score") is not None
+                        else None
+                    ),
+                    "versionNo": row["version_no"],
+                    "acceptedAt": (
+                        row["accepted_at_utc"].isoformat()
+                        if row.get("accepted_at_utc")
+                        else None
+                    ),
+                    "pageNo": row.get("page_no"),
+                    "evidenceRegion": row.get("evidence_region"),
+                }
+                for row in rows
+            ],
+        },
+    )
+
+
+@router.get(
+    "/audit-storage-contexts/{externalContextRef}/documents/{documentId}/content",
+    summary="Get trusted Audit Core evidence content",
+    operation_id="getAuditContextDocumentContent",
+)
+async def get_audit_context_document_content(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    service: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+) -> Response:
+    del service
+    external_ref = externalContextRef.strip()
+    async with tenant_session(tenantId) as session:
+        context, _ = await _context_document(
+            session,
+            tenant_id=tenantId,
+            external_context_ref=external_ref,
+            document_id=documentId,
+        )
+        art_row = (
+            await session.execute(
+                text("""
+                    SELECT da.logical_object_key, da.mime_type, d.content_hash_sha256,
+                           d.content_state
+                    FROM docintel.document_artifacts da
+                    JOIN docintel.documents d
+                      ON d.tenant_id=da.tenant_id AND d.document_id=da.document_id
+                    WHERE da.tenant_id=:tenant_id AND da.document_id=:document_id
+                      AND da.artifact_type='ORIGINAL'
+                      AND d.audit_storage_context_id=:storage_context_id
+                    LIMIT 1
+                """),
+                {
+                    "tenant_id": tenantId,
+                    "document_id": documentId,
+                    "storage_context_id": _context_uuid(context, "storage_context_id"),
+                },
+            )
+        ).one_or_none()
+    if art_row is None:
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    if art_row[3] == "PURGED":
+        raise http_exception(ErrorCode.DOCUMENT_CONTENT_PURGED)
+
+    storage = get_storage_adapter()
+    chunks: list[bytes] = []
+    stream = await storage.get_stream(art_row[0])
+    async for chunk in stream:
+        chunks.append(chunk)
+    raw_key = str(art_row[0] or "")
+    filename = raw_key.split("/")[-1] if raw_key else str(documentId)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    if art_row[2]:
+        headers["X-Content-SHA256"] = str(art_row[2])
+    return Response(
+        content=b"".join(chunks),
+        media_type=art_row[1] or "application/octet-stream",
+        headers=headers,
+    )
 
 
 def _upload_error_code(upload_status: UploadStatus, issue_code: object) -> str:

@@ -8,7 +8,7 @@ D12: New /document-types summary endpoint.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
@@ -44,7 +44,6 @@ router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Subject Documents"])
 
 logger = structlog.get_logger(__name__)
 
-# ── Error codes (D8) ──────────────────────────────────────────────────────────
 _EC_SUCCESS = "000"
 _EC_QUALITY_FAILED = "E001"
 _EC_CORRUPT = "E002"
@@ -66,7 +65,7 @@ def _upload_error_code(internal_status: UploadStatus, issue_code: str | None) ->
         return _EC_STORAGE_ERROR
     if internal_status == UploadStatus.CORRUPT:
         return _EC_CORRUPT
-    return _EC_QUALITY_FAILED   # NOT_FIT
+    return _EC_QUALITY_FAILED
 
 
 def _upload_error_message(internal_status: UploadStatus, issue_code: str | None) -> str:
@@ -81,7 +80,7 @@ def _upload_error_message(internal_status: UploadStatus, issue_code: str | None)
     return "File did not meet quality requirements"
 
 
-def _doc_data(doc: dict) -> DocumentData:
+def _doc_data(doc: dict[str, Any]) -> DocumentData:
     """Build slim public DocumentData from internal doc dict."""
     internal_upload = doc["upload_status"]
     pub_upload = public_upload_status(internal_upload)
@@ -97,8 +96,6 @@ def _doc_data(doc: dict) -> DocumentData:
         registeredAtUtc=doc["registered_at_utc"],
     )
 
-
-# ── Upload ────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/subjects/{subjectId}/documents",
@@ -168,8 +165,6 @@ async def upload_subject_document(
     )
 
 
-# ── Get all documents for a subject ──────────────────────────────────────────
-
 @router.get(
     "/subjects/{subjectId}/documents",
     summary="List Subject Documents",
@@ -206,8 +201,6 @@ async def get_subject_documents(
     )
 
 
-# ── Get single document ───────────────────────────────────────────────────────
-
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}",
     summary="Get Subject Document",
@@ -243,8 +236,6 @@ async def get_subject_document(
     )
 
 
-# ── Document type summary ─────────────────────────────────────────────────────
-
 @router.get(
     "/subjects/{subjectId}/document-types",
     summary="Get Subject Document Type Summary",
@@ -278,8 +269,6 @@ async def get_subject_document_types(
         ),
     )
 
-
-# ── Delete ────────────────────────────────────────────────────────────────────
 
 @router.delete(
     "/subjects/{subjectId}/documents/{documentId}",
@@ -346,9 +335,6 @@ async def delete_subject_document(
         await session.commit()
 
 
-# ── Content / Fields / Quality — internal/ops endpoints ──────────────────────
-# These return the same ApiResponse envelope per D8.
-
 @router.get(
     "/subjects/{subjectId}/documents/{documentId}/content",
     operation_id="getSubjectDocumentContent",
@@ -390,8 +376,9 @@ async def get_subject_document_content(
         raise problem(410, "Document content purged", ErrorCode.DOCUMENT_CONTENT_PURGED)
 
     storage = get_storage_adapter()
-    chunks = []
-    async for chunk in storage.get_stream(art_row[0]):
+    chunks: list[bytes] = []
+    stream = await storage.get_stream(art_row[0])
+    async for chunk in stream:
         chunks.append(chunk)
     data = b"".join(chunks)
 
@@ -417,7 +404,8 @@ async def get_subject_document_content(
     description=(
         "Return all current extracted field values for a CONFIRMED document. "
         "Required permission: `di.document.fields.read`. "
-        "Returns D8 envelope with fields array (fieldKey, currentValue, valueSource, confidenceScore). "
+        "The existing field contract is preserved and optional pageNo/evidenceRegion "
+        "metadata identifies the latest machine source location when available. "
         "Returns errorCode=E008 if the document has not yet been confirmed."
     ),
 )
@@ -430,7 +418,10 @@ async def get_subject_document_fields(
     async with tenant_session(actor.tenant_id) as session:
         doc_row = (
             await session.execute(
-                text("SELECT confirmation_status FROM docintel.documents WHERE tenant_id=:tid AND document_id=:doc_id"),
+                text(
+                    "SELECT confirmation_status FROM docintel.documents "
+                    "WHERE tenant_id=:tid AND document_id=:doc_id"
+                ),
                 {"tid": actor.tenant_id, "doc_id": documentId},
             )
         ).one_or_none()
@@ -448,10 +439,23 @@ async def get_subject_document_fields(
                 text("""
                     SELECT dfv.canonical_field_id, cf.field_key,
                            dfv.current_value, dfv.value_source,
-                           dfv.confidence_score, dfv.version_no, dfv.accepted_at_utc
+                           dfv.confidence_score, dfv.version_no, dfv.accepted_at_utc,
+                           source_fact.page_no, source_fact.evidence_region
                     FROM docintel.document_field_values dfv
-                    JOIN docintel.canonical_fields cf ON cf.canonical_field_id=dfv.canonical_field_id
-                    WHERE dfv.tenant_id=:tid AND dfv.document_id=:doc_id AND dfv.is_current=true
+                    JOIN docintel.canonical_fields cf
+                      ON cf.canonical_field_id=dfv.canonical_field_id
+                    LEFT JOIN LATERAL (
+                        SELECT ef.page_no, ef.evidence_region
+                        FROM docintel.extracted_facts ef
+                        WHERE ef.tenant_id=dfv.tenant_id
+                          AND ef.document_id=dfv.document_id
+                          AND ef.canonical_field_id=dfv.canonical_field_id
+                          AND ef.found_status='FOUND'
+                        ORDER BY ef.created_at_utc DESC, ef.extracted_fact_id DESC
+                        LIMIT 1
+                    ) source_fact ON true
+                    WHERE dfv.tenant_id=:tid AND dfv.document_id=:doc_id
+                      AND dfv.is_current=true
                     ORDER BY cf.field_key
                 """),
                 {"tid": actor.tenant_id, "doc_id": documentId},
@@ -469,9 +473,19 @@ async def get_subject_document_fields(
                     "fieldKey": r["field_key"],
                     "currentValue": r["current_value"],
                     "valueSource": r["value_source"],
-                    "confidenceScore": float(r["confidence_score"]) if r.get("confidence_score") else None,
+                    "confidenceScore": (
+                        float(r["confidence_score"])
+                        if r.get("confidence_score") is not None
+                        else None
+                    ),
                     "versionNo": r["version_no"],
-                    "acceptedAt": r["accepted_at_utc"].isoformat() if r.get("accepted_at_utc") else None,
+                    "acceptedAt": (
+                        r["accepted_at_utc"].isoformat()
+                        if r.get("accepted_at_utc")
+                        else None
+                    ),
+                    "pageNo": r.get("page_no"),
+                    "evidenceRegion": r.get("evidence_region"),
                 }
                 for r in rows
             ],
@@ -520,7 +534,11 @@ async def get_subject_document_quality(
                     "parametersApplied": r["parameters_applied"],
                     "measurement": r["measurement"],
                     "message": r["message"],
-                    "evaluatedAt": r["evaluated_at_utc"].isoformat() if r.get("evaluated_at_utc") else None,
+                    "evaluatedAt": (
+                        r["evaluated_at_utc"].isoformat()
+                        if r.get("evaluated_at_utc")
+                        else None
+                    ),
                 }
                 for r in rows
             ],
@@ -572,7 +590,11 @@ async def get_subject_document_exceptions(
                 "uploadStatus": r["upload_status"],
                 "processingStatus": r["processing_status"],
                 "issueCode": r.get("upload_issue_code") or r.get("processing_failure_code"),
-                "registeredAt": r["registered_at_utc"].isoformat() if r.get("registered_at_utc") else None,
+                "registeredAt": (
+                    r["registered_at_utc"].isoformat()
+                    if r.get("registered_at_utc")
+                    else None
+                ),
             }
             for r in rows
         ],
