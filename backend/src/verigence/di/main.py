@@ -286,6 +286,9 @@ def create_app() -> FastAPI:
     from verigence.di.api.v1.audit_storage_contexts import (  # noqa: PLC0415
         router as audit_storage_contexts_router,
     )
+    from verigence.di.api.v1.configuration_proposals import (
+        router as configuration_proposals_router,  # noqa: PLC0415
+    )
     from verigence.di.api.v1.documents import router as documents_router  # noqa: PLC0415
     from verigence.di.api.v1.entity_links import router as entity_links_router  # noqa: PLC0415
     from verigence.di.api.v1.extraction_profiles import (
@@ -320,6 +323,7 @@ def create_app() -> FastAPI:
     app.include_router(entity_links_router)
     app.include_router(requirement_profiles_router)
     app.include_router(extraction_profiles_router)
+    app.include_router(configuration_proposals_router)
     app.include_router(tenant_config_router)
     app.include_router(subject_matching_router)
     app.include_router(unassigned_router)
