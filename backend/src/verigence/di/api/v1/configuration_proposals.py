@@ -16,9 +16,8 @@ import io
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -324,7 +323,7 @@ async def test_configuration_proposal_endpoint(
         raise problem(409, f"Proposal in {row['status']} state cannot be tested", ErrorCode.CONFLICT)
     chunks: list[bytes] = []
     try:
-        stream = cast(AsyncIterator[bytes], storage.get_stream(row["sample_storage_key"]))
+        stream: Any = storage.get_stream(row["sample_storage_key"])
         async for chunk in stream:
             chunks.append(chunk)
     except Exception as exc:  # noqa: BLE001
@@ -376,7 +375,7 @@ async def _resolve_or_create_document_type(session: Any, tenant_id: str, actor_i
     if row is not None:
         if row[2] == "RETIRED":
             raise problem(409, f"Document Type {key} is RETIRED", ErrorCode.INVALID_DOCUMENT_TYPE_STATE)
-        return cast(uuid.UUID, row[0])
+        return uuid.UUID(str(row[0]))
 
     document_type_id = uuid.uuid4()
     await session.execute(
@@ -420,7 +419,7 @@ async def _resolve_or_create_canonical_field(session: Any, tenant_id: str, item:
                 f"Canonical field {item['fieldKey']} already exists as {row[1]}, not {item['dataType']}",
                 ErrorCode.INVALID_CONFIGURATION,
             )
-        return cast(uuid.UUID, row[0])
+        return uuid.UUID(str(row[0]))
 
     canonical_id = uuid.uuid4()
     await session.execute(
