@@ -1,0 +1,87 @@
+name: One-shot DI PAN failure diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-di-pan-failure-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      TENANT_ID: 70c5661e-bab2-46e7-8199-0f9c32acbac3
+      SUBJECT_ID: d26c269e-c973-4cd9-8d08-9e3a54e1440c
+      DOCUMENT_ID: 039ded02-3dc7-4796-8d59-876757ad1d2c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install 'httpx>=0.27,<1'
+          npm install --global @railway/cli
+      - name: Resolve DI endpoint and collect exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-api --json >/dev/null
+          railway variable list --service di-api --environment dev --json >/tmp/di.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          import httpx
+          v=json.loads(Path('/tmp/di.json').read_text())
+          d=str(v.get('RAILWAY_PUBLIC_DOMAIN') or v.get('RAILWAY_STATIC_URL') or '').strip()
+          if not d.startswith(('http://','https://')): d='https://'+d
+          tenant=os.environ['TENANT_ID']; subject=os.environ['SUBJECT_ID']; doc=os.environ['DOCUMENT_ID']
+          token=f'mock.{tenant}.e2e-di-rules.TENANT_ADMIN'
+          with httpx.Client(timeout=30,follow_redirects=True) as client:
+              r=client.get(d.rstrip('/')+f'/v1/tenants/{tenant}/document-exceptions',params={'subject_id':subject},headers={'Authorization':'Bearer '+token})
+          lines=['DI_PAN_FAILURE_DIAGNOSTIC',f'DOCUMENT_ID={doc}',f'EXCEPTIONS_HTTP={r.status_code}']
+          try:
+              body=r.json()
+          except Exception:
+              body={}
+          items=((body.get('data') or {}).get('items') or []) if isinstance(body,dict) else []
+          match=next((x for x in items if str(x.get('documentId'))==doc),None)
+          if match:
+              for key in ('uploadStatus','processingStatus','confirmationStatus','issueCode','uploadedByActorId','registeredAt'):
+                  lines.append(f'{key.upper()}={match.get(key)}')
+          else:
+              lines.append('EXCEPTION_MATCH=NOT_FOUND')
+          Path('docs/runtime/di-rules-pan-diagnostic.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
+          PY
+      - name: Collect matching worker log lines
+        shell: bash
+        run: |
+          set +e
+          railway logs --service di-worker --environment dev --lines 800 >/tmp/worker.log 2>/tmp/worker.err
+          {
+            echo 'WORKER_LOG_MATCHES_BEGIN'
+            grep -Ei "$DOCUMENT_ID|$SUBJECT_ID|processing_failed|document.*failed|gemini|docai|backout" /tmp/worker.log \
+              | grep -Eiv 'api[_-]?key|authorization|bearer|secret' \
+              | tail -n 80 || true
+            echo 'WORKER_LOG_MATCHES_END'
+          } >> docs/runtime/di-rules-pan-diagnostic.txt
+      - name: Record diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/di-rules-pan-diagnostic.txt
+          git commit -m 'docs(dev): record PAN extraction diagnostic [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
