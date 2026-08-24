@@ -17,7 +17,7 @@ import base64
 import json
 import uuid
 from decimal import Decimal
-from typing import Any, Tuple
+from typing import Any
 
 import httpx
 import structlog
@@ -337,7 +337,7 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
     return "\n".join(lines)
 
 
-def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict:
+def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict[str, Any]:
     effective_mime = mime_type if mime_type else "application/octet-stream"
     image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
     return {
@@ -361,7 +361,7 @@ async def _call_gemini_instrumented(
     artifact_bytes: bytes,
     mime_type: str,
     prompt: str,
-) -> Tuple[str, int, int, int]:
+) -> tuple[str, int, int, int]:
     """Send document bytes + prompt to Gemini with token instrumentation."""
     payload = _build_payload(artifact_bytes, mime_type, prompt)
 
