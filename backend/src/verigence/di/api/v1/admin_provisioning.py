@@ -441,6 +441,17 @@ async def purge_project_data(
         {"tid": tenantId},
     )
 
+    # tenant_settings points at its active retention policy while the retention
+    # policy also belongs to the same Tenant. Break this deliberate ownership cycle
+    # before generic FK child-first cleanup, mirroring provisioning compensation.
+    await session.execute(
+        text(
+            "UPDATE docintel.tenant_settings "
+            "SET active_retention_policy_id=NULL WHERE tenant_id=:tid"
+        ),
+        {"tid": tenantId},
+    )
+
     # Delete every tenant-scoped table in FK-child-first order. This intentionally
     # adapts to additive DI tables while remaining restricted to docintel + tenant_id.
     await session.execute(
