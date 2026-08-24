@@ -452,8 +452,10 @@ async def purge_project_data(
         {"tid": tenantId},
     )
 
-    # Delete every tenant-scoped table in FK-child-first order. This intentionally
-    # adapts to additive DI tables while remaining restricted to docintel + tenant_id.
+    # Delete tenant-scoped operational/link tables in FK-child-first order, but keep
+    # tenant_settings until the tenant-owned Document Types that reference it are
+    # removed below. This adapts to additive tenant_id tables without breaking the
+    # explicit ownership FK from document_types.owner_tenant_id -> tenant_settings.
     await session.execute(
         text(
             """
@@ -471,6 +473,7 @@ async def purge_project_data(
                     AND a.attname='tenant_id'
                     AND a.attnum > 0
                     AND NOT a.attisdropped
+                    AND c.relname <> 'tenant_settings'
                 ),
                 edges AS (
                   SELECT con.conrelid AS child, con.confrelid AS parent
@@ -515,6 +518,10 @@ async def purge_project_data(
     )
     await session.execute(
         text("DELETE FROM docintel.document_types WHERE owner_tenant_id=:tid"),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text("DELETE FROM docintel.tenant_settings WHERE tenant_id=:tid"),
         {"tid": tenantId},
     )
 
