@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from collections.abc import AsyncIterator
+from typing import Annotated, Protocol, cast
 from uuid import UUID
 
 import structlog
@@ -39,6 +40,12 @@ from verigence.di.storage.adapter import StorageAdapter, get_storage_adapter
 from verigence.di.storage.audit_keys import frozen_audit_slugs
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Audit Storage Contexts"])
+
+
+class _AsyncStreamingStorage(Protocol):
+    """Runtime shape of storage adapters whose get_stream is an async generator."""
+
+    def get_stream(self, logical_key: str) -> AsyncIterator[bytes]: ...
 
 
 class AuditDisplayContext(BaseModel):
@@ -102,8 +109,9 @@ def _document_content_response(
     }
     if content_hash_sha256:
         headers["X-Content-SHA256"] = str(content_hash_sha256)
+    stream = cast("_AsyncStreamingStorage", storage).get_stream(logical_key)
     return StreamingResponse(
-        content=storage.get_stream(logical_key),
+        content=stream,
         media_type=mime_type or "application/octet-stream",
         headers=headers,
     )
