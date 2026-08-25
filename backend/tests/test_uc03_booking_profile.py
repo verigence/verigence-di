@@ -22,6 +22,18 @@ def test_pan_card_supported_profile_includes_pan_identity() -> None:
     assert supported_uc03_booking_fields("pan_card") == {"pan_number", "pan_name"}
 
 
+def test_aadhaar_supported_profile_publishes_printed_name_only() -> None:
+    assert supported_uc03_booking_fields("aadhaar") == {"aadhaar_name"}
+    extraction = {
+        "aadhaar_name": {"value": "A Customer", "confidence": "high"},
+        "aadhaar_number": {"value": "XXXX XXXX 1234", "confidence": "high"},
+        "aadhaar_address": {"value": "Address", "confidence": "medium"},
+    }
+    assert filter_uc03_booking_result("aadhaar", extraction) == {
+        "aadhaar_name": extraction["aadhaar_name"],
+    }
+
+
 def test_filter_preserves_machine_envelope_without_publishing_provisional_fields() -> None:
     extraction = {
         "customer_name": {"value": "A Customer", "confidence": "high"},
