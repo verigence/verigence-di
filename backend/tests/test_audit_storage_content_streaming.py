@@ -27,7 +27,7 @@ async def test_document_content_response_streams_async_generator_without_bufferi
     document_id = uuid4()
 
     response = _document_content_response(
-        storage=cast(StorageAdapter, storage),
+        storage=cast("StorageAdapter", storage),
         logical_key="tenant/audit/booking-form.pdf",
         mime_type="application/pdf",
         content_hash_sha256="abc123",
