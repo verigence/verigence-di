@@ -2,9 +2,9 @@
 
 This module is intentionally narrower than the general DI document schemas. UC03
 may consume only source mappings reconciled as SUPPORTED in
-UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md. PROVISIONAL and TBD fields remain
-outside the published UC03 profile until business/DI reconciliation changes the
-mapping artifact.
+UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md plus explicit UC03 amendments. PROVISIONAL
+and TBD fields remain outside the published UC03 profile until business/DI
+reconciliation changes the mapping artifact.
 """
 from __future__ import annotations
 
@@ -14,10 +14,14 @@ from typing import Any
 # Canonical DI document type -> fields allowed into the UC03 Booking proposal
 # stream. The Audit Core remains authoritative for accept/correct and typed-domain
 # persistence; DI preserves the machine value, confidence and source.
+#
+# customer_name remains available in the broad Booking Form extraction result, but
+# is intentionally not published into the UC03 proposal stream because a Booking
+# Form is not an identity-authoritative source for Legal Name. PAN/Aadhaar names are.
 UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
     "booking_form": frozenset(
         {
-            "customer_name",
+            "booking_date",
             "customer_phone",
             "vehicle_model",
             "vehicle_variant",
@@ -33,6 +37,7 @@ UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
 UC03_BOOKING_NON_PUBLISHED_FIELDS: dict[str, frozenset[str]] = {
     "booking_form": frozenset(
         {
+            "customer_name",
             "customer_email",
             "customer_address",
             "sales_person",
