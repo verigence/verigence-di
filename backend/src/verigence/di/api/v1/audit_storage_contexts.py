@@ -7,6 +7,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, Header, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +35,7 @@ from verigence.di.repositories.database import get_db_session, set_tenant_contex
 from verigence.di.repositories.documents import get_document
 from verigence.di.repositories.subjects import subject_exists
 from verigence.di.repositories.tenants import provision_actor
-from verigence.di.storage.adapter import get_storage_adapter
+from verigence.di.storage.adapter import StorageAdapter, get_storage_adapter
 from verigence.di.storage.audit_keys import frozen_audit_slugs
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Audit Storage Contexts"])
@@ -82,6 +83,29 @@ def _document_data(doc: dict) -> DocumentData:  # type: ignore[type-arg]
         confirmationStatus=doc.get("confirmation_status"),
         confidenceScore=doc.get("confidence_score"),
         registeredAtUtc=doc["registered_at_utc"],
+    )
+
+
+def _document_content_response(
+    *,
+    storage: StorageAdapter,
+    logical_key: str,
+    mime_type: str | None,
+    content_hash_sha256: object,
+    document_id: UUID,
+) -> StreamingResponse:
+    """Stream stored document bytes without buffering the full object in DI memory."""
+    raw_key = str(logical_key or "")
+    filename = raw_key.split("/")[-1] if raw_key else str(document_id)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    if content_hash_sha256:
+        headers["X-Content-SHA256"] = str(content_hash_sha256)
+    return StreamingResponse(
+        content=storage.get_stream(logical_key),
+        media_type=mime_type or "application/octet-stream",
+        headers=headers,
     )
 
 
@@ -414,22 +438,12 @@ async def get_audit_context_document_content(
     if art_row[3] == "PURGED":
         raise http_exception(ErrorCode.DOCUMENT_CONTENT_PURGED)
 
-    storage = get_storage_adapter()
-    chunks: list[bytes] = []
-    stream = await storage.get_stream(art_row[0])
-    async for chunk in stream:
-        chunks.append(chunk)
-    raw_key = str(art_row[0] or "")
-    filename = raw_key.split("/")[-1] if raw_key else str(documentId)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-    }
-    if art_row[2]:
-        headers["X-Content-SHA256"] = str(art_row[2])
-    return Response(
-        content=b"".join(chunks),
-        media_type=art_row[1] or "application/octet-stream",
-        headers=headers,
+    return _document_content_response(
+        storage=get_storage_adapter(),
+        logical_key=str(art_row[0]),
+        mime_type=art_row[1],
+        content_hash_sha256=art_row[2],
+        document_id=documentId,
     )
 
 
