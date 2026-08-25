@@ -86,7 +86,7 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
     """
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
-    log.info("eod_tick")
+    log.debug("eod_tick")
 
     # ── 0. Stale RUNNING job reaper ──────────────────────────────────────
     try:
@@ -118,7 +118,7 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
         if not _is_eod_window(now_utc, tz_name, eod_time):
             continue
 
-        log.info("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
+        log.debug("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
         async with session_factory() as session, session.begin():
             count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
         if count:
