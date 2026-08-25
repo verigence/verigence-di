@@ -145,7 +145,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                 )
                 field_results = _parse_response(raw_response, schema, fields)
                 break
-            except json.JSONDecodeError as exc:
+            except (json.JSONDecodeError, ValueError) as exc:
                 last_error = str(exc)
                 log.warning(
                     "gemini_parse_failure",
@@ -269,6 +269,7 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
         "",
         "Extract the following fields from this document.",
         "Return ONLY valid JSON with exactly this structure:",
+        "Return one JSON object only. Do not wrap the object in an array.",
         "{",
     ]
 
@@ -457,6 +458,18 @@ def _parse_response(
         raise ValueError(
             f"Gemini response is not valid JSON: {exc}\nRaw: {raw_text[:500]}"
         ) from exc
+
+    # Gemini can occasionally wrap the requested object in a one-element JSON
+    # array even when responseMimeType=application/json and the prompt requests an
+    # object. Accept that harmless wrapper, but reject ambiguous multi-item arrays.
+    if isinstance(data, list):
+        if len(data) == 1 and isinstance(data[0], dict):
+            data = data[0]
+        else:
+            raise ValueError(
+                "Gemini response must be one JSON object or a single-item array "
+                f"containing one object. Raw: {raw_text[:500]}"
+            )
 
     if not isinstance(data, dict):
         raise ValueError(f"Gemini response is not a JSON object. Raw: {raw_text[:500]}")
