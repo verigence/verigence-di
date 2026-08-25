@@ -25,6 +25,7 @@ UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "pan_card": frozenset({"pan_number", "pan_name"}),
+    "aadhaar": frozenset({"aadhaar_name"}),
 }
 
 # Explicitly document fields present in the broad Booking Form schema that UC03
