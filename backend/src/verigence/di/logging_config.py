@@ -165,7 +165,6 @@ class _LevelFilter:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-
 def configure_logging() -> None:
     """Configure the structlog pipeline. Call once at process startup."""
     from verigence.di.settings import get_settings
@@ -225,8 +224,7 @@ def configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Also configure stdlib logging so third-party libs (sqlalchemy, httpx) go
-    # through the same level gate
+    # Also configure stdlib logging so third-party libraries use the same root sink.
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
@@ -234,9 +232,15 @@ def configure_logging() -> None:
         force=True,
     )
 
-    # Silence noisy libraries in production
+    # SQL text/parameters and APScheduler internals are operational noise in every
+    # environment. Keep application-level DI events, warnings and errors visible,
+    # but suppress these framework loggers unless explicitly overridden at runtime.
+    for noisy in ("sqlalchemy.engine", "sqlalchemy.pool", "apscheduler"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Keep HTTP client diagnostics available in local/dev, but quiet in UAT/prod.
     if not is_dev:
-        for noisy in ("sqlalchemy.engine", "httpx", "httpcore", "apscheduler"):
+        for noisy in ("httpx", "httpcore"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
     structlog.get_logger(__name__).info(
