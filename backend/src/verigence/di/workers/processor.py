@@ -13,6 +13,7 @@ import os
 import socket
 import time
 import uuid
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -58,10 +59,10 @@ class ProcessingWorker:
     """Long-lived worker for Audit-link delivery plus document processing."""
 
     def __init__(self) -> None:
-        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
-        self._notify_conn: object | None = None
+        self._notify_conn: Any | None = None
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -79,13 +80,13 @@ class ProcessingWorker:
                 self._task.cancel()
         if self._notify_conn is not None:
             with contextlib.suppress(Exception):
-                await self._notify_conn.close()  # type: ignore[union-attr]
+                await self._notify_conn.close()
             self._notify_conn = None
         logger.info("processing_worker_stopped")
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
         try:
-            import asyncpg  # type: ignore[import]
+            import asyncpg
         except ImportError:
             logger.warning("notify_listener_unavailable", reason="asyncpg_not_installed")
             return False
@@ -174,8 +175,8 @@ class ProcessingWorker:
     async def _process_pending_audit_link(
         self,
         *,
-        session_factory: async_sessionmaker,
-        log,
+        session_factory: async_sessionmaker[AsyncSession],
+        log: Any,
     ) -> bool:
         async with session_factory() as session, session.begin():
             link = await claim_pending_audit_link(session)
@@ -224,10 +225,10 @@ class ProcessingWorker:
     async def _process_one(
         self,
         *,
-        session_factory: async_sessionmaker,
+        session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        ai_adapter,
-        log,
+        ai_adapter: Any,
+        log: Any,
     ) -> bool:
         async with session_factory() as session:
             async with session.begin():
@@ -314,7 +315,7 @@ class ProcessingWorker:
 
 async def _handle_failure(
     *,
-    session_factory: async_sessionmaker,
+    session_factory: async_sessionmaker[AsyncSession],
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -323,7 +324,7 @@ async def _handle_failure(
     error_detail: str | None,
     retryable: bool,
     attempt_no: int,
-    job_log,
+    job_log: Any,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -337,7 +338,6 @@ async def _handle_failure(
                 session,
                 tenant_id=tenant_id,
                 processing_job_id=job_id,
-                document_id=document_id,
                 error_code=error_code,
                 error_detail=error_detail,
             )
