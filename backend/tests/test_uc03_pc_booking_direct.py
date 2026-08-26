@@ -7,10 +7,12 @@ import pytest
 from verigence.di.api.v1.pc_booking_documents import (
     PcBookingDocumentStatus,
     PcBookingExtractionField,
+    get_pc_booking_extraction_review,
     list_pc_booking_documents,
 )
 from verigence.di.application.intake import intake_document
 from verigence.di.repositories.audit_links import audit_link_retry_delay_seconds
+from verigence.di.repositories.documents import get_document
 
 pytestmark = pytest.mark.no_docker
 
@@ -54,6 +56,14 @@ def test_pc_booking_extraction_contract_retains_audit_provenance_and_localizatio
         "pageNo",
         "evidenceRegion",
     }.issubset(fields)
+
+
+def test_extraction_review_receives_current_processing_run_pointer() -> None:
+    repository_source = inspect.getsource(get_document)
+    review_source = inspect.getsource(get_pc_booking_extraction_review)
+    assert "d.current_processing_run_id" in repository_source
+    assert 'doc.get("current_processing_run_id")' in review_source
+    assert "ef.processing_run_id = :processing_run_id" in review_source
 
 
 def test_direct_intake_reuses_existing_audit_r2_key_builder() -> None:
