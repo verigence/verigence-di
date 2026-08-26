@@ -7,6 +7,7 @@ import pytest
 from verigence.di.api.v1.pc_booking_documents import (
     PcBookingDocumentStatus,
     PcBookingExtractionField,
+    list_pc_booking_documents,
 )
 from verigence.di.application.intake import intake_document
 from verigence.di.repositories.audit_links import audit_link_retry_delay_seconds
@@ -60,3 +61,10 @@ def test_direct_intake_reuses_existing_audit_r2_key_builder() -> None:
     assert "build_audit_original_key" in source
     assert "audit_storage_context" in source
     assert "audit_requirement_ref" in source
+
+
+def test_context_list_does_not_collapse_repeatable_requirement_documents() -> None:
+    source = inspect.getsource(list_pc_booking_documents)
+    assert "DISTINCT ON" not in source
+    assert "audit_requirement_ref IS NOT NULL" in source
+    assert "ORDER BY d.registered_at_utc ASC" in source
