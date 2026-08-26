@@ -24,11 +24,16 @@ jobs:
 
       - run: npm install --global @railway/cli
 
-      - name: Inspect non-secret worker configuration
+      - name: Link Railway DEV
         shell: bash
         run: |
           set -euo pipefail
           railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-worker --json >/dev/null
+
+      - name: Inspect non-secret worker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
           railway variable list --service di-worker --environment dev --json >/tmp/worker-vars.json
           python - <<'PY'
           import json
@@ -47,137 +52,146 @@ jobs:
           print('\n'.join(lines))
           PY
 
-      - name: Inspect Railway Postgres Aadhaar processing metadata
+      - name: Inspect Aadhaar metadata from inside worker container
         shell: bash
         run: |
-          set -euo pipefail
-          railway variable list --service Postgres --environment dev --json >/tmp/postgres-vars.json
-          python -m pip install --quiet 'psycopg[binary]>=3.2,<4'
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          import psycopg
-          from psycopg.rows import dict_row
-
-          vars_=json.loads(Path('/tmp/postgres-vars.json').read_text())
-          db_url=str(vars_.get('DATABASE_PUBLIC_URL') or vars_.get('DATABASE_URL') or '').strip()
-          out=Path('docs/runtime/di-worker-runtime-diagnostic.txt')
-          if not db_url:
-              with out.open('a') as f:
-                  f.write('RAILWAY_DB_DIAGNOSTIC=NO_DATABASE_URL\n')
-              raise SystemExit(0)
+          set +e
+          cat >/tmp/aadhaar_diag.py <<'PY'
+          import os
+          import psycopg2
+          import psycopg2.extras
 
           def safe(value):
               if value is None:
                   return 'NULL'
-              return str(value).replace('\n',' ')[:240]
+              return str(value).replace('\n', ' ')[:220]
 
-          with psycopg.connect(db_url, autocommit=True, connect_timeout=20, row_factory=dict_row) as conn:
-              with conn.cursor() as cur:
-                  lines=['RAILWAY_DB_DIAGNOSTIC=BEGIN']
-                  try:
-                      cur.execute('SELECT version_num FROM docintel.alembic_version')
-                      versions=[r['version_num'] for r in cur.fetchall()]
-                      lines.append('DI_ALEMBIC_VERSION='+','.join(map(str, versions)))
-                  except Exception as exc:
-                      lines.append('DI_ALEMBIC_VERSION_ERROR='+safe(exc))
+          url=os.environ.get('DI_DATABASE_URL','').strip()
+          url=url.replace('postgresql+asyncpg://','postgresql://',1)
+          if not url:
+              print('RAILWAY_DB_DIAGNOSTIC=NO_DATABASE_URL')
+              raise SystemExit(0)
 
+          conn=psycopg2.connect(url, connect_timeout=15)
+          conn.autocommit=True
+          cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+          print('RAILWAY_DB_DIAGNOSTIC=BEGIN')
+
+          try:
+              cur.execute('SELECT version_num FROM docintel.alembic_version')
+              print('DI_ALEMBIC_VERSION='+','.join(str(r['version_num']) for r in cur.fetchall()))
+          except Exception as exc:
+              print('DI_ALEMBIC_VERSION_ERROR='+safe(exc))
+
+          cur.execute("""
+              SELECT column_name
+              FROM information_schema.columns
+              WHERE table_schema='docintel' AND table_name='documents'
+                AND column_name IN (
+                  'audit_requirement_ref','audit_storage_context_id',
+                  'document_type_hint_key','current_processing_run_id'
+                )
+              ORDER BY column_name
+          """)
+          print('DOCUMENT_COLUMNS='+','.join(r['column_name'] for r in cur.fetchall()))
+
+          cur.execute("""
+              SELECT d.tenant_id,
+                     d.document_id,
+                     d.document_type_hint_key,
+                     dt.document_type_key,
+                     d.upload_status,
+                     d.processing_status,
+                     d.processing_failure_code,
+                     d.current_processing_run_id,
+                     d.registered_at_utc
+              FROM docintel.documents d
+              LEFT JOIN docintel.document_types dt
+                ON dt.document_type_id=d.document_type_id
+              WHERE lower(COALESCE(d.document_type_hint_key,''))='aadhaar'
+                 OR lower(COALESCE(dt.document_type_key,''))='aadhaar'
+              ORDER BY d.registered_at_utc DESC
+              LIMIT 10
+          """)
+          docs=cur.fetchall()
+          print('AADHAAR_DOCUMENT_COUNT='+str(len(docs)))
+
+          for index, doc in enumerate(docs, start=1):
+              tid=doc['tenant_id']
+              did=doc['document_id']
+              current=doc['current_processing_run_id']
+              print(
+                  'AADHAAR_DOC|%d|tenant=%s|document=%s|hint=%s|classified=%s|upload=%s|processing=%s|failure=%s|current_run=%s|registered=%s'
+                  % (
+                      index, safe(tid), safe(did), safe(doc['document_type_hint_key']),
+                      safe(doc['document_type_key']), safe(doc['upload_status']),
+                      safe(doc['processing_status']), safe(doc['processing_failure_code']),
+                      safe(current), safe(doc['registered_at_utc'])
+                  )
+              )
+
+              cur.execute("""
+                  SELECT processing_run_id, run_status, extraction_profile_id,
+                         error_code, started_at_utc
+                  FROM docintel.processing_runs
+                  WHERE tenant_id=%s AND document_id=%s
+                  ORDER BY started_at_utc DESC
+                  LIMIT 5
+              """, (tid, did))
+              runs=cur.fetchall()
+              print('RUN_COUNT|document=%s|count=%d' % (safe(did), len(runs)))
+              for run in runs:
+                  rid=run['processing_run_id']
                   cur.execute("""
-                      SELECT column_name
-                      FROM information_schema.columns
-                      WHERE table_schema='docintel' AND table_name='documents'
-                        AND column_name IN (
-                          'audit_requirement_ref','audit_storage_context_id',
-                          'document_type_hint_key','current_processing_run_id'
-                        )
-                      ORDER BY column_name
-                  """)
-                  lines.append('DOCUMENT_COLUMNS='+','.join(r['column_name'] for r in cur.fetchall()))
-
-                  cur.execute("""
-                      SELECT d.tenant_id,
-                             d.document_id,
-                             d.document_type_hint_key,
-                             dt.document_type_key,
-                             d.upload_status,
-                             d.processing_status,
-                             d.processing_failure_code,
-                             d.current_processing_run_id,
-                             d.registered_at_utc
-                      FROM docintel.documents d
-                      LEFT JOIN docintel.document_types dt
-                        ON dt.document_type_id=d.document_type_id
-                      WHERE lower(COALESCE(d.document_type_hint_key,''))='aadhaar'
-                         OR lower(COALESCE(dt.document_type_key,''))='aadhaar'
-                      ORDER BY d.registered_at_utc DESC
-                      LIMIT 10
-                  """)
-                  docs=cur.fetchall()
-                  lines.append('AADHAAR_DOCUMENT_COUNT='+str(len(docs)))
-
-                  for index, doc in enumerate(docs, start=1):
-                      tid=doc['tenant_id']
-                      did=doc['document_id']
-                      current=doc['current_processing_run_id']
-                      lines.append(
-                          'AADHAAR_DOC|%d|tenant=%s|document=%s|hint=%s|classified=%s|upload=%s|processing=%s|failure=%s|current_run=%s|registered=%s'
-                          % (
-                              index, safe(tid), safe(did), safe(doc['document_type_hint_key']),
-                              safe(doc['document_type_key']), safe(doc['upload_status']),
-                              safe(doc['processing_status']), safe(doc['processing_failure_code']),
-                              safe(current), safe(doc['registered_at_utc'])
-                          )
+                      SELECT count(*) AS fact_count
+                      FROM docintel.extracted_facts
+                      WHERE tenant_id=%s AND document_id=%s AND processing_run_id=%s
+                  """, (tid, did, rid))
+                  fact_count=cur.fetchone()['fact_count']
+                  print(
+                      'RUN|document=%s|run=%s|status=%s|profile=%s|error=%s|facts=%s|started=%s|is_current=%s'
+                      % (
+                          safe(did), safe(rid), safe(run['run_status']),
+                          safe(run['extraction_profile_id']), safe(run['error_code']),
+                          safe(fact_count), safe(run['started_at_utc']), str(rid == current)
                       )
-                      cur.execute("""
-                          SELECT processing_run_id, run_status, extraction_profile_id,
-                                 error_code, started_at_utc
-                          FROM docintel.processing_runs
-                          WHERE tenant_id=%s AND document_id=%s
-                          ORDER BY started_at_utc DESC
-                          LIMIT 5
-                      """, (tid, did))
-                      runs=cur.fetchall()
-                      lines.append('RUN_COUNT|document=%s|count=%d' % (safe(did), len(runs)))
-                      for run in runs:
-                          rid=run['processing_run_id']
-                          cur.execute("""
-                              SELECT count(*) AS fact_count
-                              FROM docintel.extracted_facts
-                              WHERE tenant_id=%s AND document_id=%s AND processing_run_id=%s
-                          """, (tid, did, rid))
-                          fact_count=cur.fetchone()['fact_count']
-                          lines.append(
-                              'RUN|document=%s|run=%s|status=%s|profile=%s|error=%s|facts=%s|started=%s|is_current=%s'
-                              % (
-                                  safe(did), safe(rid), safe(run['run_status']),
-                                  safe(run['extraction_profile_id']), safe(run['error_code']),
-                                  safe(fact_count), safe(run['started_at_utc']), str(rid == current)
-                              )
-                          )
+                  )
 
-                      cur.execute("""
-                          SELECT ef.processing_run_id, cf.field_key, ef.found_status,
-                                 ef.confidence_score
-                          FROM docintel.extracted_facts ef
-                          JOIN docintel.canonical_fields cf
-                            ON cf.canonical_field_id=ef.canonical_field_id
-                          WHERE ef.tenant_id=%s AND ef.document_id=%s
-                          ORDER BY ef.created_at_utc, cf.field_key
-                          LIMIT 40
-                      """, (tid, did))
-                      facts=cur.fetchall()
-                      keys=[]
-                      for fact in facts:
-                          keys.append('%s:%s@%s' % (
-                              safe(fact['field_key']), safe(fact['found_status']), safe(fact['processing_run_id'])
-                          ))
-                      lines.append('FACT_KEYS|document=%s|%s' % (safe(did), ','.join(keys)))
+              cur.execute("""
+                  SELECT ef.processing_run_id, cf.field_key, ef.found_status
+                  FROM docintel.extracted_facts ef
+                  JOIN docintel.canonical_fields cf
+                    ON cf.canonical_field_id=ef.canonical_field_id
+                  WHERE ef.tenant_id=%s AND ef.document_id=%s
+                  ORDER BY ef.created_at_utc, cf.field_key
+                  LIMIT 40
+              """, (tid, did))
+              facts=cur.fetchall()
+              keys=[
+                  '%s:%s@%s' % (
+                      safe(f['field_key']), safe(f['found_status']), safe(f['processing_run_id'])
+                  )
+                  for f in facts
+              ]
+              print('FACT_KEYS|document=%s|%s' % (safe(did), ','.join(keys)))
 
-                  lines.append('RAILWAY_DB_DIAGNOSTIC=END')
-                  with out.open('a',encoding='utf-8') as f:
-                      f.write('\n'.join(lines)+'\n')
-                  print('\n'.join(lines))
+          print('RAILWAY_DB_DIAGNOSTIC=END')
+          cur.close()
+          conn.close()
           PY
+
+          timeout 60s railway ssh --service di-worker --environment dev -- python - </tmp/aadhaar_diag.py >/tmp/aadhaar_diag.out 2>/tmp/aadhaar_diag.err
+          rc=$?
+          {
+            echo "RAILWAY_SSH_RC=$rc"
+            cat /tmp/aadhaar_diag.out
+            if (( rc != 0 )); then
+              echo 'RAILWAY_SSH_ERROR_BEGIN'
+              tail -n 30 /tmp/aadhaar_diag.err
+              echo 'RAILWAY_SSH_ERROR_END'
+            fi
+          } >> docs/runtime/di-worker-runtime-diagnostic.txt
+          cat /tmp/aadhaar_diag.out || true
 
       - name: Collect recent extraction lifecycle logs
         shell: bash
