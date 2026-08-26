@@ -68,7 +68,17 @@ jobs:
               rows=['GEMINI_KEY_PRESENT=NO']
           else:
               malformed = key != key.strip() or key.startswith(('"', "'")) or key.endswith(('"', "'"))
-              rows=['GEMINI_KEY_PRESENT=YES', f'GEMINI_KEY_FORMAT_CLEAN={"NO" if malformed else "YES"}']
+              if key.startswith('AIza'):
+                  key_family='STANDARD_AIZA'
+              elif key.startswith('AQ.') or key.startswith('AQ'):
+                  key_family='AUTH_AQ'
+              else:
+                  key_family='OTHER'
+              rows=[
+                  'GEMINI_KEY_PRESENT=YES',
+                  f'GEMINI_KEY_FORMAT_CLEAN={"NO" if malformed else "YES"}',
+                  f'GEMINI_KEY_FAMILY={key_family}',
+              ]
               body=json.dumps({'contents':[{'parts':[{'text':'Reply only with OK'}]}]}).encode()
               probes=[
                   ('HEADER_MODELS', f'{base}/models', True, None),
