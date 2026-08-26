@@ -50,7 +50,7 @@ class PcBookingDocumentList(BaseModel):
     documents: list[PcBookingDocumentStatus]
 
 
-class PcBookingExtractionFact(BaseModel):
+class PcBookingExtractionField(BaseModel):
     sourceFactRef: UUID
     sourceFactVersion: int = 1
     fieldKey: str
@@ -65,7 +65,7 @@ class PcBookingExtractionFact(BaseModel):
 class PcBookingExtractionReview(BaseModel):
     documentId: UUID
     processingStatus: str
-    facts: list[PcBookingExtractionFact]
+    facts: list[PcBookingExtractionField]
 
 
 def _accepted_upload(doc: dict) -> tuple[str, bool]:  # type: ignore[type-arg]
@@ -141,7 +141,7 @@ async def upload_pc_booking_document(
 @router.get(
     "/audit-storage-contexts/{externalContextRef}/pc-booking-documents",
     response_model=ApiResponse[PcBookingDocumentList],
-    summary="List current PC Booking documents for one Audit storage context",
+    summary="List PC Booking documents for one Audit storage context",
     operation_id="listPcBookingDocuments",
 )
 async def list_pc_booking_documents(
@@ -152,6 +152,12 @@ async def list_pc_booking_documents(
         Depends(require_live_tenant_permission("di.document.read")),
     ],
 ) -> ApiResponse[PcBookingDocumentList]:
+    """Return every linked Booking document, not one row per requirement.
+
+    Requirement cardinality is an Audit Core business concern. DI deliberately
+    returns every document in the established context so repeatable evidence such
+    as Booking payment receipts is not collapsed or superseded here.
+    """
     del authorization
     external_ref = externalContextRef.strip()
     async with tenant_session(tenantId) as session:
@@ -166,8 +172,7 @@ async def list_pc_booking_documents(
             await session.execute(
                 text(
                     """
-                    SELECT DISTINCT ON (d.audit_requirement_ref)
-                           d.document_id,
+                    SELECT d.document_id,
                            d.audit_requirement_ref,
                            COALESCE(dt.document_type_key, d.document_type_hint_key) AS document_type_key,
                            d.upload_status,
@@ -179,9 +184,8 @@ async def list_pc_booking_documents(
                     WHERE d.tenant_id = :tenant_id
                       AND d.audit_storage_context_id = :storage_context_id
                       AND d.audit_requirement_ref IS NOT NULL
-                    ORDER BY d.audit_requirement_ref,
-                             d.registered_at_utc DESC,
-                             d.document_id DESC
+                    ORDER BY d.registered_at_utc ASC,
+                             d.document_id ASC
                     """
                 ),
                 {
@@ -264,7 +268,7 @@ async def get_pc_booking_extraction_review(
             ).mappings().all()
 
     facts = [
-        PcBookingExtractionFact(
+        PcBookingExtractionField(
             sourceFactRef=row["extracted_fact_id"],
             sourceFactVersion=1,
             fieldKey=row["field_key"],
