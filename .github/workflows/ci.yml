@@ -131,13 +131,94 @@ jobs:
         working-directory: ops-ui
         run: npm run build
 
+  integration-preflight:
+    name: DEV Security integration preflight
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      DI_API_SERVICE: di-api
+      DI_WORKER_SERVICE: di-worker
+
+    steps:
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Validate persisted Security and Audit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo '::error::RAILWAY_API_TOKEN is required for DI DEV integration preflight.'
+            exit 1
+          }
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
+          railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars.json
+          railway variable list --service "$DI_WORKER_SERVICE" --json >/tmp/di-worker-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          api=json.loads(Path('/tmp/di-api-vars.json').read_text())
+          worker=json.loads(Path('/tmp/di-worker-vars.json').read_text())
+          required=[
+              'DI_SECURITY_BASE_URL',
+              'DI_SECURITY_CLIENT_ID',
+              'DI_SECURITY_CLIENT_SECRET',
+              'DI_AUDIT_CORE_BASE_URL',
+          ]
+          for service_name,data in [('di-api',api),('di-worker',worker)]:
+              missing=[key for key in required if not data.get(key)]
+              if missing:
+                  raise SystemExit(f'{service_name} missing live integration configuration: '+','.join(missing))
+          drift=[key for key in required if api.get(key) != worker.get(key)]
+          if drift:
+              raise SystemExit('DI API/worker integration configuration drift: '+','.join(drift))
+          if api['DI_SECURITY_CLIENT_ID'] != 'verigence-di':
+              raise SystemExit('DI must use the dedicated verigence-di Security client identity')
+          print('DI_LIVE_INTEGRATION_CONFIG=PASS')
+          print('DI_LIVE_INTEGRATION_PARITY=PASS')
+          PY
+
+      - name: Prove live DI to Security ServiceIntegration
+        shell: bash
+        run: |
+          set -euo pipefail
+          security_base="$(jq -r '.DI_SECURITY_BASE_URL' /tmp/di-api-vars.json)"
+          client_id="$(jq -r '.DI_SECURITY_CLIENT_ID' /tmp/di-api-vars.json)"
+          client_secret="$(jq -r '.DI_SECURITY_CLIENT_SECRET' /tmp/di-api-vars.json)"
+          audit_base="$(jq -r '.DI_AUDIT_CORE_BASE_URL' /tmp/di-api-vars.json)"
+          echo "::add-mask::$client_secret"
+
+          curl --fail --silent --show-error "${security_base%/}/health/ready" >/tmp/security-ready.json
+          code="$(curl --silent --show-error --output /tmp/di-security-token.json --write-out '%{http_code}' \
+            --user "$client_id:$client_secret" \
+            --request POST "${security_base%/}/security/v1/service/token" \
+            --data-urlencode 'audience=security')"
+          [ "$code" = "200" ] || {
+            echo "::error::DI live Security service-token request failed HTTP $code."
+            exit 1
+          }
+          jq -e '.accessToken | type == "string" and length > 0' /tmp/di-security-token.json >/dev/null || {
+            echo '::error::DI live Security service-token response has no accessToken.'
+            exit 1
+          }
+          curl --fail --silent --show-error "${audit_base%/}/health" >/tmp/audit-health.json
+          echo 'DI_SECURITY_SERVICE_TOKEN=PASS'
+          echo 'DI_AUDIT_CORE_REACHABILITY=PASS'
+
   deploy-dev:
     name: Deploy tested DI SHA to Railway DEV
-    needs: [backend, frontend]
+    needs: [backend, frontend, integration-preflight]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/dev' &&
       needs.backend.result == 'success' &&
-      needs.frontend.result == 'success'
+      needs.frontend.result == 'success' &&
+      needs.integration-preflight.result == 'success'
     uses: ./.github/workflows/deploy-dev.yml
     secrets: inherit
