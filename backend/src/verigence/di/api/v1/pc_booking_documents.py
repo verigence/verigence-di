@@ -20,13 +20,17 @@ from verigence.di.api.v1.audit_storage_contexts import (
     _context_uuid,
     _document_content_response,
 )
-from verigence.di.api.v1.schemas import ApiResponse, UploadData, public_processing_status, public_upload_status
+from verigence.di.api.v1.schemas import (
+    ApiResponse,
+    UploadData,
+    public_processing_status,
+    public_upload_status,
+)
 from verigence.di.application.intake import intake_document
 from verigence.di.auth.human_authorization import (
     HumanTenantAuthorization,
     require_live_tenant_permission,
 )
-from verigence.di.domain.enums import UploadStatus
 from verigence.di.errors import ErrorCode, http_exception
 from verigence.di.repositories.audit_storage_contexts import get_audit_storage_context_by_ref
 from verigence.di.repositories.database import tenant_session
@@ -125,7 +129,6 @@ async def upload_pc_booking_document(
             audit_requirement_ref=requirement_ref,
         )
 
-    internal_upload: UploadStatus = doc["upload_status"]
     public_upload, rejected = _accepted_upload(doc)
     return ApiResponse(
         errorCode="000" if not rejected else "E005",
