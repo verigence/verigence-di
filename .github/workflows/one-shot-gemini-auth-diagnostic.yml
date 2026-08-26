@@ -23,31 +23,44 @@ jobs:
           ref: dev
           fetch-depth: 0
       - run: npm install --global @railway/cli
-      - name: Probe live Gemini authentication without exposing key
+      - name: Inspect persisted Gemini key and worker deployment safely
         shell: bash
         run: |
           set -euo pipefail
           railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-worker --json >/dev/null
+          railway variable list --service di-api --environment dev --json >/tmp/api-vars.json
           railway variable list --service di-worker --environment dev --json >/tmp/worker-vars.json
+          railway deployment list --service di-worker --environment dev --limit 3 --json >/tmp/worker-deployments.json
           python - <<'PY'
+          import hashlib
           import json
           import urllib.error
-          import urllib.parse
           import urllib.request
           from pathlib import Path
 
-          vars_=json.loads(Path('/tmp/worker-vars.json').read_text())
-          key=str(vars_.get('DI_DOCAI_GEMINI_API_KEY') or '')
-          model='gemini-3-flash-preview'
-          base='https://generativelanguage.googleapis.com/v1beta'
+          api=json.loads(Path('/tmp/api-vars.json').read_text())
+          worker=json.loads(Path('/tmp/worker-vars.json').read_text())
+          deployments=json.loads(Path('/tmp/worker-deployments.json').read_text())
+          api_key=str(api.get('DI_DOCAI_GEMINI_API_KEY') or '')
+          worker_key=str(worker.get('DI_DOCAI_GEMINI_API_KEY') or '')
 
-          def call(url, *, header=False, body=None):
-              headers={}
-              if header:
-                  headers['x-goog-api-key']=key
-              if body is not None:
-                  headers['Content-Type']='application/json'
-              req=urllib.request.Request(url, data=body, headers=headers, method='POST' if body is not None else 'GET')
+          def fp(value: str) -> str:
+              return hashlib.sha256(value.encode()).hexdigest()[:12] if value else 'MISSING'
+
+          def family(value: str) -> str:
+              if value.startswith('AIza'):
+                  return 'STANDARD_AIZA'
+              if value.startswith('AQ.') or value.startswith('AQ'):
+                  return 'AUTH_AQ'
+              return 'OTHER' if value else 'MISSING'
+
+          def probe(key: str):
+              if not key:
+                  return 0, 'NO_KEY'
+              req=urllib.request.Request(
+                  'https://generativelanguage.googleapis.com/v1beta/models',
+                  headers={'x-goog-api-key': key},
+              )
               try:
                   with urllib.request.urlopen(req, timeout=30) as r:
                       return r.status, 'OK'
@@ -57,40 +70,39 @@ jobs:
                   try:
                       payload=json.loads(raw)
                       err=payload.get('error') or {}
-                      reason=str((err.get('details') or [{}])[0].get('reason') or err.get('status') or err.get('message') or reason)
+                      details=err.get('details') or []
+                      if details and isinstance(details[0],dict):
+                          reason=str(details[0].get('reason') or err.get('status') or err.get('message') or reason)
+                      else:
+                          reason=str(err.get('status') or err.get('message') or reason)
                   except Exception:
                       pass
                   return e.code, reason[:180]
               except Exception as e:
                   return 0, type(e).__name__
 
-          if not key:
-              rows=['GEMINI_KEY_PRESENT=NO']
-          else:
-              malformed = key != key.strip() or key.startswith(('"', "'")) or key.endswith(('"', "'"))
-              if key.startswith('AIza'):
-                  key_family='STANDARD_AIZA'
-              elif key.startswith('AQ.') or key.startswith('AQ'):
-                  key_family='AUTH_AQ'
-              else:
-                  key_family='OTHER'
-              rows=[
-                  'GEMINI_KEY_PRESENT=YES',
-                  f'GEMINI_KEY_FORMAT_CLEAN={"NO" if malformed else "YES"}',
-                  f'GEMINI_KEY_FAMILY={key_family}',
-              ]
-              body=json.dumps({'contents':[{'parts':[{'text':'Reply only with OK'}]}]}).encode()
-              probes=[
-                  ('HEADER_MODELS', f'{base}/models', True, None),
-                  ('QUERY_MODELS', f'{base}/models?key={urllib.parse.quote(key, safe="")}', False, None),
-                  ('HEADER_GENERATE', f'{base}/models/{model}:generateContent', True, body),
-                  ('QUERY_GENERATE', f'{base}/models/{model}:generateContent?key={urllib.parse.quote(key, safe="")}', False, body),
-              ]
-              for name,url,header,payload in probes:
-                  status,reason=call(url, header=header, body=payload)
-                  rows.append(f'{name}_HTTP={status}')
-                  rows.append(f'{name}_REASON={reason}')
-          Path('docs/runtime/gemini-auth-diagnostic.txt').write_text('\n'.join(rows)+'\n')
+          status,reason=probe(worker_key)
+          rows=[
+              f'API_KEY_PRESENT={"YES" if api_key else "NO"}',
+              f'WORKER_KEY_PRESENT={"YES" if worker_key else "NO"}',
+              f'API_KEY_FAMILY={family(api_key)}',
+              f'WORKER_KEY_FAMILY={family(worker_key)}',
+              f'API_KEY_LENGTH={len(api_key)}',
+              f'WORKER_KEY_LENGTH={len(worker_key)}',
+              f'API_KEY_FINGERPRINT={fp(api_key)}',
+              f'WORKER_KEY_FINGERPRINT={fp(worker_key)}',
+              f'API_WORKER_KEYS_MATCH={"YES" if api_key and api_key == worker_key else "NO"}',
+              f'WORKER_KEY_FORMAT_CLEAN={"YES" if worker_key and worker_key == worker_key.strip() and not worker_key.startswith((chr(34), chr(39))) and not worker_key.endswith((chr(34), chr(39))) else "NO"}',
+              f'CURRENT_WORKER_KEY_MODELS_HTTP={status}',
+              f'CURRENT_WORKER_KEY_MODELS_REASON={reason}',
+          ]
+          for idx,row in enumerate(deployments[:3], start=1):
+              rows.extend([
+                  f'WORKER_DEPLOYMENT_{idx}_ID={row.get("id","")}',
+                  f'WORKER_DEPLOYMENT_{idx}_STATUS={row.get("status","")}',
+                  f'WORKER_DEPLOYMENT_{idx}_CREATED_AT={row.get("createdAt") or row.get("created_at") or ""}',
+              ])
+          Path('docs/runtime/gemini-current-key-diagnostic.txt').write_text('\n'.join(rows)+'\n')
           print('\n'.join(rows))
           PY
       - name: Record sanitized diagnostic
@@ -99,7 +111,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add docs/runtime/gemini-auth-diagnostic.txt
-          git commit -m 'docs(dev): record Gemini auth diagnostic [skip ci]' || exit 0
+          git add docs/runtime/gemini-current-key-diagnostic.txt
+          git commit -m 'docs(dev): record current Gemini runtime diagnostic [skip ci]' || exit 0
           git pull --rebase origin dev
           git push origin HEAD:dev
