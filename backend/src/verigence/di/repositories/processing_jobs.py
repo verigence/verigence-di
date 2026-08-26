@@ -168,7 +168,7 @@ async def retry_job(
         text("""
             UPDATE docintel.documents d
             SET processing_status = 'RETRY_PENDING',
-                confirmation_status = 'NOT_CONFIRMED',
+                confirmation_status = 'PENDING',
                 processing_failure_code = :error_code,
                 processing_failure_detail = :error_detail,
                 updated_at_utc = :now
