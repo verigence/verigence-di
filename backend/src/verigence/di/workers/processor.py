@@ -1,25 +1,9 @@
-"""workers/processor.py — Async polling loop for the Processing Worker.
+"""workers/processor.py — Async DI worker loop.
 
-Implements the outer loop of DI_LLD_v2.2 §Processing Worker:
-  - Poll for PENDING jobs using SELECT ... FOR UPDATE SKIP LOCKED
-  - Call job_runner.run_processing_job() for each claimed job
-  - On success: commit + complete_job(COMPLETED)
-  - On any failure (retryable or non-retryable): D24 backout path —
-      set Document FAILED/NOT_CONFIRMED, mark job FAILED,
-      insert backout_jobs row with TTL=DI_BACKOUT_TTL_HOURS (default 12 h)
-  - When idle: wake immediately via pg_notify (DI_WORKER_NOTIFY_DB_URL set)
-    or sleep poll_interval as fallback
-
-Lifecycle:
-  - start()  — begins the background task (called from FastAPI lifespan)
-  - stop()   — signals graceful shutdown (called from FastAPI lifespan)
-
-Configuration:
-  - DI_WORKER_POLL_INTERVAL_SECONDS  (default: 30 — fallback when notify active)
-  - DI_WORKER_NOTIFY_DB_URL          (direct Neon endpoint for LISTEN;
-                                       empty string = poll-only mode)
-  - DI_WORKER_ID                     (default: hostname + PID)
-  - DI_BACKOUT_TTL_HOURS             (default: 12)
+In addition to document processing, the worker delivers the lightweight UC03
+Booking requirementRef <-> documentId callback for accepted direct-PC uploads.
+The callback state lives on the Document, is retried durably, and is independent
+of extraction completion.
 """
 from __future__ import annotations
 
@@ -29,11 +13,17 @@ import os
 import socket
 import time
 import uuid
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.document_ai.adapter import get_document_ai_adapter
+from verigence.di.integrations.audit_core import get_audit_core_link_client
+from verigence.di.repositories.audit_links import (
+    claim_pending_audit_link,
+    mark_audit_link_attempt,
+)
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
     claim_next_job,
@@ -58,7 +48,6 @@ def _default_worker_id() -> str:
 
 
 def _asyncpg_url(url: str) -> str:
-    """Strip SQLAlchemy driver prefix so asyncpg.connect() accepts the URL."""
     return (
         url
         .replace("postgresql+asyncpg://", "postgresql://")
@@ -67,51 +56,37 @@ def _asyncpg_url(url: str) -> str:
 
 
 class ProcessingWorker:
-    """Background processing worker — runs as a long-lived asyncio task."""
+    """Long-lived worker for Audit-link delivery plus document processing."""
 
     def __init__(self) -> None:
-        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
-        self._notify_conn: object | None = None  # asyncpg Connection
+        self._notify_conn: Any | None = None
 
     def start(self) -> None:
-        """Start the background poll loop. Called from FastAPI lifespan."""
         self._stop_event.clear()
         self._notify_event.clear()
         self._task = asyncio.create_task(self._run(), name="processing-worker")
         logger.info("processing_worker_started")
 
     async def stop(self) -> None:
-        """Signal stop and wait for graceful shutdown."""
         self._stop_event.set()
-        # Wake any pending notify wait so the loop exits cleanly
         self._notify_event.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=30.0)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-        # Close dedicated LISTEN connection if open
         if self._notify_conn is not None:
-            try:
-                await self._notify_conn.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                await self._notify_conn.close()
             self._notify_conn = None
         logger.info("processing_worker_stopped")
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
-        """Open a dedicated raw asyncpg connection for LISTEN.
-
-        Must use the Neon direct endpoint (no PgBouncer) — LISTEN/NOTIFY
-        does not work through PgBouncer in transaction pooling mode.
-
-        Returns True if the listener was started successfully, False otherwise.
-        The caller falls back to poll-only mode on any failure.
-        """
         try:
-            import asyncpg  # type: ignore[import]
+            import asyncpg
         except ImportError:
             logger.warning("notify_listener_unavailable", reason="asyncpg_not_installed")
             return False
@@ -122,21 +97,15 @@ class ProcessingWorker:
             channel: str,
             payload: str,
         ) -> None:
-            logger.info(
-                "notify_received",
-                channel=channel,
-                processing_job_id=payload,
-            )
+            del connection, pid
+            logger.info("notify_received", channel=channel, payload=payload)
             self._notify_event.set()
 
         try:
             conn = await asyncpg.connect(_asyncpg_url(notify_db_url))
             await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
             self._notify_conn = conn
-            logger.info(
-                "notify_listener_started",
-                channel=_NOTIFY_CHANNEL,
-            )
+            logger.info("notify_listener_started", channel=_NOTIFY_CHANNEL)
             return True
         except Exception as exc:
             logger.warning(
@@ -155,10 +124,8 @@ class ProcessingWorker:
         engine = create_async_engine(str(settings.database_url), echo=False)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         ai_adapter = get_document_ai_adapter()
-
         log = logger.bind(worker_id=worker_id)
 
-        # ── Open LISTEN connection if notify URL is configured ────────────────
         notify_active = False
         if notify_db_url.strip():
             notify_active = await self._open_notify_conn(notify_db_url)
@@ -178,19 +145,24 @@ class ProcessingWorker:
         try:
             while not self._stop_event.is_set():
                 try:
-                    did_work = await self._process_one(
+                    # Link delivery is intentionally independent of extraction. One
+                    # pending link is delivered per loop to keep DB/API load bounded.
+                    did_work = await self._process_pending_audit_link(
                         session_factory=session_factory,
-                        worker_id=worker_id,
-                        ai_adapter=ai_adapter,
                         log=log,
                     )
+                    if not did_work:
+                        did_work = await self._process_one(
+                            session_factory=session_factory,
+                            worker_id=worker_id,
+                            ai_adapter=ai_adapter,
+                            log=log,
+                        )
                 except Exception as exc:
                     log.exception("processing_worker_loop_error", error=str(exc))
                     did_work = False
 
                 if not did_work:
-                    # No jobs available — wait for NOTIFY, stop signal, or
-                    # poll_interval timeout (fallback / safety net for missed notifies)
                     self._notify_event.clear()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(
@@ -200,17 +172,65 @@ class ProcessingWorker:
         finally:
             await engine.dispose()
 
+    async def _process_pending_audit_link(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        log: Any,
+    ) -> bool:
+        async with session_factory() as session, session.begin():
+            link = await claim_pending_audit_link(session)
+            if link is None:
+                return False
+
+            tenant_id = str(link["tenant_id"])
+            document_id: uuid.UUID = link["document_id"]
+            requirement_ref = str(link["audit_requirement_ref"])
+            link_log = log.bind(
+                tenant_id=tenant_id,
+                document_id=str(document_id),
+                audit_requirement_ref=requirement_ref,
+            )
+            try:
+                await get_audit_core_link_client().link_booking_document(
+                    requirement_ref=requirement_ref,
+                    document_id=str(document_id),
+                )
+            except Exception as exc:
+                await mark_audit_link_attempt(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    acknowledged=False,
+                    error_summary=f"{type(exc).__name__}: {exc}",
+                )
+                link_log.warning(
+                    "audit_document_link_delivery_failed",
+                    attempt=int(link["audit_link_attempt_count"]) + 1,
+                    error_type=type(exc).__name__,
+                )
+            else:
+                await mark_audit_link_attempt(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    acknowledged=True,
+                )
+                link_log.info(
+                    "audit_document_link_acknowledged",
+                    attempt=int(link["audit_link_attempt_count"]) + 1,
+                )
+            return True
+
     async def _process_one(
         self,
         *,
-        session_factory: async_sessionmaker,
+        session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        ai_adapter,
-        log,
+        ai_adapter: Any,
+        log: Any,
     ) -> bool:
-        """Claim and process one job. Returns True if a job was processed."""
         async with session_factory() as session:
-            # Claim inside a transaction so SKIP LOCKED works correctly
             async with session.begin():
                 job = await claim_next_job(session, worker_id=worker_id)
 
@@ -232,7 +252,6 @@ class ProcessingWorker:
         )
         job_log.info("job_claimed")
 
-        # Run the job in its own session/transaction
         _job_start = time.monotonic()
         async with session_factory() as session:
             try:
@@ -256,10 +275,12 @@ class ProcessingWorker:
                             success=True,
                         )
                     _total_ms = round((time.monotonic() - _job_start) * 1000, 1)
-                    job_log.info("job_completed",
-                                 confidence_score=str(result.confidence_score),
-                                 human_verification_status=result.human_verification_status,
-                                 total_duration_ms=_total_ms)
+                    job_log.info(
+                        "job_completed",
+                        confidence_score=str(result.confidence_score),
+                        human_verification_status=result.human_verification_status,
+                        total_duration_ms=_total_ms,
+                    )
                 else:
                     await _handle_failure(
                         session_factory=session_factory,
@@ -294,7 +315,7 @@ class ProcessingWorker:
 
 async def _handle_failure(
     *,
-    session_factory: async_sessionmaker,
+    session_factory: async_sessionmaker[AsyncSession],
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -303,10 +324,10 @@ async def _handle_failure(
     error_detail: str | None,
     retryable: bool,
     attempt_no: int,
-    job_log,
+    job_log: Any,
 ) -> None:
-    """Route failure to RETRY_PENDING (attempt 1, retryable) or D24 backout path."""
     from datetime import UTC, datetime
+
     from sqlalchemy import text
 
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
@@ -317,7 +338,6 @@ async def _handle_failure(
                 session,
                 tenant_id=tenant_id,
                 processing_job_id=job_id,
-                document_id=document_id,
                 error_code=error_code,
                 error_detail=error_detail,
             )
@@ -381,11 +401,8 @@ async def _handle_failure(
     )
 
 
-# ── Module-level singleton ────────────────────────────────────────────────────
-
 _worker = ProcessingWorker()
 
 
 def get_worker() -> ProcessingWorker:
-    """Return the module-level ProcessingWorker singleton."""
     return _worker

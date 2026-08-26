@@ -3,6 +3,10 @@
 Generic DI intake keeps the D5 Subject-centric path. UC02 Audit Core-originated
 intake can additionally supply one immutable D28 Audit storage context; DI then
 links the Document to that context and constructs the business-hierarchy key.
+
+UC03 direct PC Booking intake may also supply one opaque Audit requirement
+reference. DI does not interpret that reference; it stores it only to deliver the
+single asynchronous requirementRef <-> documentId linkage after accepted intake.
 """
 from __future__ import annotations
 
@@ -73,9 +77,16 @@ async def intake_document(
     upload: UploadFile,
     document_type_key: str | None = None,
     audit_storage_context: dict[str, object] | None = None,
+    audit_requirement_ref: str | None = None,
 ) -> dict:  # type: ignore[type-arg]
     """Execute document intake, optionally under a frozen Audit business context."""
     intake_start = time.monotonic()
+    requirement_ref = audit_requirement_ref.strip() if audit_requirement_ref else None
+    if requirement_ref is not None and (not requirement_ref or len(requirement_ref) > 160):
+        raise ValueError("Audit requirement reference is invalid")
+    if requirement_ref is not None and audit_storage_context is None:
+        raise ValueError("Audit requirement reference requires an Audit storage context")
+
     log = logger.bind(
         tenant_id=tenant_id,
         subject_id=str(subject_id),
@@ -175,6 +186,7 @@ async def intake_document(
             text("""
                 UPDATE docintel.documents
                 SET audit_storage_context_id = :storage_context_id,
+                    audit_requirement_ref = :audit_requirement_ref,
                     updated_at_utc = now()
                 WHERE tenant_id = :tenant_id AND document_id = :document_id
             """),
@@ -182,6 +194,7 @@ async def intake_document(
                 "tenant_id": tenant_id,
                 "document_id": document_id,
                 "storage_context_id": storage_context_id,
+                "audit_requirement_ref": requirement_ref,
             },
         )
         logical_key = build_audit_original_key(
@@ -272,7 +285,7 @@ async def intake_document(
             document_id=str(document_id),
             logical_key=logical_key,
             bytes_written=byte_count,
-            sha256=sha256_hex[:16] + "\u2026",
+            sha256=sha256_hex[:16] + "…",
         )
     except Exception as exc:
         log.error(
@@ -342,6 +355,18 @@ async def intake_document(
         upload_issue_detail=validator_result.upload_issue_detail,
     )
 
+    if validator_result.upload_status == UploadStatus.FIT and requirement_ref is not None:
+        await session.execute(
+            text("""
+                UPDATE docintel.documents
+                SET audit_link_status = 'PENDING',
+                    audit_link_last_error = NULL,
+                    updated_at_utc = now()
+                WHERE tenant_id = :tenant_id AND document_id = :document_id
+            """),
+            {"tenant_id": tenant_id, "document_id": document_id},
+        )
+
     if validator_result.upload_status == UploadStatus.FIT and requires_processing:
         job = await create_initial_job(
             session,
@@ -355,9 +380,6 @@ async def intake_document(
             processing_job_id=str(job),
             job_type="INITIAL",
         )
-        # Fire pg_notify within the same transaction so the worker wakes
-        # immediately after commit instead of waiting for the next poll tick.
-        # Auto-suppressed if this transaction rolls back — no spurious wakes.
         await session.execute(
             text("SELECT pg_notify('di_processing_jobs', :payload)"),
             {"payload": str(job)},
@@ -366,6 +388,13 @@ async def intake_document(
             "notify_sent",
             document_id=str(document_id),
             processing_job_id=str(job),
+        )
+    elif validator_result.upload_status == UploadStatus.FIT and requirement_ref is not None:
+        # The same worker also delivers pending Audit link notifications. Wake it
+        # even when this document type does not require extraction.
+        await session.execute(
+            text("SELECT pg_notify('di_processing_jobs', :payload)"),
+            {"payload": f"link:{document_id}"},
         )
 
     await session.commit()
@@ -377,6 +406,12 @@ async def intake_document(
         "upload_issue_code": validator_result.upload_issue_code,
         "upload_issue_detail": validator_result.upload_issue_detail,
         "audit_storage_context_id": storage_context_id,
+        "audit_requirement_ref": requirement_ref,
+        "audit_link_status": (
+            "PENDING"
+            if validator_result.upload_status == UploadStatus.FIT and requirement_ref is not None
+            else "NOT_REQUIRED"
+        ),
     })
 
     duration_ms = round((time.monotonic() - intake_start) * 1000, 1)
