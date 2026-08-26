@@ -1,7 +1,6 @@
 """Durable DI -> Audit Core document-link delivery state."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import text
@@ -64,27 +63,32 @@ async def mark_audit_link_attempt(
     acknowledged: bool,
     error_summary: str | None = None,
 ) -> None:
-    now = datetime.now(UTC)
+    """Record one Audit-link delivery attempt without ambiguous timestamp binds.
+
+    PostgreSQL owns all timestamps here. Using ``now()`` avoids reusing one
+    asyncpg bind parameter across both direct timestamptz assignments and a CASE
+    expression, which previously caused ``AmbiguousParameterError`` and blocked
+    the worker before extraction jobs could be claimed.
+    """
     await session.execute(
         text(
             """
             UPDATE docintel.documents
             SET audit_link_attempt_count        = audit_link_attempt_count + 1,
-                audit_link_last_attempt_at_utc  = :now,
+                audit_link_last_attempt_at_utc  = now(),
                 audit_link_status               = CASE WHEN :ack THEN 'ACKNOWLEDGED' ELSE 'PENDING' END,
-                audit_link_acknowledged_at_utc  = CASE WHEN :ack THEN :now ELSE NULL END,
+                audit_link_acknowledged_at_utc  = CASE WHEN :ack THEN now() ELSE NULL END,
                 audit_link_last_error           = CASE WHEN :ack THEN NULL ELSE :error END,
-                updated_at_utc                  = :now
+                updated_at_utc                  = now()
             WHERE tenant_id       = :tenant_id
               AND document_id     = :document_id
               AND audit_link_status = 'PENDING'
             """
         ),
         {
-            "tenant_id":   tenant_id,
+            "tenant_id": tenant_id,
             "document_id": document_id,
-            "ack":         acknowledged,
-            "error":       (error_summary or "")[:1000] or None,
-            "now":         now,
+            "ack": acknowledged,
+            "error": (error_summary or "")[:1000] or None,
         },
     )
