@@ -7,7 +7,8 @@ the Project/Dealer/Outlet/Customer R2 hierarchy is unchanged.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from collections.abc import Sequence
+from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
@@ -236,6 +237,7 @@ async def get_pc_booking_extraction_review(
 ) -> ApiResponse[PcBookingExtractionReview]:
     del authorization
     external_ref = externalContextRef.strip()
+    rows: Sequence[Any] = []
     async with tenant_session(tenantId) as session:
         _, doc = await _context_document(
             session,
@@ -244,7 +246,6 @@ async def get_pc_booking_extraction_review(
             document_id=documentId,
         )
         current_run_id = doc.get("current_processing_run_id")
-        rows = []
         if current_run_id is not None:
             rows = (
                 await session.execute(
