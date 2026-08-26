@@ -39,10 +39,11 @@ def _row_to_dict(row) -> dict:  # type: ignore[type-arg]
         "verification_state": VerificationState(row["verification_state"]),
         "content_state": ContentState(row["content_state"]),
         "registered_at_utc": row["registered_at_utc"],
-        # Keep internal fields for delete eligibility checks and worker access
+        # Keep internal fields for delete eligibility checks and trusted context reads.
         "upload_issue_code": row.get("upload_issue_code"),
         "upload_issue_detail": row.get("upload_issue_detail"),
         "processing_failure_code": row.get("processing_failure_code"),
+        "current_processing_run_id": row.get("current_processing_run_id"),
     }
 
 
@@ -151,6 +152,7 @@ async def create_document_receiving(
         "upload_issue_code": None,
         "upload_issue_detail": None,
         "processing_failure_code": None,
+        "current_processing_run_id": None,
     }
 
 
@@ -203,7 +205,9 @@ async def get_document(
 ) -> dict | None:  # type: ignore[type-arg]
     """Fetch a single Document. Optionally scope to subject_id.
 
-    Joins document_types to return document_type_key (D11).
+    Joins document_types to return document_type_key (D11). Internal callers also
+    receive current_processing_run_id so immutable extraction facts can be read
+    from the exact run that produced the current document state.
     """
     conditions = "d.tenant_id = :tenant_id AND d.document_id = :document_id"
     params: dict = {"tenant_id": tenant_id, "document_id": document_id}  # type: ignore[type-arg]
@@ -221,7 +225,8 @@ async def get_document(
                        d.verification_state, d.content_state,
                        d.registered_at_utc,
                        d.upload_issue_code, d.upload_issue_detail,
-                       d.processing_failure_code
+                       d.processing_failure_code,
+                       d.current_processing_run_id
                 FROM docintel.documents d
                 LEFT JOIN docintel.document_types dt
                   ON dt.document_type_id = d.document_type_id
