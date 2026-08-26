@@ -164,6 +164,28 @@ async def retry_job(
             "job_id": processing_job_id,
         },
     )
+    await session.execute(
+        text("""
+            UPDATE docintel.documents d
+            SET processing_status = 'RETRY_PENDING',
+                confirmation_status = 'NOT_CONFIRMED',
+                processing_failure_code = :error_code,
+                processing_failure_detail = :error_detail,
+                updated_at_utc = :now
+            FROM docintel.processing_jobs pj
+            WHERE pj.tenant_id = :tenant_id
+              AND pj.processing_job_id = :job_id
+              AND d.tenant_id = pj.tenant_id
+              AND d.document_id = pj.document_id
+        """),
+        {
+            "now": now,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "tenant_id": tenant_id,
+            "job_id": processing_job_id,
+        },
+    )
 
 
 async def fail_job(
