@@ -8,6 +8,19 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def audit_link_retry_delay_seconds(attempt_count: int) -> int:
+    """Bound retries without allowing a failed Audit callback to starve extraction."""
+    if attempt_count <= 0:
+        return 0
+    if attempt_count == 1:
+        return 5
+    if attempt_count == 2:
+        return 15
+    if attempt_count == 3:
+        return 30
+    return 60
+
+
 async def claim_pending_audit_link(session: AsyncSession) -> dict | None:  # type: ignore[type-arg]
     row = (
         await session.execute(
@@ -19,6 +32,18 @@ async def claim_pending_audit_link(session: AsyncSession) -> dict | None:  # typ
                 WHERE upload_status = 'FIT'
                   AND audit_link_status = 'PENDING'
                   AND audit_requirement_ref IS NOT NULL
+                  AND (
+                      audit_link_last_attempt_at_utc IS NULL
+                      OR audit_link_last_attempt_at_utc <= now() - make_interval(
+                          secs => CASE
+                              WHEN audit_link_attempt_count <= 0 THEN 0
+                              WHEN audit_link_attempt_count = 1 THEN 5
+                              WHEN audit_link_attempt_count = 2 THEN 15
+                              WHEN audit_link_attempt_count = 3 THEN 30
+                              ELSE 60
+                          END
+                      )
+                  )
                 ORDER BY registered_at_utc, document_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
