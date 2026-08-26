@@ -16,6 +16,7 @@ jobs:
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      # Target is optional; generic error/provider lines are captured as well.
       DOCUMENT_ID: 039ded02-3dc7-4796-8d59-876757ad1d2c
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +68,6 @@ jobs:
           for line in raw.splitlines():
               low=line.lower()
               if target in low or any(k in low for k in ('error','exception','failed','failure','gemini','google','docai','quota','429','401','403','backout')):
-                  # redact common secret/token shapes defensively
                   line=re.sub(r'AIza[0-9A-Za-z_-]{20,}', '[REDACTED_GOOGLE_KEY]', line)
                   line=re.sub(r'(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*', r'\1[REDACTED]', line)
                   line=re.sub(r'(?i)(api[_-]?key["\'=: ]+)[^ ,}"\']+', r'\1[REDACTED]', line)
