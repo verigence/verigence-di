@@ -13,6 +13,7 @@ Localization contract:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import uuid
@@ -46,6 +47,15 @@ _GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{_GEMINI_MODEL}:generateContent"
 )
+
+
+class GeminiApiError(RuntimeError):
+    """Gemini request-level failure that must not become fake NOT_FOUND facts."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.retryable = status_code in {408, 429, 500, 502, 503, 504}
+        super().__init__(f"Gemini API error {status_code}: {detail}")
 
 
 class GeminiDocumentAIAdapter(DocumentAIAdapter):
@@ -161,8 +171,31 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                         attempt=attempt + 1,
                         reason="parse_failure",
                     )
+                    await asyncio.sleep(1)
                     continue
-                field_results = _make_not_found_results(fields)
+                raise
+            except GeminiApiError as exc:
+                last_error = str(exc)
+                http_status = exc.status_code
+                log.error(
+                    "gemini_api_error",
+                    document_type_key=document_type_key,
+                    gemini_model=_GEMINI_MODEL,
+                    http_status=http_status,
+                    exc_type=type(exc).__name__,
+                    exc_msg=last_error,
+                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),
+                )
+                if attempt == 0 and exc.retryable:
+                    log.warning(
+                        "gemini_retry",
+                        document_type_key=document_type_key,
+                        attempt=attempt + 1,
+                        reason=f"http_{http_status}",
+                    )
+                    await asyncio.sleep(2)
+                    continue
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
                 log.error(
@@ -179,13 +212,14 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                         "gemini_retry",
                         document_type_key=document_type_key,
                         attempt=attempt + 1,
-                        reason="api_error",
+                        reason="transport_error",
                     )
+                    await asyncio.sleep(2)
                     continue
-                field_results = _make_not_found_results(fields)
+                raise
 
         if field_results is None:
-            field_results = _make_not_found_results(fields)
+            raise RuntimeError("Gemini extraction ended without a provider result")
 
         duration_ms = round((_t.monotonic() - call_start) * 1000, 1)
         fields_found = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
@@ -369,13 +403,13 @@ async def _call_gemini_instrumented(
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
             _GEMINI_API_URL,
-            params={"key": api_key},
+            headers={"x-goog-api-key": api_key},
             json=payload,
         )
 
     http_status = resp.status_code
     if http_status != 200:
-        raise RuntimeError(f"Gemini API error {http_status}: {resp.text[:500]}")
+        raise GeminiApiError(http_status, resp.text[:500])
 
     data = resp.json()
     usage = data.get("usageMetadata", {})
