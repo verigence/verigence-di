@@ -245,7 +245,7 @@ def require_live_tenant_permission(permission_key: str):  # type: ignore[no-unty
             raise http_exception(
                 ErrorCode.FORBIDDEN,
                 detail=f"Security denied {permission_key} for the selected Project.",
-            )
+            ) from None
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
             raise HTTPException(
                 status_code=503,
