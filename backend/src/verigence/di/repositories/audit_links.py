@@ -70,11 +70,17 @@ async def mark_audit_link_attempt(
             """
             UPDATE docintel.documents
             SET audit_link_attempt_count = audit_link_attempt_count + 1,
-                audit_link_last_attempt_at_utc = :now,
-                audit_link_status = CASE WHEN :ack THEN 'ACKNOWLEDGED' ELSE 'PENDING' END,
-                audit_link_acknowledged_at_utc = CASE WHEN :ack THEN :now ELSE NULL END,
-                audit_link_last_error = CASE WHEN :ack THEN NULL ELSE :error END,
-                updated_at_utc = :now
+                audit_link_last_attempt_at_utc = CAST(:now AS timestamptz),
+                audit_link_status = CASE WHEN CAST(:ack AS boolean) THEN 'ACKNOWLEDGED' ELSE 'PENDING' END,
+                audit_link_acknowledged_at_utc = CASE
+                    WHEN CAST(:ack AS boolean) THEN CAST(:now AS timestamptz)
+                    ELSE NULL
+                END,
+                audit_link_last_error = CASE
+                    WHEN CAST(:ack AS boolean) THEN NULL
+                    ELSE CAST(:error AS text)
+                END,
+                updated_at_utc = CAST(:now AS timestamptz)
             WHERE tenant_id = :tenant_id
               AND document_id = :document_id
               AND audit_link_status = 'PENDING'
