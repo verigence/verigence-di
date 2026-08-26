@@ -8,9 +8,10 @@ and other DI configuration.
 from __future__ import annotations
 
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,7 @@ router = APIRouter(
 )
 
 _CONFIRMATION = "PURGE_TRANSACTION_DATA"
+_SELECTED_DOCUMENT_CONFIRMATION = "PURGE_SELECTED_DOCUMENTS"
 
 
 class TenantTransactionDataStatus(BaseModel):
@@ -46,6 +48,21 @@ class TenantTransactionPurgeCommand(BaseModel):
 class TenantTransactionPurgeData(BaseModel):
     tenantId: str
     purgeStatus: Literal["REMOVED"]
+    deletedDocuments: int
+    deletedStorageObjects: int
+    configurationPreserved: bool = True
+
+
+class SelectedDocumentPurgeCommand(BaseModel):
+    confirmTenantId: str
+    confirmation: Literal["PURGE_SELECTED_DOCUMENTS"]
+    documentIds: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class SelectedDocumentPurgeData(BaseModel):
+    tenantId: str
+    purgeStatus: Literal["REMOVED"]
+    requestedDocuments: int
     deletedDocuments: int
     deletedStorageObjects: int
     configurationPreserved: bool = True
@@ -125,6 +142,107 @@ async def _delete_transaction_rows(session: AsyncSession, tenant_id: str) -> Non
         )
 
 
+async def _delete_selected_document_rows(
+    session: AsyncSession,
+    tenant_id: str,
+    document_ids: list[UUID],
+) -> None:
+    """Delete only the requested Tenant documents and their transaction graph."""
+    await set_tenant_context(session, tenant_id)
+    params = {"tid": tenant_id, "document_ids": document_ids}
+    target = "document_id = ANY(CAST(:document_ids AS uuid[]))"
+
+    # Break references from Documents to selected Documents/Runs before child deletion.
+    await session.execute(
+        text(
+            f"UPDATE docintel.documents SET current_processing_run_id=NULL "
+            f"WHERE tenant_id=:tid AND {target}"
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            """
+            UPDATE docintel.documents
+            SET duplicate_of_document_id = CASE
+                    WHEN duplicate_of_document_id = ANY(CAST(:document_ids AS uuid[])) THEN NULL
+                    ELSE duplicate_of_document_id END,
+                replaces_document_id = CASE
+                    WHEN replaces_document_id = ANY(CAST(:document_ids AS uuid[])) THEN NULL
+                    ELSE replaces_document_id END,
+                replaced_by_document_id = CASE
+                    WHEN replaced_by_document_id = ANY(CAST(:document_ids AS uuid[])) THEN NULL
+                    ELSE replaced_by_document_id END
+            WHERE tenant_id=:tid
+              AND (
+                    duplicate_of_document_id = ANY(CAST(:document_ids AS uuid[]))
+                 OR replaces_document_id = ANY(CAST(:document_ids AS uuid[]))
+                 OR replaced_by_document_id = ANY(CAST(:document_ids AS uuid[]))
+              )
+            """
+        ),
+        params,
+    )
+
+    direct_tables = (
+        "backout_jobs",
+        "document_field_values",
+        "validation_results",
+        "document_classifications",
+        "extracted_facts",
+        "document_quality_results",
+        "document_search_index",
+        "entity_links",
+        "integration_intake_events",
+        "document_artifacts",
+        "human_verifications",
+    )
+    for table_name in direct_tables:
+        await session.execute(
+            text(
+                f"DELETE FROM docintel.{table_name} "  # noqa: S608
+                f"WHERE tenant_id=:tid AND {target}"
+            ),
+            params,
+        )
+
+    await session.execute(
+        text(
+            """
+            DELETE FROM docintel.processor_invocations
+            WHERE tenant_id=:tid
+              AND processing_run_id IN (
+                    SELECT processing_run_id FROM docintel.processing_runs
+                    WHERE tenant_id=:tid
+                      AND document_id = ANY(CAST(:document_ids AS uuid[]))
+              )
+            """
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.processing_runs "
+            "WHERE tenant_id=:tid AND document_id = ANY(CAST(:document_ids AS uuid[]))"
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.processing_jobs "
+            "WHERE tenant_id=:tid AND document_id = ANY(CAST(:document_ids AS uuid[]))"
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.documents "
+            "WHERE tenant_id=:tid AND document_id = ANY(CAST(:document_ids AS uuid[]))"
+        ),
+        params,
+    )
+
+
 @router.get("/transaction-data", response_model=ApiResponse[TenantTransactionDataStatus])
 async def get_tenant_transaction_data_status(
     tenantId: str,
@@ -202,6 +320,91 @@ async def purge_tenant_transaction_data(
             tenantId=tenantId,
             purgeStatus="REMOVED",
             deletedDocuments=status_before.documents,
+            deletedStorageObjects=len(artifact_keys),
+        ),
+    )
+
+
+@router.post(
+    "/document-data/purge",
+    response_model=ApiResponse[SelectedDocumentPurgeData],
+)
+async def purge_selected_document_data(
+    tenantId: str,
+    command: SelectedDocumentPurgeCommand,
+    admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[SelectedDocumentPurgeData]:
+    """Purge selected DI documents, used by Audit Core Journey housekeeping."""
+    del admin
+    if command.confirmTenantId != tenantId:
+        raise HTTPException(
+            status_code=400,
+            detail="Tenant confirmation does not match the Tenant being purged.",
+        )
+    if command.confirmation != _SELECTED_DOCUMENT_CONFIRMATION:
+        raise HTTPException(status_code=400, detail="Invalid purge confirmation.")
+
+    document_ids = list(dict.fromkeys(command.documentIds))
+    params = {"tid": tenantId, "document_ids": document_ids}
+    await set_tenant_context(session, tenantId)
+    existing_document_ids = list(
+        (
+            await session.execute(
+                text(
+                    "SELECT document_id FROM docintel.documents "
+                    "WHERE tenant_id=:tid "
+                    "AND document_id = ANY(CAST(:document_ids AS uuid[]))"
+                ),
+                params,
+            )
+        ).scalars().all()
+    )
+    artifact_keys = [
+        str(value)
+        for value in (
+            await session.execute(
+                text(
+                    "SELECT logical_object_key FROM docintel.document_artifacts "
+                    "WHERE tenant_id=:tid "
+                    "AND document_id = ANY(CAST(:document_ids AS uuid[])) "
+                    "AND logical_object_key IS NOT NULL"
+                ),
+                params,
+            )
+        ).scalars().all()
+    ]
+
+    storage = get_storage_adapter()
+    for logical_key in artifact_keys:
+        await storage.delete(logical_key)
+
+    if existing_document_ids:
+        await _delete_selected_document_rows(session, tenantId, existing_document_ids)
+
+    remaining = int(
+        (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM docintel.documents "
+                    "WHERE tenant_id=:tid "
+                    "AND document_id = ANY(CAST(:document_ids AS uuid[]))"
+                ),
+                params,
+            )
+        ).scalar_one()
+    )
+    if remaining:
+        raise RuntimeError("DI selected-document housekeeping did not reach zero state")
+
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=SelectedDocumentPurgeData(
+            tenantId=tenantId,
+            purgeStatus="REMOVED",
+            requestedDocuments=len(document_ids),
+            deletedDocuments=len(existing_document_ids),
             deletedStorageObjects=len(artifact_keys),
         ),
     )
