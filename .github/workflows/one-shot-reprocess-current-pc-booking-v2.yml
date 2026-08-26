@@ -1,0 +1,213 @@
+name: One-shot reprocess current PC Booking documents v2
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-reprocess-current-pc-booking-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      TENANT_ID: 5fbe26ab-6ed7-444a-8488-5bfb81208588
+      PAN_DOCUMENT_ID: b66a6f94-b2f1-4b05-b782-88f94918259f
+      AADHAAR_DOCUMENT_ID: e8ba4cf6-3382-44f2-97a3-1a8fdacf5746
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install asyncpg
+          npm install --global @railway/cli
+      - name: Resolve Railway Postgres public maintenance URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/dev/null
+          railway variable list --service Postgres --environment dev --json >/tmp/postgres-vars.json
+          db_url="$(jq -r '.DATABASE_PUBLIC_URL // .POSTGRES_PUBLIC_URL // .POSTGRES_URL // empty' /tmp/postgres-vars.json)"
+          [ -n "$db_url" ] || {
+            echo '::error::No public Postgres maintenance URL is available on the Railway Postgres service.'
+            exit 1
+          }
+          if [[ "$db_url" == *'.railway.internal'* ]]; then
+            echo '::error::Resolved DB URL is private Railway DNS, not a public maintenance endpoint.'
+            exit 1
+          fi
+          echo "::add-mask::$db_url"
+          echo "DB_URL=$db_url" >> "$GITHUB_ENV"
+      - name: Requeue only PAN and Aadhaar from the current Booking
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import asyncio
+          import os
+          import uuid
+          from datetime import UTC, datetime
+
+          import asyncpg
+
+          tenant = os.environ['TENANT_ID']
+          target_ids = [uuid.UUID(os.environ['PAN_DOCUMENT_ID']), uuid.UUID(os.environ['AADHAAR_DOCUMENT_ID'])]
+          db_url = os.environ['DB_URL'].replace('postgresql+asyncpg://', 'postgresql://').replace('postgres+asyncpg://', 'postgresql://')
+
+          async def main() -> None:
+              conn = await asyncpg.connect(db_url, ssl='prefer')
+              try:
+                  rows = await conn.fetch(
+                      '''SELECT document_id, document_type_hint_key, upload_status,
+                                processing_status, confirmation_status, current_processing_run_id
+                         FROM docintel.documents
+                         WHERE tenant_id=$1 AND document_id = ANY($2::uuid[])
+                         ORDER BY document_id''', tenant, target_ids,
+                  )
+                  if len(rows) != 2:
+                      raise RuntimeError(f'Expected exactly 2 target documents; found {len(rows)}')
+                  for row in rows:
+                      print('BEFORE', row['document_id'], row['document_type_hint_key'], row['upload_status'], row['processing_status'], row['confirmation_status'])
+                      if row['upload_status'] != 'FIT':
+                          raise RuntimeError(f"Target {row['document_id']} is not FIT")
+
+                  now = datetime.now(UTC)
+                  async with conn.transaction():
+                      for doc_id in target_ids:
+                          active = await conn.fetchrow(
+                              '''SELECT processing_job_id, job_type, job_status
+                                 FROM docintel.processing_jobs
+                                 WHERE tenant_id=$1 AND document_id=$2 AND job_status IN ('PENDING','RUNNING')
+                                 ORDER BY created_at_utc DESC LIMIT 1''', tenant, doc_id,
+                          )
+                          if active:
+                              print('ACTIVE_JOB_ALREADY_PRESENT', doc_id, active['job_type'], active['job_status'])
+                              continue
+
+                          await conn.execute(
+                              '''UPDATE docintel.documents
+                                 SET processing_status='RETRY_PENDING', confirmation_status='NOT_CONFIRMED',
+                                     processing_failure_code=NULL, processing_failure_detail=NULL,
+                                     updated_at_utc=$3
+                                 WHERE tenant_id=$1 AND document_id=$2''', tenant, doc_id, now,
+                          )
+
+                          existing = await conn.fetchrow(
+                              '''SELECT processing_job_id, job_status
+                                 FROM docintel.processing_jobs
+                                 WHERE tenant_id=$1 AND document_id=$2 AND job_type='EOD_RETRY'
+                                 LIMIT 1''', tenant, doc_id,
+                          )
+                          if existing is None:
+                              await conn.execute(
+                                  '''INSERT INTO docintel.processing_jobs
+                                      (tenant_id, processing_job_id, document_id, correlation_id,
+                                       job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+                                     VALUES ($1,$2,$3,$4,'EOD_RETRY','PENDING',$5,2,$5)''',
+                                  tenant, uuid.uuid4(), doc_id, f'pc-repair.{uuid.uuid4()}', now,
+                              )
+                              print('REQUEUE_INSERTED', doc_id)
+                          else:
+                              await conn.execute(
+                                  '''UPDATE docintel.processing_jobs
+                                     SET job_status='PENDING', due_at_utc=$3,
+                                         attempt_no=GREATEST(attempt_no,2), locked_by=NULL,
+                                         locked_at_utc=NULL, started_at_utc=NULL, completed_at_utc=NULL,
+                                         error_code=NULL, error_detail=NULL
+                                     WHERE tenant_id=$1 AND processing_job_id=$2''',
+                                  tenant, existing['processing_job_id'], now,
+                              )
+                              print('REQUEUE_REARMED', doc_id, existing['job_status'])
+                          await conn.execute("SELECT pg_notify('di_processing_jobs', $1)", str(doc_id))
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY
+      - name: Verify real extraction completion
+        shell: bash
+        run: |
+          set +e
+          python - <<'PY'
+          import asyncio
+          import os
+          import uuid
+          from pathlib import Path
+
+          import asyncpg
+
+          tenant = os.environ['TENANT_ID']
+          targets = {'PAN': uuid.UUID(os.environ['PAN_DOCUMENT_ID']), 'AADHAAR': uuid.UUID(os.environ['AADHAAR_DOCUMENT_ID'])}
+          db_url = os.environ['DB_URL'].replace('postgresql+asyncpg://', 'postgresql://').replace('postgres+asyncpg://', 'postgresql://')
+
+          async def main() -> None:
+              conn = await asyncpg.connect(db_url, ssl='prefer')
+              evidence = ['UC03 PC current Booking targeted reprocess']
+              failed = []
+              try:
+                  by_id = {}
+                  for tick in range(48):
+                      rows = await conn.fetch(
+                          '''SELECT document_id, document_type_hint_key, processing_status,
+                                    confirmation_status, current_processing_run_id,
+                                    processing_failure_code, processing_failure_detail
+                             FROM docintel.documents
+                             WHERE tenant_id=$1 AND document_id = ANY($2::uuid[])''',
+                          tenant, list(targets.values()),
+                      )
+                      by_id = {r['document_id']: r for r in rows}
+                      state = {name: by_id[doc]['processing_status'] for name, doc in targets.items()}
+                      print('POLL', tick, state)
+                      if all(v in {'PROCESSED','FAILED'} for v in state.values()):
+                          break
+                      await asyncio.sleep(5)
+
+                  for name, doc_id in targets.items():
+                      row = by_id[doc_id]
+                      latest = await conn.fetchrow(
+                          '''SELECT job_type, job_status, attempt_no, error_code, error_detail
+                             FROM docintel.processing_jobs
+                             WHERE tenant_id=$1 AND document_id=$2
+                             ORDER BY created_at_utc DESC LIMIT 1''', tenant, doc_id,
+                      )
+                      line = (
+                          f"{name}: document={doc_id} status={row['processing_status']} "
+                          f"confirmation={row['confirmation_status']} run={row['current_processing_run_id']} "
+                          f"job={latest['job_type'] if latest else None}/{latest['job_status'] if latest else None} "
+                          f"error={row['processing_failure_code'] or (latest['error_code'] if latest else None)}"
+                      )
+                      print(line)
+                      evidence.append(line)
+                      if row['processing_status'] != 'PROCESSED':
+                          failed.append(name)
+              finally:
+                  await conn.close()
+                  Path('docs/runtime/uc03-pc-current-booking-reprocess.txt').write_text('\n'.join(evidence)+'\n')
+              if failed:
+                  raise RuntimeError('Targeted reprocessing did not complete successfully: '+','.join(failed))
+
+          asyncio.run(main())
+          PY
+          rc=$?
+          exit $rc
+      - name: Record evidence and remove one-shot workflow
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/one-shot-reprocess-current-pc-booking-v2.yml
+          git add docs/runtime/uc03-pc-current-booking-reprocess.txt || true
+          git commit -m 'docs(dev): record current PC Booking reprocess evidence [skip ci]' || exit 0
+          git pull --rebase origin dev
+          git push origin HEAD:dev
