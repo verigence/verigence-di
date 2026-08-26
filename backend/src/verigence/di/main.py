@@ -306,6 +306,9 @@ def create_app() -> FastAPI:
     )
     from verigence.di.api.v1.subjects import router as subjects_router  # noqa: PLC0415
     from verigence.di.api.v1.tenant_config import router as tenant_config_router  # noqa: PLC0415
+    from verigence.di.api.v1.tenant_housekeeping import (  # noqa: PLC0415
+        router as tenant_housekeeping_router,
+    )
     from verigence.di.api.v1.unassigned import router as unassigned_router  # noqa: PLC0415
     from verigence.di.api.v1.verification import router as verification_router  # noqa: PLC0415
     from verigence.di.api.v1.whatsapp_system import (
@@ -317,6 +320,7 @@ def create_app() -> FastAPI:
     app.include_router(documents_router)
     app.include_router(audit_storage_contexts_router)
     app.include_router(admin_provisioning_router)
+    app.include_router(tenant_housekeeping_router)
     app.include_router(project_masters_router)
     app.include_router(verification_router)
     app.include_router(operations_router)
