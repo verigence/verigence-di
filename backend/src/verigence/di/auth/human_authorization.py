@@ -17,7 +17,7 @@ from functools import lru_cache
 from typing import Any
 
 import httpx
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
@@ -74,8 +74,6 @@ def verify_global_human_token(token: str) -> HumanIdentity | None:
     if not isinstance(subject, str) or not subject.strip():
         return None
 
-    # The current human boundary is intentionally authority-free. Accepting an
-    # authority-bearing token here would bypass the live Security decision below.
     forbidden = {"tenant_id", "permissions", "roles", "device_id", "location_id", "act"}
     if forbidden.intersection(claims):
         return None
@@ -249,9 +247,15 @@ def require_live_tenant_permission(permission_key: str):  # type: ignore[no-unty
                 detail=f"Security denied {permission_key} for the selected Project.",
             )
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-            raise http_exception(
-                ErrorCode.DEPENDENCY_UNAVAILABLE,
-                detail="Security authorization is temporarily unavailable.",
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "DEPENDENCY_UNAVAILABLE",
+                    "title": "Security authorization is temporarily unavailable.",
+                    "status": 503,
+                    "retryable": True,
+                    "category": "DEPENDENCY",
+                },
             ) from exc
 
     return _check
