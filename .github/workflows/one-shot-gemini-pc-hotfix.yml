@@ -1,0 +1,84 @@
+name: One-shot Gemini PC extraction hotfix
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-gemini-pc-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply guarded Gemini provider patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/src/verigence/di/document_ai/gemini_adapter.py')
+          s = path.read_text()
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              s = s.replace(old, new, 1)
+
+          replace_once(
+              'import base64\nimport json\nimport uuid\n',
+              'import asyncio\nimport base64\nimport json\nimport uuid\n',
+              'asyncio import',
+          )
+
+          marker = '''_GEMINI_API_URL = (\n    "https://generativelanguage.googleapis.com/v1beta/models/"\n    f"{_GEMINI_MODEL}:generateContent"\n)\n'''
+          replacement = marker + '''\n\nclass GeminiApiError(RuntimeError):\n    """Gemini request-level failure that must not become fake NOT_FOUND facts."""\n\n    def __init__(self, status_code: int, detail: str) -> None:\n        self.status_code = status_code\n        self.retryable = status_code in {408, 429, 500, 502, 503, 504}\n        super().__init__(f"Gemini API error {status_code}: {detail}")\n'''
+          replace_once(marker, replacement, 'GeminiApiError insertion')
+
+          old_parse = '''            except (json.JSONDecodeError, ValueError) as exc:\n                last_error = str(exc)\n                log.warning(\n                    "gemini_parse_failure",\n                    document_type_key=document_type_key,\n                    attempt=attempt + 1,\n                    parse_error=last_error,\n                    raw_snippet=(raw_response or "")[:300],\n                )\n                if attempt == 0:\n                    log.warning(\n                        "gemini_retry",\n                        document_type_key=document_type_key,\n                        attempt=attempt + 1,\n                        reason="parse_failure",\n                    )\n                    continue\n                field_results = _make_not_found_results(fields)\n            except Exception as exc:  # noqa: BLE001\n                last_error = str(exc)\n                log.error(\n                    "gemini_api_error",\n                    document_type_key=document_type_key,\n                    gemini_model=_GEMINI_MODEL,\n                    http_status=http_status,\n                    exc_type=type(exc).__name__,\n                    exc_msg=last_error,\n                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),\n                )\n                if attempt == 0:\n                    log.warning(\n                        "gemini_retry",\n                        document_type_key=document_type_key,\n                        attempt=attempt + 1,\n                        reason="api_error",\n                    )\n                    continue\n                field_results = _make_not_found_results(fields)\n\n        if field_results is None:\n            field_results = _make_not_found_results(fields)\n'''
+          new_parse = '''            except (json.JSONDecodeError, ValueError) as exc:\n                last_error = str(exc)\n                log.warning(\n                    "gemini_parse_failure",\n                    document_type_key=document_type_key,\n                    attempt=attempt + 1,\n                    parse_error=last_error,\n                    raw_snippet=(raw_response or "")[:300],\n                )\n                if attempt == 0:\n                    log.warning(\n                        "gemini_retry",\n                        document_type_key=document_type_key,\n                        attempt=attempt + 1,\n                        reason="parse_failure",\n                    )\n                    await asyncio.sleep(1)\n                    continue\n                raise\n            except GeminiApiError as exc:\n                last_error = str(exc)\n                http_status = exc.status_code\n                log.error(\n                    "gemini_api_error",\n                    document_type_key=document_type_key,\n                    gemini_model=_GEMINI_MODEL,\n                    http_status=http_status,\n                    exc_type=type(exc).__name__,\n                    exc_msg=last_error,\n                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),\n                )\n                if attempt == 0 and exc.retryable:\n                    log.warning(\n                        "gemini_retry",\n                        document_type_key=document_type_key,\n                        attempt=attempt + 1,\n                        reason=f"http_{http_status}",\n                    )\n                    await asyncio.sleep(2)\n                    continue\n                raise\n            except Exception as exc:  # noqa: BLE001\n                last_error = str(exc)\n                log.error(\n                    "gemini_api_error",\n                    document_type_key=document_type_key,\n                    gemini_model=_GEMINI_MODEL,\n                    http_status=http_status,\n                    exc_type=type(exc).__name__,\n                    exc_msg=last_error,\n                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),\n                )\n                if attempt == 0:\n                    log.warning(\n                        "gemini_retry",\n                        document_type_key=document_type_key,\n                        attempt=attempt + 1,\n                        reason="transport_error",\n                    )\n                    await asyncio.sleep(2)\n                    continue\n                raise\n\n        if field_results is None:\n            raise RuntimeError("Gemini extraction ended without a provider result")\n'''
+          replace_once(old_parse, new_parse, 'provider failure handling')
+
+          old_call = '''        resp = await client.post(\n            _GEMINI_API_URL,\n            params={"key": api_key},\n            json=payload,\n        )\n\n    http_status = resp.status_code\n    if http_status != 200:\n        raise RuntimeError(f"Gemini API error {http_status}: {resp.text[:500]}")\n'''
+          new_call = '''        resp = await client.post(\n            _GEMINI_API_URL,\n            headers={"x-goog-api-key": api_key},\n            json=payload,\n        )\n\n    http_status = resp.status_code\n    if http_status != 200:\n        raise GeminiApiError(http_status, resp.text[:500])\n'''
+          replace_once(old_call, new_call, 'Gemini auth header')
+
+          path.write_text(s)
+
+          test = Path('backend/tests/test_gemini_provider_contract.py')
+          test.write_text('''from __future__ import annotations\n\nimport pytest\n\nfrom verigence.di.document_ai import gemini_adapter\n\n\nclass _Response:\n    def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:\n        self.status_code = status_code\n        self._payload = payload or {}\n        self.text = text\n\n    def json(self) -> dict:\n        return self._payload\n\n\nclass _Client:\n    response: _Response\n    captured: dict\n\n    def __init__(self, *args: object, **kwargs: object) -> None:\n        del args, kwargs\n\n    async def __aenter__(self) -> "_Client":\n        return self\n\n    async def __aexit__(self, *args: object) -> None:\n        del args\n\n    async def post(self, url: str, **kwargs: object) -> _Response:\n        type(self).captured = {"url": url, **kwargs}\n        return type(self).response\n\n\n@pytest.mark.asyncio\nasync def test_gemini_uses_documented_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:\n    _Client.response = _Response(\n        200,\n        {\n            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],\n            "usageMetadata": {},\n        },\n    )\n    monkeypatch.setattr(gemini_adapter.httpx, "AsyncClient", _Client)\n\n    await gemini_adapter._call_gemini_instrumented(\n        "AQ.test-auth-key", b"pdf", "application/pdf", "prompt"\n    )\n\n    assert _Client.captured["headers"] == {"x-goog-api-key": "AQ.test-auth-key"}\n    assert "params" not in _Client.captured\n\n\n@pytest.mark.asyncio\nasync def test_gemini_401_is_not_treated_as_empty_extraction(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    _Client.response = _Response(401, text="UNAUTHENTICATED")\n    monkeypatch.setattr(gemini_adapter.httpx, "AsyncClient", _Client)\n\n    with pytest.raises(gemini_adapter.GeminiApiError) as caught:\n        await gemini_adapter._call_gemini_instrumented(\n            "AQ.test-auth-key", b"pdf", "application/pdf", "prompt"\n        )\n\n    assert caught.value.status_code == 401\n    assert caught.value.retryable is False\n\n\n@pytest.mark.asyncio\nasync def test_adapter_propagates_provider_auth_failure(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    async def fail(**kwargs: object) -> tuple[str, int, int, int]:\n        del kwargs\n        raise gemini_adapter.GeminiApiError(401, "UNAUTHENTICATED")\n\n    monkeypatch.setattr(gemini_adapter, "_call_gemini_instrumented", fail)\n    adapter = gemini_adapter.GeminiDocumentAIAdapter("AQ.test-auth-key")\n\n    with pytest.raises(gemini_adapter.GeminiApiError):\n        await adapter.extract(\n            b"pdf",\n            "application/pdf",\n            [],\n            document_type_key="pan_card",\n        )\n''')
+          PY
+      - name: Validate hotfix
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install uv
+          uv pip install --system -e '.[dev]'
+          ruff check src/verigence/di/document_ai/gemini_adapter.py src/verigence/di/repositories/processing_jobs.py tests/test_gemini_provider_contract.py
+          mypy src/verigence/di/document_ai/gemini_adapter.py src/verigence/di/repositories/processing_jobs.py
+          pytest -q tests/test_gemini_provider_contract.py tests/test_uc03_pc_booking_direct.py --no-cov
+      - name: Commit validated hotfix and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/one-shot-gemini-pc-hotfix.yml
+          git add backend/src/verigence/di/document_ai/gemini_adapter.py backend/tests/test_gemini_provider_contract.py backend/src/verigence/di/repositories/processing_jobs.py
+          git commit -m 'Fix Gemini auth and provider failure handling'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
