@@ -7,6 +7,16 @@ from datetime import UTC, datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_MAX_ERROR_DETAIL = 2000
+_MAX_ERROR_CODE   = 128
+
+
+def _cap(value: str | None, limit: int) -> str | None:
+    """Truncate a string to limit characters, or return None unchanged."""
+    if value is None:
+        return None
+    return value[:limit]
+
 
 async def create_initial_job(
     session: AsyncSession,
@@ -124,8 +134,8 @@ async def complete_job(
         {
             "status": final_status,
             "now": now,
-            "error_code": error_code,
-            "error_detail": error_detail,
+            "error_code": _cap(error_code, _MAX_ERROR_CODE),
+            "error_detail": _cap(error_detail, _MAX_ERROR_DETAIL),
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
         },
@@ -146,6 +156,9 @@ async def retry_job(
     The EOD Retry Scheduler will later insert an EOD_RETRY job (attempt_no=2).
     """
     now = datetime.now(UTC)
+    safe_code   = _cap(error_code,   _MAX_ERROR_CODE)
+    safe_detail = _cap(error_detail, _MAX_ERROR_DETAIL)
+
     await session.execute(
         text("""
             UPDATE docintel.processing_jobs
@@ -158,8 +171,8 @@ async def retry_job(
         """),
         {
             "now": now,
-            "error_code": error_code,
-            "error_detail": error_detail,
+            "error_code": safe_code,
+            "error_detail": safe_detail,
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
         },
@@ -180,8 +193,8 @@ async def retry_job(
         """),
         {
             "now": now,
-            "error_code": error_code,
-            "error_detail": error_detail,
+            "error_code": safe_code,
+            "error_detail": safe_detail,
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
         },
@@ -202,6 +215,9 @@ async def fail_job(
     Called by the worker after a NON_RETRYABLE processing failure.
     """
     now = datetime.now(UTC)
+    safe_code   = _cap(error_code,   _MAX_ERROR_CODE)
+    safe_detail = _cap(error_detail, _MAX_ERROR_DETAIL)
+
     await session.execute(
         text("""
             UPDATE docintel.processing_jobs
@@ -214,8 +230,8 @@ async def fail_job(
         """),
         {
             "now": now,
-            "error_code": error_code,
-            "error_detail": error_detail,
+            "error_code": safe_code,
+            "error_detail": safe_detail,
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
         },
@@ -233,8 +249,8 @@ async def fail_job(
         """),
         {
             "now": now,
-            "error_code": error_code,
-            "error_detail": error_detail,
+            "error_code": safe_code,
+            "error_detail": safe_detail,
             "tenant_id": tenant_id,
             "doc_id": document_id,
         },
