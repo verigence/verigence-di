@@ -1,0 +1,82 @@
+name: One-shot provider auth failure hotfix
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-provider-auth-failure-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply guarded extraction-provider retryability patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('backend/src/verigence/di/workers/job_runner.py')
+          text=p.read_text()
+          old='''    except Exception as exc:\n        await _update_invocation(session, tenant_id, extract_invocation_id,\n                                 "FAILED", error_detail=str(exc))\n        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc\n'''
+          new='''    except Exception as exc:\n        await _update_invocation(session, tenant_id, extract_invocation_id,\n                                 "FAILED", error_detail=str(exc))\n        if getattr(exc, "retryable", True):\n            raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc\n        raise NonRetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc\n'''
+          count=text.count(old)
+          if count != 1:
+              raise SystemExit(f'guard failed: expected exactly one extraction provider error block, found {count}')
+          p.write_text(text.replace(old,new))
+          PY
+      - name: Add focused regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > backend/tests/test_provider_error_retryability_contract.py <<'PY'
+          from pathlib import Path
+
+          import pytest
+
+          from verigence.di.document_ai.gemini_adapter import GeminiApiError
+
+          pytestmark = pytest.mark.no_docker
+
+
+          def test_gemini_auth_error_is_not_retryable() -> None:
+              assert GeminiApiError(401, 'unauthorized').retryable is False
+              assert GeminiApiError(403, 'forbidden').retryable is False
+
+
+          def test_worker_preserves_provider_retryability() -> None:
+              source = Path('src/verigence/di/workers/job_runner.py').read_text()
+              assert 'if getattr(exc, "retryable", True):' in source
+              assert 'raise NonRetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc' in source
+          PY
+      - name: Validate patch
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install uv
+          uv pip install --system -e '.[dev]'
+          ruff check src/verigence/di/workers/job_runner.py tests/test_provider_error_retryability_contract.py
+          mypy src/verigence/di/workers/job_runner.py
+          pytest -q tests/test_provider_error_retryability_contract.py tests/test_processing_jobs_retry_invariant.py
+      - name: Commit validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/src/verigence/di/workers/job_runner.py backend/tests/test_provider_error_retryability_contract.py
+          git commit -m 'fix(di): stop retrying provider authentication failures'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
