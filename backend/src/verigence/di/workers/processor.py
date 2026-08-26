@@ -78,10 +78,8 @@ class ProcessingWorker:
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
         if self._notify_conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._notify_conn.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
             self._notify_conn = None
         logger.info("processing_worker_stopped")
 
@@ -179,50 +177,49 @@ class ProcessingWorker:
         session_factory: async_sessionmaker,
         log,
     ) -> bool:
-        async with session_factory() as session:
-            async with session.begin():
-                link = await claim_pending_audit_link(session)
-                if link is None:
-                    return False
+        async with session_factory() as session, session.begin():
+            link = await claim_pending_audit_link(session)
+            if link is None:
+                return False
 
-                tenant_id = str(link["tenant_id"])
-                document_id: uuid.UUID = link["document_id"]
-                requirement_ref = str(link["audit_requirement_ref"])
-                link_log = log.bind(
-                    tenant_id=tenant_id,
+            tenant_id = str(link["tenant_id"])
+            document_id: uuid.UUID = link["document_id"]
+            requirement_ref = str(link["audit_requirement_ref"])
+            link_log = log.bind(
+                tenant_id=tenant_id,
+                document_id=str(document_id),
+                audit_requirement_ref=requirement_ref,
+            )
+            try:
+                await get_audit_core_link_client().link_booking_document(
+                    requirement_ref=requirement_ref,
                     document_id=str(document_id),
-                    audit_requirement_ref=requirement_ref,
                 )
-                try:
-                    await get_audit_core_link_client().link_booking_document(
-                        requirement_ref=requirement_ref,
-                        document_id=str(document_id),
-                    )
-                except Exception as exc:
-                    await mark_audit_link_attempt(
-                        session,
-                        tenant_id=tenant_id,
-                        document_id=document_id,
-                        acknowledged=False,
-                        error_summary=f"{type(exc).__name__}: {exc}",
-                    )
-                    link_log.warning(
-                        "audit_document_link_delivery_failed",
-                        attempt=int(link["audit_link_attempt_count"]) + 1,
-                        error_type=type(exc).__name__,
-                    )
-                else:
-                    await mark_audit_link_attempt(
-                        session,
-                        tenant_id=tenant_id,
-                        document_id=document_id,
-                        acknowledged=True,
-                    )
-                    link_log.info(
-                        "audit_document_link_acknowledged",
-                        attempt=int(link["audit_link_attempt_count"]) + 1,
-                    )
-                return True
+            except Exception as exc:
+                await mark_audit_link_attempt(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    acknowledged=False,
+                    error_summary=f"{type(exc).__name__}: {exc}",
+                )
+                link_log.warning(
+                    "audit_document_link_delivery_failed",
+                    attempt=int(link["audit_link_attempt_count"]) + 1,
+                    error_type=type(exc).__name__,
+                )
+            else:
+                await mark_audit_link_attempt(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    acknowledged=True,
+                )
+                link_log.info(
+                    "audit_document_link_acknowledged",
+                    attempt=int(link["audit_link_attempt_count"]) + 1,
+                )
+            return True
 
     async def _process_one(
         self,
@@ -329,6 +326,7 @@ async def _handle_failure(
     job_log,
 ) -> None:
     from datetime import UTC, datetime
+
     from sqlalchemy import text
 
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
