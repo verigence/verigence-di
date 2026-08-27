@@ -21,7 +21,7 @@ import re
 import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import IO, Any
+from typing import IO, Any, cast
 from uuid import UUID
 
 # ── R2 path helpers (D5) ──────────────────────────────────────────────────────
@@ -162,8 +162,12 @@ class StorageAdapter(abc.ABC):
         """Write a stream to object storage and return metadata."""
 
     @abc.abstractmethod
-    async def get_stream(self, logical_key: str) -> AsyncIterator[bytes]:
+    def get_stream(self, logical_key: str) -> AsyncIterator[bytes]:
         """Stream bytes from object storage."""
+
+    @abc.abstractmethod
+    async def get_presigned_url(self, logical_key: str, expires_seconds: int) -> str:
+        """Return a temporary direct GET URL without exposing storage credentials."""
 
     @abc.abstractmethod
     async def exists(self, logical_key: str) -> bool:
@@ -201,7 +205,7 @@ class S3StorageAdapter(StorageAdapter):
         self._bucket = bucket
         self._region = region
 
-    def _client_kwargs(self) -> dict:  # type: ignore[type-arg]
+    def _client_kwargs(self) -> dict[str, str]:
         return {
             "endpoint_url": self._endpoint_url,
             "aws_access_key_id": self._access_key_id,
@@ -218,15 +222,17 @@ class S3StorageAdapter(StorageAdapter):
     ) -> StorageMetadata:
         import uuid
 
-        import aioboto3  # type: ignore[import]
+        import aioboto3
 
-        # Normalise: accept both sync IO (BytesIO) and async iterators
+        # Normalise: accept both sync IO and async iterators without leaking the
+        # provider's upload-body type into the application interface.
         if hasattr(stream, "read"):
-            # Sync IO object — wrap in BytesIO if not already, then read
-            buffer: io.BytesIO = stream if isinstance(stream, io.BytesIO) else io.BytesIO(stream.read())  # type: ignore[assignment]
+            sync_stream = cast("IO[bytes]", stream)
+            buffer = sync_stream if isinstance(sync_stream, io.BytesIO) else io.BytesIO(sync_stream.read())
         else:
+            async_stream = stream
             buffer = io.BytesIO()
-            async for chunk in stream:  # type: ignore[union-attr]
+            async for chunk in async_stream:
                 buffer.write(chunk)
         size = buffer.tell()
         buffer.seek(0)
@@ -263,9 +269,24 @@ class S3StorageAdapter(StorageAdapter):
             async for chunk in response["Body"].iter_chunks(chunk_size=65536):
                 yield chunk
 
+    async def get_presigned_url(self, logical_key: str, expires_seconds: int) -> str:
+        import aioboto3
+
+        # Presigning is local cryptographic work. The URL lets the browser/mobile
+        # fetch the large object directly from R2/MinIO instead of proxying bytes
+        # through the DI Railway service.
+        session = aioboto3.Session()
+        async with session.client("s3", **self._client_kwargs()) as s3:
+            url = await s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": logical_key},
+                ExpiresIn=expires_seconds,
+            )
+        return str(url)
+
     async def exists(self, logical_key: str) -> bool:
         import aioboto3
-        from botocore.exceptions import ClientError  # type: ignore[import]
+        from botocore.exceptions import ClientError
 
         session = aioboto3.Session()
         async with session.client("s3", **self._client_kwargs()) as s3:
@@ -303,16 +324,17 @@ class S3StorageAdapter(StorageAdapter):
 
 def get_storage_adapter() -> StorageAdapter:
     """FastAPI dependency — returns configured adapter from settings.
-    
+
     Routes the adapter selection based on DI_STORAGE_PROVIDER env var:
     - minio: local Docker MinIO (development, local testing)
     - r2: Cloudflare R2 (production)
-    
+
     Both are S3-compatible and use the same S3StorageAdapter implementation.
     """
     from verigence.di.settings import get_settings
+
     s = get_settings()
-    
+
     # Both MinIO and R2 are S3-compatible
     # Provider enum exists for future extensibility or logging/metrics
     return S3StorageAdapter(
