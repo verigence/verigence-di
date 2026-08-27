@@ -37,6 +37,10 @@ from verigence.di.repositories.audit_storage_contexts import get_audit_storage_c
 from verigence.di.repositories.database import tenant_session
 from verigence.di.repositories.tenants import provision_actor
 from verigence.di.storage.adapter import get_storage_adapter
+from verigence.di.storage.download_access import (
+    DEFAULT_DOWNLOAD_URL_TTL_SECONDS,
+    create_presigned_download_url,
+)
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["PC Booking Documents"])
 
@@ -71,6 +75,13 @@ class PcBookingExtractionReview(BaseModel):
     documentId: UUID
     processingStatus: str
     facts: list[PcBookingExtractionField]
+
+
+class PcBookingDocumentContentAccess(BaseModel):
+    documentId: UUID
+    url: str
+    mimeType: str
+    expiresInSeconds: int
 
 
 def _accepted_upload(doc: dict) -> tuple[str, bool]:  # type: ignore[type-arg]
@@ -296,6 +307,71 @@ async def get_pc_booking_extraction_review(
             documentId=documentId,
             processingStatus=public_processing_status(doc.get("processing_status"), False),
             facts=facts,
+        ),
+    )
+
+
+@router.get(
+    "/audit-storage-contexts/{externalContextRef}/pc-booking-documents/{documentId}/content-access",
+    response_model=ApiResponse[PcBookingDocumentContentAccess],
+    summary="Create short-lived direct access to original PC Booking document",
+    operation_id="getPcBookingDocumentContentAccess",
+)
+async def get_pc_booking_document_content_access(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    authorization: Annotated[
+        HumanTenantAuthorization,
+        Depends(require_live_tenant_permission("di.document.content.read")),
+    ],
+) -> ApiResponse[PcBookingDocumentContentAccess]:
+    """Authorize in DI, then let the browser download bytes directly from private R2."""
+    del authorization
+    external_ref = externalContextRef.strip()
+    async with tenant_session(tenantId) as session:
+        context, _ = await _context_document(
+            session,
+            tenant_id=tenantId,
+            external_context_ref=external_ref,
+            document_id=documentId,
+        )
+        artifact = (
+            await session.execute(
+                text(
+                    """
+                    SELECT da.logical_object_key, da.mime_type, d.content_state
+                    FROM docintel.document_artifacts da
+                    JOIN docintel.documents d
+                      ON d.tenant_id = da.tenant_id AND d.document_id = da.document_id
+                    WHERE da.tenant_id = :tenant_id
+                      AND da.document_id = :document_id
+                      AND da.artifact_type = 'ORIGINAL'
+                      AND d.audit_storage_context_id = :storage_context_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "tenant_id": tenantId,
+                    "document_id": documentId,
+                    "storage_context_id": _context_uuid(context, "storage_context_id"),
+                },
+            )
+        ).one_or_none()
+    if artifact is None:
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    if artifact[2] == "PURGED":
+        raise http_exception(ErrorCode.DOCUMENT_CONTENT_PURGED)
+
+    mime_type = str(artifact[1] or "application/octet-stream")
+    return ApiResponse(
+        errorCode="000",
+        errorMessage="Success",
+        data=PcBookingDocumentContentAccess(
+            documentId=documentId,
+            url=create_presigned_download_url(str(artifact[0])),
+            mimeType=mime_type,
+            expiresInSeconds=DEFAULT_DOWNLOAD_URL_TTL_SECONDS,
         ),
     )
 
