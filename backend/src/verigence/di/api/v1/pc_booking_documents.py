@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -150,7 +150,7 @@ async def _signed_content_access(
     logical_key = str(artifact.get("logical_object_key") or "")
     if not logical_key:
         raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=PC_BOOKING_CONTENT_URL_TTL_SECONDS)
+    expires_at = datetime.now(UTC) + timedelta(seconds=PC_BOOKING_CONTENT_URL_TTL_SECONDS)
     url = await storage.get_presigned_url(logical_key, PC_BOOKING_CONTENT_URL_TTL_SECONDS)
     return PcBookingContentAccess(
         documentId=document_id,
