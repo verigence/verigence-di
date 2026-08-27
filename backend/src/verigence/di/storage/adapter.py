@@ -230,7 +230,7 @@ class S3StorageAdapter(StorageAdapter):
             sync_stream = cast("IO[bytes]", stream)
             buffer = sync_stream if isinstance(sync_stream, io.BytesIO) else io.BytesIO(sync_stream.read())
         else:
-            async_stream = cast("AsyncIterator[bytes]", stream)
+            async_stream = stream
             buffer = io.BytesIO()
             async for chunk in async_stream:
                 buffer.write(chunk)
