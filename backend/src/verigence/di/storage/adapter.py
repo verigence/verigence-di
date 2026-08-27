@@ -166,6 +166,10 @@ class StorageAdapter(abc.ABC):
         """Stream bytes from object storage."""
 
     @abc.abstractmethod
+    async def get_presigned_url(self, logical_key: str, expires_seconds: int) -> str:
+        """Return a temporary direct GET URL without exposing storage credentials."""
+
+    @abc.abstractmethod
     async def exists(self, logical_key: str) -> bool:
         """Return True if the object exists."""
 
@@ -262,6 +266,20 @@ class S3StorageAdapter(StorageAdapter):
             response = await s3.get_object(Bucket=self._bucket, Key=logical_key)
             async for chunk in response["Body"].iter_chunks(chunk_size=65536):
                 yield chunk
+
+    async def get_presigned_url(self, logical_key: str, expires_seconds: int) -> str:
+        import aioboto3
+
+        # Presigning is local cryptographic work. The URL lets the browser/mobile
+        # fetch the large object directly from R2/MinIO instead of proxying bytes
+        # through the DI Railway service.
+        session = aioboto3.Session()
+        async with session.client("s3", **self._client_kwargs()) as s3:
+            return await s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": logical_key},
+                ExpiresIn=expires_seconds,
+            )
 
     async def exists(self, logical_key: str) -> bool:
         import aioboto3
