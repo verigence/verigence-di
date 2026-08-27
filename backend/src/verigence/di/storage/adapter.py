@@ -227,10 +227,10 @@ class S3StorageAdapter(StorageAdapter):
         # Normalise: accept both sync IO and async iterators without leaking the
         # provider's upload-body type into the application interface.
         if hasattr(stream, "read"):
-            sync_stream = cast(IO[bytes], stream)
+            sync_stream = cast("IO[bytes]", stream)
             buffer = sync_stream if isinstance(sync_stream, io.BytesIO) else io.BytesIO(sync_stream.read())
         else:
-            async_stream = cast(AsyncIterator[bytes], stream)
+            async_stream = cast("AsyncIterator[bytes]", stream)
             buffer = io.BytesIO()
             async for chunk in async_stream:
                 buffer.write(chunk)
