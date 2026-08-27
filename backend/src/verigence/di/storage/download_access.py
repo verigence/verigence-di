@@ -31,7 +31,7 @@ class _PresignClient(Protocol):
 def _presign_client() -> _PresignClient:
     settings = get_settings()
     return cast(
-        _PresignClient,
+        "_PresignClient",
         boto3.client(
             "s3",
             endpoint_url=settings.storage_endpoint,
