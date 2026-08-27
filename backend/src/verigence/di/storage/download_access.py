@@ -1,31 +1,44 @@
 """Short-lived direct download access for private object storage.
 
 Large document bytes should not be proxied through the DI application service for
-interactive review.  DI still performs authorization and document/context checks,
+interactive review. DI still performs authorization and document/context checks,
 then issues a time-limited S3-compatible presigned GET URL so the browser can read
 the private R2 object directly.
 """
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Protocol, cast
 
 import boto3
-from botocore.client import BaseClient
 
 from verigence.di.settings import get_settings
 
 DEFAULT_DOWNLOAD_URL_TTL_SECONDS = 600
 
 
+class _PresignClient(Protocol):
+    def generate_presigned_url(
+        self,
+        client_method: str,
+        *,
+        Params: dict[str, str],
+        ExpiresIn: int,
+    ) -> str: ...
+
+
 @lru_cache(maxsize=1)
-def _presign_client() -> BaseClient:
+def _presign_client() -> _PresignClient:
     settings = get_settings()
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.storage_endpoint,
-        aws_access_key_id=settings.storage_access_key_id,
-        aws_secret_access_key=settings.storage_secret_access_key,
-        region_name=settings.storage_region,
+    return cast(
+        _PresignClient,
+        boto3.client(
+            "s3",
+            endpoint_url=settings.storage_endpoint,
+            aws_access_key_id=settings.storage_access_key_id,
+            aws_secret_access_key=settings.storage_secret_access_key,
+            region_name=settings.storage_region,
+        ),
     )
 
 
@@ -46,6 +59,6 @@ def create_presigned_download_url(
         Params={"Bucket": settings.storage_bucket, "Key": logical_key},
         ExpiresIn=expires_seconds,
     )
-    if not isinstance(url, str) or not url:
+    if not url:
         raise RuntimeError("Object storage did not return a presigned download URL")
     return url
