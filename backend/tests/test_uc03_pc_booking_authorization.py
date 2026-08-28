@@ -5,9 +5,15 @@ import time
 import httpx
 import pytest
 
+from verigence.di.auth import human_authorization
 from verigence.di.auth.human_authorization import SecurityLiveAuthorizationClient
 
 pytestmark = pytest.mark.no_docker
+
+
+class _JWKSCache:
+    def get_key(self, kid: str) -> str | None:
+        return "test-key" if kid == "kid-1" else None
 
 
 def _client(monkeypatch: pytest.MonkeyPatch, handler) -> SecurityLiveAuthorizationClient:  # type: ignore[no-untyped-def]
@@ -22,6 +28,54 @@ def _client(monkeypatch: pytest.MonkeyPatch, handler) -> SecurityLiveAuthorizati
     client._service_token = "cached-service-token"  # noqa: SLF001
     client._service_token_reuse_until = time.monotonic() + 60  # noqa: SLF001
     return client
+
+
+def test_global_human_token_accepts_device_and_session_identity_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims: dict[str, object] = {
+        "iss": "verigence-security",
+        "aud": "verigence-platform",
+        "sub": "pc-1",
+        "actor_type": "USER",
+        "device_id": "device-1",
+        "session_id": "session-1",
+    }
+    monkeypatch.setattr(human_authorization, "get_jwks_cache", lambda: _JWKSCache())
+    monkeypatch.setattr(
+        human_authorization.jwt,
+        "get_unverified_header",
+        lambda token: {"kid": "kid-1"},
+    )
+    monkeypatch.setattr(human_authorization.jwt, "decode", lambda *args, **kwargs: claims)
+
+    identity = human_authorization.verify_global_human_token("signed-human-token")
+
+    assert identity is not None
+    assert identity.user_id == "pc-1"
+
+
+def test_global_human_token_still_rejects_tenant_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims: dict[str, object] = {
+        "iss": "verigence-security",
+        "aud": "verigence-platform",
+        "sub": "pc-1",
+        "actor_type": "USER",
+        "device_id": "device-1",
+        "session_id": "session-1",
+        "tenant_id": "tenant-1",
+    }
+    monkeypatch.setattr(human_authorization, "get_jwks_cache", lambda: _JWKSCache())
+    monkeypatch.setattr(
+        human_authorization.jwt,
+        "get_unverified_header",
+        lambda token: {"kid": "kid-1"},
+    )
+    monkeypatch.setattr(human_authorization.jwt, "decode", lambda *args, **kwargs: claims)
+
+    assert human_authorization.verify_global_human_token("signed-human-token") is None
 
 
 @pytest.mark.asyncio
