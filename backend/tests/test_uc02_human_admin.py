@@ -50,13 +50,26 @@ def test_security_human_token_accepts_minimal_current_contract(
     assert principal.user_id == claims["sub"]
 
 
+def test_security_human_token_accepts_device_and_session_identity_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = _human_claims()
+    claims["device_id"] = str(uuid4())
+    claims["session_id"] = str(uuid4())
+    _patch_decode(monkeypatch, claims)
+
+    principal = human_admin.verify_security_human_token("signed-human-token")
+
+    assert principal is not None
+    assert principal.user_id == claims["sub"]
+
+
 @pytest.mark.parametrize(
     "claim_name,claim_value",
     [
         ("tenant_id", "tenant-a"),
         ("permissions", ["di:admin"]),
         ("roles", ["SuperAdmin"]),
-        ("device_id", "device-a"),
         ("location_id", "location-a"),
         ("act", {"sub": "delegated"}),
     ],
