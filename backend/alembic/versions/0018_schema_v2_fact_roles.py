@@ -10,6 +10,13 @@ reason historical rows are NOT backfilled or edited: ``extraction_key`` remains
 NULL on them and runtime code must fall back to the canonical field key. All new
 Schema V2 profile fields set ``extraction_key`` explicitly.
 
+Effective role is stamped at persistence time. A profile-field override wins;
+otherwise the document-level default is used. A second trigger copies the exact
+role from the immutable extracted fact to the accepted/current value. This lets
+existing worker inserts remain backward compatible while role propagation is
+introduced safely and gives the sandbox an end-to-end collision test before the
+more complex multi-role-in-one-document extraction-key work begins.
+
 The migration is intentionally idempotent because the Schema V2 sandbox may be
 exercised before the parent environment has been brought through the complete
 existing Alembic chain. Production promotion still happens through normal
@@ -169,6 +176,75 @@ def upgrade() -> None:
         ON docintel.extracted_facts(
             tenant_id, document_id, canonical_field_id, fact_role, created_at_utc DESC
         )
+    """)
+
+    # Derive and freeze the effective role when an immutable extracted fact is
+    # inserted. No published profile child is edited.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION docintel.set_extracted_fact_role()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_override varchar(40);
+            v_default varchar(40);
+        BEGIN
+            SELECT epf.fact_role_override
+              INTO v_override
+              FROM docintel.extraction_profile_fields epf
+             WHERE epf.profile_field_id = NEW.profile_field_id;
+
+            SELECT d.default_fact_role
+              INTO v_default
+              FROM docintel.documents d
+             WHERE d.tenant_id = NEW.tenant_id
+               AND d.document_id = NEW.document_id;
+
+            NEW.fact_role := CASE
+                WHEN COALESCE(v_override, 'UNSPECIFIED') <> 'UNSPECIFIED'
+                    THEN v_override
+                ELSE COALESCE(v_default, 'UNSPECIFIED')
+            END;
+            RETURN NEW;
+        END;
+        $$
+    """)
+    op.execute("DROP TRIGGER IF EXISTS trg_set_extracted_fact_role ON docintel.extracted_facts")
+    op.execute("""
+        CREATE TRIGGER trg_set_extracted_fact_role
+        BEFORE INSERT ON docintel.extracted_facts
+        FOR EACH ROW EXECUTE FUNCTION docintel.set_extracted_fact_role()
+    """)
+
+    # The accepted/current value must carry the exact immutable fact role rather
+    # than re-resolving profile/document configuration at a later point in time.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION docintel.set_document_field_value_role()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_fact_role varchar(40);
+        BEGIN
+            IF NEW.source_extracted_fact_id IS NOT NULL THEN
+                SELECT ef.fact_role
+                  INTO v_fact_role
+                  FROM docintel.extracted_facts ef
+                 WHERE ef.tenant_id = NEW.tenant_id
+                   AND ef.extracted_fact_id = NEW.source_extracted_fact_id;
+                NEW.fact_role := COALESCE(v_fact_role, NEW.fact_role, 'UNSPECIFIED');
+            ELSE
+                NEW.fact_role := COALESCE(NEW.fact_role, 'UNSPECIFIED');
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+    """)
+    op.execute("DROP TRIGGER IF EXISTS trg_set_document_field_value_role ON docintel.document_field_values")
+    op.execute("""
+        CREATE TRIGGER trg_set_document_field_value_role
+        BEFORE INSERT ON docintel.document_field_values
+        FOR EACH ROW EXECUTE FUNCTION docintel.set_document_field_value_role()
     """)
 
 
