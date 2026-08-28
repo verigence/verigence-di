@@ -34,7 +34,7 @@ _ISSUER = "verigence-security"
 _AUDIENCE = "verigence-platform"
 _REQUIRED_HUMAN_CLAIMS = frozenset({"iss", "sub", "aud", "iat", "exp", "jti", "actor_type"})
 _FORBIDDEN_AUTHORITY_CLAIMS = frozenset(
-    {"tenant_id", "permissions", "roles", "device_id", "location_id", "act"}
+    {"tenant_id", "permissions", "roles", "location_id", "act"}
 )
 _LIGHTWEIGHT_MASTER_READS = (
     re.compile(r"^/v1/tenants/[^/]+/project-masters/?$"),
@@ -85,8 +85,9 @@ def verify_security_human_token(token: str) -> HumanPrincipal | None:
     """Validate the current minimal Security human JWT contract.
 
     The human token establishes identity/session only. UC02 deliberately rejects
-    embedded Tenant, role, permission, device/location, or delegation claims as
-    control-plane authority.
+    embedded Tenant, role, permission, location, or delegation claims as
+    control-plane authority. Device identity may be carried as non-authority
+    session evidence and is not used for authorization here.
     """
 
     if not token or token.startswith("mock."):
