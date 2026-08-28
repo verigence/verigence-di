@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.rules.normalizers import NormalizerResult, get_normalizer
+from verigence.di.rules.schema_v2_validators import get_schema_v2_validator
 from verigence.di.rules.validators import ValidatorRuleResult, get_validator
 
 logger = structlog.get_logger(__name__)
@@ -151,7 +152,7 @@ async def normalize_and_validate(
             params: dict[str, Any] = vcfg.get("parameters") or {}
             severity: str = vcfg.get("severity", "ERROR")
 
-            val_fn = get_validator(impl_key)
+            val_fn = get_validator(impl_key) or get_schema_v2_validator(impl_key)
             if val_fn is None:
                 vr = ValidatorRuleResult(
                     rule_key=rule_key,
