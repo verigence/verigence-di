@@ -434,15 +434,19 @@ async def _execute_steps(
         fields_low_confidence=_fields_low,
         duration_ms=_extract_ms,
     )
-    for fr in field_results:
+    for field_result in field_results:
         log.debug(
             "extraction_field_detail",
             document_type_key=accepted_document_type_key,
-            field_key=fr.field_key,
-            raw_value=fr.raw_value,
-            normalized_value=fr.normalized_value,
-            found_status=fr.found_status.value,
-            confidence=str(fr.confidence) if fr.confidence is not None else None,
+            field_key=field_result.field_key,
+            raw_value=field_result.raw_value,
+            normalized_value=field_result.normalized_value,
+            found_status=field_result.found_status.value,
+            confidence=(
+                str(field_result.confidence)
+                if field_result.confidence is not None
+                else None
+            ),
         )
 
     # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
@@ -709,7 +713,10 @@ async def _execute_steps(
 
 # ── DB helper functions ───────────────────────────────────────────────────────
 
-async def _get_tenant_settings(session: AsyncSession, tenant_id: str) -> dict:
+async def _get_tenant_settings(
+    session: AsyncSession,
+    tenant_id: str,
+) -> dict[str, Any]:
     row = (
         await session.execute(
             text("""
@@ -788,8 +795,9 @@ async def _get_requirement_keys(
 
 
 async def _form_candidate_set(
-    session: AsyncSession, tenant_id: str,
-) -> list[dict]:
+    session: AsyncSession,
+    tenant_id: str,
+) -> list[dict[str, Any]]:
     """
     Implements DI_CLASSIFICATION_v2.2.md §2 candidate-set algorithm steps 1-4.
 
@@ -837,15 +845,15 @@ async def _form_candidate_set(
 
 
 def _build_candidate_snapshot(
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     req_keys: set[str],
     hint_key: str | None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Build the JSON snapshot persisted on processing_runs.classification_candidate_set.
     Order per DI_CLASSIFICATION_v2.2 §2 step 9: hint first, then requirement, then rest.
     """
-    snapshot = []
+    snapshot: list[dict[str, Any]] = []
     for c in candidates:
         snapshot.append({
             "documentTypeId": str(c["document_type_id"]),
@@ -864,9 +872,9 @@ def _build_candidate_snapshot(
 
 def _accept_classification(
     classifications: list[ClassificationCandidate],
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     acceptance_score: Decimal,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """
     DI_CLASSIFICATION_v2.2 §2 step 11:
     Accept exactly one candidate above acceptance_score.
@@ -889,7 +897,7 @@ async def _persist_classifications(
     processing_run_id: uuid.UUID,
     document_id: uuid.UUID,
     classifications: list[ClassificationCandidate],
-    accepted: dict,
+    accepted: dict[str, Any],
     profile_id: uuid.UUID,
 ) -> None:
     now = datetime.now(UTC)
@@ -963,7 +971,7 @@ async def _load_original_artifact(
 async def _load_profile_fields(
     session: AsyncSession,
     profile_id: uuid.UUID,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Load enabled profile fields with provider extraction keys and fact roles."""
     rows = (
         await session.execute(
@@ -993,7 +1001,7 @@ async def _load_profile_fields(
     return [dict(r) for r in rows]
 
 
-def _provider_field_key(profile_field: dict) -> str:
+def _provider_field_key(profile_field: dict[str, Any]) -> str:
     """Return the provider-facing key while preserving legacy profiles."""
     extraction_key = profile_field.get("extraction_key")
     if isinstance(extraction_key, str) and extraction_key.strip():
@@ -1001,7 +1009,7 @@ def _provider_field_key(profile_field: dict) -> str:
     return str(profile_field["canonical_field_key"])
 
 
-def _search_index_key(profile_field: dict) -> str:
+def _search_index_key(profile_field: dict[str, Any]) -> str:
     """Use role-qualified keys so role-distinct canonicals never overwrite."""
     canonical_key = str(profile_field["canonical_field_key"])
     role = str(profile_field.get("fact_role_override") or "UNSPECIFIED")
@@ -1036,7 +1044,7 @@ async def _get_physical_form_type(
 
 
 def _build_scored_fields(
-    profile_fields: list[dict],
+    profile_fields: list[dict[str, Any]],
     field_result_map: dict[str, FieldResult],
 ) -> list[ScoredField]:
     scored = []
@@ -1092,7 +1100,7 @@ async def _update_invocation(
     invocation_id: uuid.UUID,
     outcome: str,
     provider_request_id: str | None = None,
-    usage_metrics: dict | None = None,
+    usage_metrics: dict[str, Any] | None = None,
     error_detail: str | None = None,
 ) -> None:
     now = datetime.now(UTC)
