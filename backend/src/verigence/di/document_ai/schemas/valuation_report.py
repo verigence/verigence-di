@@ -2,6 +2,10 @@
 
 This Wave-1 type is intentionally early because it exercises EXCHANGE_VEHICLE
 role isolation against subject/new-vehicle facts in finance evidence.
+
+The source package also proposes ``valuation_platform``.  The frozen plan moves
+that normalized category out of Gemini: DI extracts ``platform_name_as_printed``
+and a versioned deterministic ruleset derives the platform category later.
 """
 from __future__ import annotations
 
@@ -15,8 +19,7 @@ VALUATION_REPORT_SCHEMA = SchemaDefinition(
         FieldSpec("report_number", "string", False, "Valuation report/reference number exactly as printed."),
         FieldSpec("valuation_date", "string", False, "Valuation date; normalize to YYYY-MM-DD when unambiguous.", normalization="date_dd_mm_yyyy"),
         FieldSpec("valuation_valid_until", "string", False, "Valuation/offer validity end date; normalize to YYYY-MM-DD when unambiguous.", normalization="date_dd_mm_yyyy"),
-        FieldSpec("valuation_platform", "string", False, "Normalized platform category only when explicitly identifiable: OEM_TOOL, TRUE_VALUE, FIRST_CHOICE, CARS24, SPINNY, OLX, DEALER_INTERNAL, THIRD_PARTY_VALUER, NOT_STATED."),
-        FieldSpec("platform_name_as_printed", "string", False, "Valuation platform/valuer name exactly as printed."),
+        FieldSpec("platform_name_as_printed", "string", False, "Valuation platform/valuer name exactly as printed. The normalized valuation_platform category is derived deterministically outside the model."),
         FieldSpec("evaluator_name", "string", False, "Evaluator/assessor name exactly as printed."),
         FieldSpec("evaluator_employee_code", "string", False, "Evaluator employee/code identifier exactly as printed."),
         FieldSpec("evaluator_signature_present", "boolean", False, "Three-state observation of evaluator signature presence."),
@@ -66,6 +69,7 @@ VALUATION_REPORT_SCHEMA = SchemaDefinition(
         "condition_parameters, condition_deductions and additions must be JSON arrays with the exact row shapes described for those fields.",
         "Include printed blank condition rows by setting is_blank=true; never silently omit them.",
         "Do not calculate computed_fair_value_stated from other values; extract the printed figure only.",
+        "Do not output valuation_platform; only extract platform_name_as_printed. A deterministic versioned ruleset derives the normalized platform category.",
         "Presence observations are true/false/null and null means unknown/unreadable/ambiguous.",
         "registration_number, chassis_number, make, model and variant belong to the exchange vehicle in the approved Wave-1 profile.",
     ],
