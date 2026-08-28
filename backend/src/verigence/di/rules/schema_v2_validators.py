@@ -6,7 +6,6 @@ runner consults this registry only when the legacy registry has no matching key.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Callable
 
 from verigence.di.rules.validators import ValidatorRuleResult
