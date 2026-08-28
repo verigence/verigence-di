@@ -121,10 +121,10 @@ def _norm_date_iso8601(
     if m:
         d = int(m.group(1))
         mon_str = m.group(2)[:3].lower()
-        mo = _months.get(mon_str)
+        month_number = _months.get(mon_str)
         y = int(m.group(3))
-        if mo:
-            return _make_date_result(y, mo, d, raw)
+        if month_number is not None:
+            return _make_date_result(y, month_number, d, raw)
 
     return NormalizerResult(
         ok=False,
