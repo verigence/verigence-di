@@ -303,14 +303,22 @@ def _run_normalizers(
 ) -> NormalizerResult:
     """Run ordered normalizers in a pipeline.
 
-    Each normalizer's normalized_value (as string) becomes the raw input to the next.
-    If no normalizers are configured, return the raw value unchanged.
-    If any normalizer returns ok=False, the pipeline stops and returns that result.
+    Each normalizer's normalized value is serialized deterministically when it
+    must become the text input of a subsequent normalizer.  The final return
+    value, however, remains the *typed* output produced by the last normalizer.
+    This is important for Schema V2 repeating arrays/objects: JSONB must receive
+    an array/object, not a string representation of one.
+
+    If no normalizers are configured, preserve the existing behaviour and return
+    raw_value_text unchanged.  If any normalizer returns ok=False, the pipeline
+    stops and returns that result.
     """
     if not normalizer_configs:
         return NormalizerResult(ok=True, normalized_value=raw)
 
     current_value: str | None = raw
+    final_result = NormalizerResult(ok=True, normalized_value=raw)
+
     for cfg in normalizer_configs:
         impl_key: str = cfg["implementation_key"]
         params: dict[str, Any] = cfg.get("parameters") or {}
@@ -335,7 +343,15 @@ def _run_normalizers(
         if not result.ok:
             return result
 
-        # Feed the normalized value into the next step, always as a string
-        current_value = None if result.normalized_value is None else str(result.normalized_value)
+        final_result = result
+        value = result.normalized_value
+        if value is None:
+            current_value = None
+        elif isinstance(value, str):
+            current_value = value
+        elif isinstance(value, (dict, list, bool, int, float)):
+            current_value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            current_value = str(value)
 
-    return NormalizerResult(ok=True, normalized_value=current_value)
+    return final_result
