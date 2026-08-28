@@ -1,390 +1,317 @@
-"""tests/test_rules.py — Unit tests for rules/ package (Step 8).
+"""Tests for deterministic normalization and validation rules.
 
-All tests are marked no_docker — pure deterministic rule logic, no DB.
-
-Coverage:
-- normalizers: all 10 built-in rules
-- validators: all 11 built-in rules
-- runner._run_normalizers pipeline
-- REGISTRY completeness
+Tests every built-in rule implementation plus registry completeness.
+No Docker required — all rules are pure functions.
 """
 from __future__ import annotations
 
 import pytest
 
-from verigence.di.rules.normalizers import (
-    NORMALIZER_REGISTRY,
-    get_normalizer,
-)
-from verigence.di.rules.runner import _run_normalizers
-from verigence.di.rules.validators import (
-    VALIDATOR_REGISTRY,
-    get_validator,
-)
+from verigence.di.rules.normalizers import NORMALIZER_REGISTRY, get_normalizer
+from verigence.di.rules.validators import VALIDATOR_REGISTRY, get_validator
 
-# ── Normalizer tests ──────────────────────────────────────────────────────────
 
-class TestNormStripWhitespace:
+# ── Normalizers ───────────────────────────────────────────────────────────────
+
+class TestStripWhitespace:
     @pytest.mark.no_docker
-    def test_strips_leading_trailing(self):
+    def test_collapses_whitespace(self):
         fn = get_normalizer("di.norm.strip_whitespace")
-        r = fn("  hello world  ", {})
+        assert fn is not None
+        r = fn("  hello   world  ", {})
         assert r.ok and r.normalized_value == "hello world"
 
     @pytest.mark.no_docker
-    def test_collapses_internal_spaces(self):
-        fn = get_normalizer("di.norm.strip_whitespace")
-        r = fn("foo   bar\tbaz", {})
-        assert r.ok and r.normalized_value == "foo bar baz"
-
-    @pytest.mark.no_docker
     def test_none_passthrough(self):
         fn = get_normalizer("di.norm.strip_whitespace")
+        assert fn is not None
         r = fn(None, {})
         assert r.ok and r.normalized_value is None
 
 
-class TestNormUppercase:
+class TestUppercase:
     @pytest.mark.no_docker
-    def test_converts_to_upper(self):
+    def test_upper(self):
         fn = get_normalizer("di.norm.uppercase")
-        r = fn(" hello ", {})
-        assert r.ok and r.normalized_value == "HELLO"
+        assert fn("abc def", {}).normalized_value == "ABC DEF"
 
+
+class TestLowercase:
     @pytest.mark.no_docker
-    def test_none_passthrough(self):
-        fn = get_normalizer("di.norm.uppercase")
-        r = fn(None, {})
-        assert r.ok and r.normalized_value is None
-
-
-class TestNormLowercase:
-    @pytest.mark.no_docker
-    def test_converts_to_lower(self):
+    def test_lower(self):
         fn = get_normalizer("di.norm.lowercase")
-        r = fn(" HELLO ", {})
-        assert r.ok and r.normalized_value == "hello"
+        assert fn("ABC DEF", {}).normalized_value == "abc def"
 
 
-class TestNormRemoveNonAlphanumeric:
+class TestRemoveNonAlphanumeric:
     @pytest.mark.no_docker
-    def test_removes_punctuation(self):
+    def test_default(self):
         fn = get_normalizer("di.norm.remove_non_alphanumeric")
-        r = fn("ID: 123-456/abc!", {})
-        assert r.ok and r.normalized_value == "ID123456abc"
+        r = fn("ABC-123 / xyz", {})
+        assert r.normalized_value == "ABC123xyz"
 
     @pytest.mark.no_docker
-    def test_allows_extra_chars(self):
+    def test_allowed_chars(self):
         fn = get_normalizer("di.norm.remove_non_alphanumeric")
-        r = fn("ID: 123-456", {"allowed_chars": "-"})
-        assert r.ok and r.normalized_value == "ID123-456"
+        r = fn("ABC-123 / xyz", {"allowed_chars": "-"})
+        assert r.normalized_value == "ABC-123xyz"
 
 
-class TestNormDateIso8601:
+class TestDateISO8601:
     @pytest.mark.no_docker
-    def test_passthrough_iso(self):
+    @pytest.mark.parametrize("raw,expected", [
+        ("01/02/2024", "2024-02-01"),
+        ("31-12-2023", "2023-12-31"),
+        ("2024-06-15", "2024-06-15"),
+        ("01 Jan 2024", "2024-01-01"),
+        ("1 january 2024", "2024-01-01"),
+    ])
+    def test_indian_dates(self, raw, expected):
         fn = get_normalizer("di.norm.date_iso8601")
-        r = fn("2024-03-15", {})
-        assert r.ok and r.normalized_value == "2024-03-15"
+        r = fn(raw, {})
+        assert r.ok and r.normalized_value == expected
 
     @pytest.mark.no_docker
-    def test_dmy_slash(self):
+    def test_us_date(self):
         fn = get_normalizer("di.norm.date_iso8601")
-        r = fn("15/03/2024", {})
-        assert r.ok and r.normalized_value == "2024-03-15"
+        r = fn("12/31/2023", {"locale": "us"})
+        assert r.ok and r.normalized_value == "2023-12-31"
 
     @pytest.mark.no_docker
-    def test_dmy_dot(self):
-        fn = get_normalizer("di.norm.date_iso8601")
-        r = fn("15.03.2024", {})
-        assert r.ok and r.normalized_value == "2024-03-15"
-
-    @pytest.mark.no_docker
-    def test_named_month(self):
-        fn = get_normalizer("di.norm.date_iso8601")
-        r = fn("01 Jan 2024", {})
-        assert r.ok and r.normalized_value == "2024-01-01"
-
-    @pytest.mark.no_docker
-    def test_invalid_returns_not_ok(self):
+    def test_invalid_date(self):
         fn = get_normalizer("di.norm.date_iso8601")
         r = fn("not-a-date", {})
-        assert not r.ok
+        assert not r.ok and r.normalized_value is None
 
     @pytest.mark.no_docker
-    def test_none_passthrough(self):
+    def test_out_of_range(self):
         fn = get_normalizer("di.norm.date_iso8601")
-        r = fn(None, {})
-        assert r.ok and r.normalized_value is None
+        r = fn("99/99/2024", {})
+        assert not r.ok
 
 
-class TestNormDigitsOnly:
+class TestDigitsOnly:
     @pytest.mark.no_docker
-    def test_strips_non_digits(self):
+    def test_digits(self):
         fn = get_normalizer("di.norm.digits_only")
-        r = fn("(+27) 082-123-4567", {})
-        assert r.ok and r.normalized_value == "27082123456" + "7"
+        r = fn("+91 98765-43210", {})
+        assert r.normalized_value == "919876543210"
 
 
-class TestNormUnicodeNfc:
+class TestUnicodeNFC:
     @pytest.mark.no_docker
-    def test_normalizes(self):
+    def test_nfc(self):
         fn = get_normalizer("di.norm.unicode_nfc")
-        # Compose "café" from decomposed form
-        decomposed = "cafe\u0301"
-        r = fn(decomposed, {})
-        assert r.ok and r.normalized_value == "caf\u00e9"
+        # e + combining acute → precomposed é
+        r = fn("e\u0301", {})
+        assert r.normalized_value == "é"
 
 
-class TestNormTruncate:
+class TestTruncate:
     @pytest.mark.no_docker
-    def test_truncates(self):
+    def test_truncate(self):
         fn = get_normalizer("di.norm.truncate")
-        r = fn("hello world", {"max_length": 5})
-        assert r.ok and r.normalized_value == "hello"
+        r = fn("abcdefgh", {"max_length": 5})
+        assert r.normalized_value == "abcde"
 
+
+class TestRegexExtract:
     @pytest.mark.no_docker
-    def test_short_unchanged(self):
-        fn = get_normalizer("di.norm.truncate")
-        r = fn("hi", {"max_length": 5})
-        assert r.ok and r.normalized_value == "hi"
-
-
-class TestNormRegexExtract:
-    @pytest.mark.no_docker
-    def test_extracts_capture_group(self):
+    def test_capture_group(self):
         fn = get_normalizer("di.norm.regex_extract")
-        r = fn("ID: 8001015009087", {"pattern": r"(\d{13})"})
-        assert r.ok and r.normalized_value == "8001015009087"
+        r = fn("ID: 1234567890123 end", {"pattern": r"(\d{13})"})
+        assert r.ok and r.normalized_value == "1234567890123"
 
     @pytest.mark.no_docker
-    def test_no_match_returns_not_ok(self):
+    def test_no_match(self):
         fn = get_normalizer("di.norm.regex_extract")
-        r = fn("no digits here", {"pattern": r"(\d{13})"})
+        r = fn("no digits", {"pattern": r"(\d+)"})
         assert not r.ok
 
     @pytest.mark.no_docker
-    def test_missing_pattern_param_returns_not_ok(self):
+    def test_missing_pattern(self):
         fn = get_normalizer("di.norm.regex_extract")
-        r = fn("hello", {})
+        r = fn("value", {})
+        assert not r.ok
+
+    @pytest.mark.no_docker
+    def test_invalid_pattern(self):
+        fn = get_normalizer("di.norm.regex_extract")
+        r = fn("value", {"pattern": "[invalid"})
         assert not r.ok
 
 
-class TestNormReplace:
+class TestReplace:
     @pytest.mark.no_docker
-    def test_replaces_literal(self):
+    def test_replace(self):
         fn = get_normalizer("di.norm.replace")
-        r = fn("hello world", {"find": " ", "replacement": "_"})
-        assert r.ok and r.normalized_value == "hello_world"
+        r = fn("hello-world", {"find": "-", "replacement": " "})
+        assert r.normalized_value == "hello world"
 
 
-# ── Normalizer pipeline ───────────────────────────────────────────────────────
+# ── Validators ────────────────────────────────────────────────────────────────
 
-class TestNormPipeline:
+class TestRegexValidator:
     @pytest.mark.no_docker
-    def test_chained_normalizers(self):
-        """strip → uppercase pipeline."""
-        configs = [
-            {"implementation_key": "di.norm.strip_whitespace", "parameters": {}},
-            {"implementation_key": "di.norm.uppercase", "parameters": {}},
-        ]
-        result = _run_normalizers("  hello  ", configs)
-        assert result.ok and result.normalized_value == "HELLO"
-
-    @pytest.mark.no_docker
-    def test_empty_configs_passthrough(self):
-        result = _run_normalizers("hello", [])
-        assert result.ok and result.normalized_value == "hello"
-
-    @pytest.mark.no_docker
-    def test_pipeline_stops_on_fail(self):
-        """date_iso8601 fails → pipeline returns not ok."""
-        configs = [
-            {"implementation_key": "di.norm.date_iso8601", "parameters": {}},
-            {"implementation_key": "di.norm.uppercase", "parameters": {}},
-        ]
-        result = _run_normalizers("not-a-date", configs)
-        assert not result.ok
-
-    @pytest.mark.no_docker
-    def test_none_propagates_through_pipeline(self):
-        configs = [
-            {"implementation_key": "di.norm.strip_whitespace", "parameters": {}},
-            {"implementation_key": "di.norm.uppercase", "parameters": {}},
-        ]
-        result = _run_normalizers(None, configs)
-        assert result.ok and result.normalized_value is None
-
-
-# ── Validator tests ───────────────────────────────────────────────────────────
-
-class TestValRequired:
-    @pytest.mark.no_docker
-    def test_fails_on_none(self):
-        fn = get_validator("di.val.required")
-        r = fn(None, None, {})
-        assert r.result == "FAIL"
-
-    @pytest.mark.no_docker
-    def test_fails_on_empty_string(self):
-        fn = get_validator("di.val.required")
-        r = fn("", None, {})
-        assert r.result == "FAIL"
-
-    @pytest.mark.no_docker
-    def test_passes_on_value(self):
-        fn = get_validator("di.val.required")
-        r = fn("hello", None, {})
-        assert r.result == "PASS"
-
-
-class TestValMinLength:
-    @pytest.mark.no_docker
-    def test_fails_when_too_short(self):
-        fn = get_validator("di.val.min_length")
-        r = fn("hi", None, {"min_length": 5})
-        assert r.result == "FAIL"
-
-    @pytest.mark.no_docker
-    def test_passes_at_minimum(self):
-        fn = get_validator("di.val.min_length")
-        r = fn("hello", None, {"min_length": 5})
-        assert r.result == "PASS"
-
-
-class TestValMaxLength:
-    @pytest.mark.no_docker
-    def test_fails_when_too_long(self):
-        fn = get_validator("di.val.max_length")
-        r = fn("hello world", None, {"max_length": 5})
-        assert r.result == "FAIL"
-
-    @pytest.mark.no_docker
-    def test_passes_within_limit(self):
-        fn = get_validator("di.val.max_length")
-        r = fn("hello", None, {"max_length": 5})
-        assert r.result == "PASS"
-
-
-class TestValRegexMatch:
-    @pytest.mark.no_docker
-    def test_passes_valid_pattern(self):
-        fn = get_validator("di.val.regex_match")
-        r = fn("8001015009087", None, {"pattern": r"\d{13}"})
+    def test_pass(self):
+        fn = get_validator("di.val.regex")
+        r = fn("ABCDE1234F", None, {"pattern": r"^[A-Z]{5}\d{4}[A-Z]$"})
         assert r.result == "PASS"
 
     @pytest.mark.no_docker
-    def test_fails_no_match(self):
-        fn = get_validator("di.val.regex_match")
-        r = fn("abc", None, {"pattern": r"\d{13}"})
+    def test_fail(self):
+        fn = get_validator("di.val.regex")
+        r = fn("BAD", None, {"pattern": r"^[A-Z]{5}\d{4}[A-Z]$"})
         assert r.result == "FAIL"
 
-
-class TestValNumericRange:
     @pytest.mark.no_docker
-    def test_passes_in_range(self):
+    def test_skip_none(self):
+        fn = get_validator("di.val.regex")
+        r = fn(None, None, {"pattern": r".*"})
+        assert r.result == "SKIP"
+
+
+class TestLengthValidator:
+    @pytest.mark.no_docker
+    def test_exact(self):
+        fn = get_validator("di.val.length")
+        assert fn("12345", None, {"exact": 5}).result == "PASS"
+        assert fn("1234", None, {"exact": 5}).result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_range(self):
+        fn = get_validator("di.val.length")
+        assert fn("abc", None, {"min": 2, "max": 5}).result == "PASS"
+        assert fn("a", None, {"min": 2}).result == "FAIL"
+        assert fn("abcdef", None, {"max": 5}).result == "FAIL"
+
+
+class TestNumericRangeValidator:
+    @pytest.mark.no_docker
+    def test_pass(self):
         fn = get_validator("di.val.numeric_range")
-        r = fn("50", None, {"min_value": 0, "max_value": 100})
-        assert r.result == "PASS"
+        assert fn(50, None, {"min": 0, "max": 100}).result == "PASS"
 
     @pytest.mark.no_docker
-    def test_fails_below_min(self):
+    def test_below_min(self):
         fn = get_validator("di.val.numeric_range")
-        r = fn("-1", None, {"min_value": 0})
-        assert r.result == "FAIL"
+        assert fn(-1, None, {"min": 0}).result == "FAIL"
 
     @pytest.mark.no_docker
-    def test_fails_above_max(self):
+    def test_above_max(self):
         fn = get_validator("di.val.numeric_range")
-        r = fn("101", None, {"max_value": 100})
-        assert r.result == "FAIL"
-
-
-class TestValDateNotFuture:
-    @pytest.mark.no_docker
-    def test_fails_future_date(self):
-        fn = get_validator("di.val.date_not_future")
-        r = fn("2099-01-01", None, {})
-        assert r.result == "FAIL"
+        assert fn(101, None, {"max": 100}).result == "FAIL"
 
     @pytest.mark.no_docker
-    def test_passes_past_date(self):
-        fn = get_validator("di.val.date_not_future")
-        r = fn("2000-01-01", None, {})
-        assert r.result == "PASS"
+    def test_not_numeric(self):
+        fn = get_validator("di.val.numeric_range")
+        assert fn("abc", None, {}).result == "ERROR"
 
 
-class TestValDateNotExpired:
+class TestAllowedValuesValidator:
     @pytest.mark.no_docker
-    def test_fails_past_date(self):
-        fn = get_validator("di.val.date_not_expired")
-        r = fn("2000-01-01", None, {})
-        assert r.result == "FAIL"
-
-    @pytest.mark.no_docker
-    def test_passes_future_date(self):
-        fn = get_validator("di.val.date_not_expired")
-        r = fn("2099-12-31", None, {})
-        assert r.result == "PASS"
-
-
-class TestValAllowedValues:
-    @pytest.mark.no_docker
-    def test_passes_valid_value(self):
+    def test_allowed(self):
         fn = get_validator("di.val.allowed_values")
-        r = fn("ZAF", None, {"allowed_values": ["ZAF", "GBR", "USA"]})
+        assert fn("ACTIVE", None, {"allowed": ["ACTIVE", "INACTIVE"]}).result == "PASS"
+
+    @pytest.mark.no_docker
+    def test_disallowed(self):
+        fn = get_validator("di.val.allowed_values")
+        assert fn("UNKNOWN", None, {"allowed": ["ACTIVE"]}).result == "FAIL"
+
+
+class TestRequiredValidator:
+    @pytest.mark.no_docker
+    def test_present(self):
+        fn = get_validator("di.val.required")
+        assert fn("value", None, {}).result == "PASS"
+
+    @pytest.mark.no_docker
+    def test_none(self):
+        fn = get_validator("di.val.required")
+        assert fn(None, None, {}).result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_empty(self):
+        fn = get_validator("di.val.required")
+        assert fn("", None, {}).result == "FAIL"
+
+
+class TestDateRangeValidator:
+    @pytest.mark.no_docker
+    def test_valid(self):
+        fn = get_validator("di.val.date_range")
+        assert fn("2024-01-01", None, {}).result == "PASS"
+
+    @pytest.mark.no_docker
+    def test_invalid(self):
+        fn = get_validator("di.val.date_range")
+        assert fn("2024-13-01", None, {}).result == "FAIL"
+
+
+class TestCrossFieldCompareValidator:
+    @pytest.mark.no_docker
+    def test_equal(self):
+        fn = get_validator("di.val.cross_field_compare")
+        r = fn("ABC", None, {"other_value": "ABC", "operator": "eq"})
         assert r.result == "PASS"
 
     @pytest.mark.no_docker
-    def test_case_insensitive_by_default(self):
-        fn = get_validator("di.val.allowed_values")
-        r = fn("zaf", None, {"allowed_values": ["ZAF"]})
-        assert r.result == "PASS"
-
-    @pytest.mark.no_docker
-    def test_fails_unknown_value(self):
-        fn = get_validator("di.val.allowed_values")
-        r = fn("XYZ", None, {"allowed_values": ["ZAF"]})
+    def test_not_equal(self):
+        fn = get_validator("di.val.cross_field_compare")
+        r = fn("ABC", None, {"other_value": "XYZ", "operator": "eq"})
         assert r.result == "FAIL"
 
 
-class TestValLuhn:
+class TestLuhnValidator:
     @pytest.mark.no_docker
     def test_valid_luhn(self):
         fn = get_validator("di.val.luhn")
-        # Classic test number
-        r = fn("4532015112830366", None, {})
-        assert r.result == "PASS"
+        assert fn("79927398713", None, {}).result == "PASS"
 
     @pytest.mark.no_docker
     def test_invalid_luhn(self):
         fn = get_validator("di.val.luhn")
-        r = fn("1234567890123456", None, {})
-        assert r.result == "FAIL"
+        assert fn("79927398714", None, {}).result == "FAIL"
 
 
-class TestValSaIdNumber:
+class TestEmailValidator:
     @pytest.mark.no_docker
-    def test_valid_sa_id(self):
-        fn = get_validator("di.val.sa_id_number")
-        # Verified SA ID (from public test datasets)
-        r = fn("8001015009087", None, {})
-        assert r.result == "PASS"
+    def test_valid_email(self):
+        fn = get_validator("di.val.email")
+        assert fn("user@example.com", None, {}).result == "PASS"
 
     @pytest.mark.no_docker
-    def test_wrong_length(self):
-        fn = get_validator("di.val.sa_id_number")
-        r = fn("123456789012", None, {})  # 12 digits
-        assert r.result == "FAIL"
+    def test_invalid_email(self):
+        fn = get_validator("di.val.email")
+        assert fn("not-an-email", None, {}).result == "FAIL"
+
+
+class TestPhoneValidator:
+    @pytest.mark.no_docker
+    def test_valid_india(self):
+        fn = get_validator("di.val.phone")
+        assert fn("9876543210", None, {"country": "IN"}).result == "PASS"
 
     @pytest.mark.no_docker
-    def test_bad_checksum(self):
-        fn = get_validator("di.val.sa_id_number")
-        r = fn("8001015009080", None, {})  # last digit changed
-        assert r.result == "FAIL"
+    def test_invalid_india(self):
+        fn = get_validator("di.val.phone")
+        assert fn("12345", None, {"country": "IN"}).result == "FAIL"
 
 
-class TestValIban:
+class TestGSTINValidator:
+    @pytest.mark.no_docker
+    def test_valid_format(self):
+        fn = get_validator("di.val.gstin")
+        assert fn("27AAPFU0939F1ZV", None, {}).result == "PASS"
+
+    @pytest.mark.no_docker
+    def test_invalid_format(self):
+        fn = get_validator("di.val.gstin")
+        assert fn("BADGSTIN", None, {}).result == "FAIL"
+
+
+class TestIBANValidator:
     @pytest.mark.no_docker
     def test_valid_iban(self):
         fn = get_validator("di.val.iban")
@@ -414,7 +341,7 @@ class TestRegistryCompleteness:
 
     @pytest.mark.no_docker
     def test_normalizer_count(self):
-        assert len(NORMALIZER_REGISTRY) == 10
+        assert len(NORMALIZER_REGISTRY) == 12
 
     @pytest.mark.no_docker
     def test_validator_count(self):
