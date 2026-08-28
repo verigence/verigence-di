@@ -1,4 +1,9 @@
-"""Schema V2 extraction schema for vehicle-finance approval/sanction letters."""
+"""Schema V2 extraction schema for vehicle-finance approval/sanction letters.
+
+The frozen Wave-1 mapping treats ``financier_type`` as reference/master-owned:
+Gemini extracts the printed financier name; deterministic/master logic supplies
+the institution category where available.
+"""
 from __future__ import annotations
 
 from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
@@ -9,7 +14,6 @@ BANK_APPROVAL_LETTER_SCHEMA = SchemaDefinition(
     schema_version="2.0",
     fields=[
         FieldSpec("financier_name", "string", False, "Financier name exactly as printed."),
-        FieldSpec("financier_type", "string", False, "Financier category: BANK, NBFC, CAPTIVE_FINANCE, COOPERATIVE, OTHER."),
         FieldSpec("branch", "string", False, "Financier branch exactly as printed."),
         FieldSpec("sanction_letter_number", "string", False, "Sanction/approval letter number exactly as printed."),
         FieldSpec("sanction_date", "string", False, "Sanction date; normalize to YYYY-MM-DD when unambiguous.", normalization="date_dd_mm_yyyy"),
@@ -37,7 +41,13 @@ BANK_APPROVAL_LETTER_SCHEMA = SchemaDefinition(
         FieldSpec("processing_fee", "number", False, "Processing fee stated on the approval."),
         FieldSpec("insurance_funded", "boolean", False, "Three-state observation of whether insurance is explicitly funded by the loan."),
         FieldSpec("subvention_scheme_referenced", "string", False, "Subvention scheme/code referenced, if any."),
-        FieldSpec("subvention_borne_by_stated", "string", False, "Party stated to bear subvention: OEM, DEALER, FINANCIER, SHARED, NOT_STATED."),
+        FieldSpec(
+            "subvention_borne_by_stated",
+            "string",
+            False,
+            "Party explicitly stated to bear subvention.",
+            enum=["OEM", "DEALER", "FINANCIER", "SHARED", "NOT_STATED"],
+        ),
         FieldSpec("subvention_amount", "number", False, "Subvention amount stated, if any."),
         FieldSpec("dealer_payout_amount", "number", False, "Dealer payout amount stated, if any."),
         FieldSpec("disbursement_in_favour_of", "string", False, "Beneficiary in whose favour disbursement is stated."),
@@ -53,6 +63,7 @@ BANK_APPROVAL_LETTER_SCHEMA = SchemaDefinition(
     ),
     prompt_notes=[
         "Do not infer financing terms that are not printed.",
+        "Do not output financier_type. Extract financier_name exactly as printed; institution type is resolved from reference/master data.",
         "conditions_precedent must be a JSON array of strings preserving every visible clause; do not summarize multiple clauses into one item.",
         "signature_present and insurance_funded are true/false/null observations; use null when unclear.",
         "A chassis number in this document refers to the financed subject/new vehicle unless an explicit profile role override says otherwise.",
