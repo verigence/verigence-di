@@ -51,7 +51,7 @@ async def _validate_schema_profile_consistency() -> None:
                 rows = (
                     await session.execute(
                         text("""
-                            SELECT cf.field_key
+                            SELECT COALESCE(epf.extraction_key, cf.field_key) AS extraction_key
                             FROM docintel.extraction_profile_fields epf
                             JOIN docintel.extraction_profiles ep
                               ON ep.profile_id = epf.profile_id
@@ -68,7 +68,7 @@ async def _validate_schema_profile_consistency() -> None:
                 ).mappings().all()
                 if not rows:
                     continue
-                profile_keys = {r["field_key"] for r in rows}
+                profile_keys = {r["extraction_key"] for r in rows}
                 schema_only = sorted(schema_keys - profile_keys)
                 profile_only = sorted(profile_keys - schema_keys)
                 if schema_only or profile_only:
@@ -272,6 +272,7 @@ def create_app() -> FastAPI:
     from verigence.di.api.v1.extraction_profiles import (
         router as extraction_profiles_router,  # noqa: PLC0415
     )
+    from verigence.di.api.v1.field_lineage import router as field_lineage_router  # noqa: PLC0415
     from verigence.di.api.v1.operations import router as operations_router  # noqa: PLC0415
     from verigence.di.api.v1.pc_booking_documents import (  # noqa: PLC0415
         router as pc_booking_documents_router,
@@ -299,6 +300,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(subjects_router)
     app.include_router(documents_router)
+    app.include_router(field_lineage_router)
     app.include_router(audit_storage_contexts_router)
     app.include_router(pc_booking_documents_router)
     app.include_router(admin_provisioning_router)
