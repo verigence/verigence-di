@@ -74,7 +74,7 @@ def verify_global_human_token(token: str) -> HumanIdentity | None:
     if not isinstance(subject, str) or not subject.strip():
         return None
 
-    forbidden = {"tenant_id", "permissions", "roles", "device_id", "location_id", "act"}
+    forbidden = {"tenant_id", "permissions", "roles", "location_id", "act"}
     if forbidden.intersection(claims):
         return None
     return HumanIdentity(user_id=subject.strip())
