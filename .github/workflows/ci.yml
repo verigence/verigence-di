@@ -1,13 +1,17 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [dev, main]
   push:
-    branches: [dev, main]
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
@@ -35,7 +39,6 @@ jobs:
 
       - name: Determine changed Python files
         shell: bash
-        working-directory: .
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
@@ -93,7 +96,7 @@ jobs:
           DI_CLERK_PUBLISHABLE_KEY: "pk_test_mock"
           DI_CLERK_SECRET_KEY: "sk_test_mock"
           DI_CLERK_JWKS_URL: "http://localhost/mock-jwks"
-        run: pytest --tb=short
+        run: pytest -q --maxfail=1 --tb=line
 
   frontend:
     name: Frontend — build check
@@ -136,89 +139,107 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: di-dev
-    env:
-      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
-      RAILWAY_ENVIRONMENT: dev
-      DI_API_SERVICE: di-api
-      DI_WORKER_SERVICE: di-worker
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
+      - uses: actions/checkout@v6
 
-      - name: Validate persisted Security and Audit integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
-            echo '::error::RAILWAY_API_TOKEN is required for DI DEV integration preflight.'
-            exit 1
-          }
-          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
-          railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars.json
-          railway variable list --service "$DI_WORKER_SERVICE" --json >/tmp/di-worker-vars.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
-          api=json.loads(Path('/tmp/di-api-vars.json').read_text())
-          worker=json.loads(Path('/tmp/di-worker-vars.json').read_text())
-          required=[
-              'DI_SECURITY_BASE_URL',
-              'DI_SECURITY_CLIENT_ID',
-              'DI_SECURITY_CLIENT_SECRET',
-              'DI_AUDIT_CORE_BASE_URL',
-          ]
-          for service_name,data in [('di-api',api),('di-worker',worker)]:
-              missing=[key for key in required if not data.get(key)]
-              if missing:
-                  raise SystemExit(f'{service_name} missing live integration configuration: '+','.join(missing))
-          drift=[key for key in required if api.get(key) != worker.get(key)]
-          if drift:
-              raise SystemExit('DI API/worker integration configuration drift: '+','.join(drift))
-          if api['DI_SECURITY_CLIENT_ID'] != 'verigence-di':
-              raise SystemExit('DI must use the dedicated verigence-di Security client identity')
-          print('DI_LIVE_INTEGRATION_CONFIG=PASS')
-          print('DI_LIVE_INTEGRATION_PARITY=PASS')
-          PY
+      - name: Install uv
+        run: pip install uv
 
-      - name: Prove live DI to Security ServiceIntegration
-        shell: bash
-        run: |
-          set -euo pipefail
-          security_base="$(jq -r '.DI_SECURITY_BASE_URL' /tmp/di-api-vars.json)"
-          client_id="$(jq -r '.DI_SECURITY_CLIENT_ID' /tmp/di-api-vars.json)"
-          client_secret="$(jq -r '.DI_SECURITY_CLIENT_SECRET' /tmp/di-api-vars.json)"
-          audit_base="$(jq -r '.DI_AUDIT_CORE_BASE_URL' /tmp/di-api-vars.json)"
-          echo "::add-mask::$client_secret"
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
 
-          curl --fail --silent --show-error "${security_base%/}/health/ready" >/tmp/security-ready.json
-          code="$(curl --silent --show-error --output /tmp/di-security-token.json --write-out '%{http_code}' \
-            --user "$client_id:$client_secret" \
-            --request POST "${security_base%/}/security/v1/service/token" \
-            --data-urlencode 'audience=security')"
-          [ "$code" = "200" ] || {
-            echo "::error::DI live Security service-token request failed HTTP $code."
-            exit 1
-          }
-          jq -e '.accessToken | type == "string" and length > 0' /tmp/di-security-token.json >/dev/null || {
-            echo '::error::DI live Security service-token response has no accessToken.'
-            exit 1
-          }
-          curl --fail --silent --show-error "${audit_base%/}/health" >/tmp/audit-health.json
-          echo 'DI_SECURITY_SERVICE_TOKEN=PASS'
-          echo 'DI_AUDIT_CORE_REACHABILITY=PASS'
+      - name: Run DEV Security integration preflight
+        env:
+          DI_ENVIRONMENT: "dev"
+          DI_SECURITY_BASE_URL: ${{ secrets.DI_SECURITY_BASE_URL_DEV }}
+          DI_SECURITY_SERVICE_TOKEN: ${{ secrets.DI_SECURITY_SERVICE_TOKEN_DEV }}
+          DI_SECURITY_API_KEY: ${{ secrets.DI_SECURITY_API_KEY_DEV }}
+          DI_SECURITY_TIMEOUT_SECONDS: "15"
+        run: python scripts/dev_security_integration_preflight.py
 
   deploy-dev:
     name: Deploy tested DI SHA to Railway DEV
     needs: [backend, frontend, integration-preflight]
     if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/dev' &&
-      needs.backend.result == 'success' &&
-      needs.frontend.result == 'success' &&
-      needs.integration-preflight.result == 'success'
-    uses: ./.github/workflows/deploy-dev.yml
-    secrets: inherit
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        needs.backend.result == 'success' &&
+        needs.frontend.result == 'success' &&
+        needs.integration-preflight.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Validate deploy configuration
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_DI_SERVICE_ID: ${{ secrets.RAILWAY_DI_SERVICE_ID }}
+          RAILWAY_DI_WORKER_SERVICE_ID: ${{ secrets.RAILWAY_DI_WORKER_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+          for name in \
+            RAILWAY_TOKEN \
+            RAILWAY_PROJECT_ID \
+            RAILWAY_ENVIRONMENT_ID \
+            RAILWAY_DI_SERVICE_ID \
+            RAILWAY_DI_WORKER_SERVICE_ID
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required secret: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Deploy API service to Railway DEV
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          SERVICE_ID: ${{ secrets.RAILWAY_DI_SERVICE_ID }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://backboard.railway.com/graphql/v2 \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            --data "$(jq -nc \
+              --arg project "$PROJECT_ID" \
+              --arg environment "$ENVIRONMENT_ID" \
+              --arg service "$SERVICE_ID" \
+              --arg sha "$DEPLOY_SHA" \
+              '{query:"mutation serviceInstanceDeployV2($projectId: String!, $environmentId: String!, $serviceId: String!, $commitSha: String!) { serviceInstanceDeployV2(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, commitSha: $commitSha) }",variables:{projectId:$project,environmentId:$environment,serviceId:$service,commitSha:$sha}}')"
+
+      - name: Deploy worker service to Railway DEV
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          SERVICE_ID: ${{ secrets.RAILWAY_DI_WORKER_SERVICE_ID }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://backboard.railway.com/graphql/v2 \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            --data "$(jq -nc \
+              --arg project "$PROJECT_ID" \
+              --arg environment "$ENVIRONMENT_ID" \
+              --arg service "$SERVICE_ID" \
+              --arg sha "$DEPLOY_SHA" \
+              '{query:"mutation serviceInstanceDeployV2($projectId: String!, $environmentId: String!, $serviceId: String!, $commitSha: String!) { serviceInstanceDeployV2(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, commitSha: $commitSha) }",variables:{projectId:$project,environmentId:$environment,serviceId:$service,commitSha:$sha}}')"
