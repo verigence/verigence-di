@@ -219,6 +219,77 @@ def _norm_replace(
     return NormalizerResult(ok=True, normalized_value=raw.replace(find, replacement))
 
 
+def _parse_literal(raw: str) -> tuple[bool, Any, str | None]:
+    try:
+        return True, json.loads(raw), None
+    except (json.JSONDecodeError, TypeError):
+        try:
+            return True, ast.literal_eval(raw), None
+        except (ValueError, SyntaxError) as exc:
+            return False, None, str(exc)
+
+
+def _norm_scalar_literal_parse(
+    raw: str | None,
+    params: dict[str, Any],
+) -> NormalizerResult:
+    """Parse provider text back into a typed number/integer/boolean scalar.
+
+    Gemini emits valid JSON values, but the current provider-neutral adapter stores
+    ``raw_value_text`` as text.  This rule converts that text back to the expected
+    scalar *without* forgiving currency symbols, percentages, words, or mixed
+    strings.  A model that ignored the requested JSON scalar type therefore causes
+    deterministic normalization failure and review instead of silent coercion.
+    """
+    if raw is None:
+        return NormalizerResult(ok=True, normalized_value=None)
+
+    expected = str(params.get("type", "")).lower()
+    if expected not in {"number", "integer", "boolean"}:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message="scalar_literal_parse requires type=number|integer|boolean",
+        )
+
+    ok, parsed, error = _parse_literal(raw.strip())
+    if not ok:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Cannot parse typed scalar: {error}",
+        )
+
+    if expected == "boolean":
+        if isinstance(parsed, bool):
+            return NormalizerResult(ok=True, normalized_value=parsed)
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected boolean scalar, got {type(parsed).__name__}",
+        )
+
+    if isinstance(parsed, bool) or not isinstance(parsed, (int, float)):
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected numeric scalar, got {type(parsed).__name__}",
+        )
+
+    if expected == "integer":
+        if isinstance(parsed, int):
+            return NormalizerResult(ok=True, normalized_value=parsed)
+        if isinstance(parsed, float) and parsed.is_integer():
+            return NormalizerResult(ok=True, normalized_value=int(parsed))
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected integer scalar, got non-integral value {parsed!r}",
+        )
+
+    return NormalizerResult(ok=True, normalized_value=parsed)
+
+
 def _norm_structured_literal_parse(
     raw: str | None,
     params: dict[str, Any],
@@ -238,18 +309,13 @@ def _norm_structured_literal_parse(
     if raw is None:
         return NormalizerResult(ok=True, normalized_value=None)
 
-    parsed: Any
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        try:
-            parsed = ast.literal_eval(raw)
-        except (ValueError, SyntaxError) as exc:
-            return NormalizerResult(
-                ok=False,
-                normalized_value=None,
-                message=f"Cannot parse structured value: {exc}",
-            )
+    ok, parsed, error = _parse_literal(raw)
+    if not ok:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Cannot parse structured value: {error}",
+        )
 
     container = params.get("container")
     if container == "array" and not isinstance(parsed, list):
@@ -291,6 +357,7 @@ NORMALIZER_REGISTRY: dict[str, NormalizerFn] = {
     "di.norm.truncate":                 _norm_truncate,
     "di.norm.regex_extract":            _norm_regex_extract,
     "di.norm.replace":                  _norm_replace,
+    "di.norm.scalar_literal_parse":     _norm_scalar_literal_parse,
     "di.norm.structured_literal_parse": _norm_structured_literal_parse,
 }
 
