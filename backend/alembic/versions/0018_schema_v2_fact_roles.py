@@ -1,13 +1,18 @@
 """Schema V2 fact-role and profile extraction-key foundation.
 
-Additive foundation for role-safe document extraction.  A canonical field keeps
-one business meaning (for example ``vehicle_registration_number``) while an
+Additive foundation for role-safe document extraction. A canonical field keeps
+one business meaning (for example ``vehicle_registration_number``) while a new
 extraction-profile field may use document-native output wording and an effective
 fact role (for example SUBJECT_VEHICLE vs EXCHANGE_VEHICLE).
 
+Existing published extraction-profile children are immutable by design. For that
+reason historical rows are NOT backfilled or edited: ``extraction_key`` remains
+NULL on them and runtime code must fall back to the canonical field key. All new
+Schema V2 profile fields set ``extraction_key`` explicitly.
+
 The migration is intentionally idempotent because the Schema V2 sandbox may be
 exercised before the parent environment has been brought through the complete
-existing Alembic chain.  Production promotion still happens through normal
+existing Alembic chain. Production promotion still happens through normal
 Alembic ordering after revision 0017.
 
 Revision ID: 0018
@@ -37,7 +42,7 @@ _ALLOWED_ROLES_SQL = """
 
 
 def upgrade() -> None:
-    # Document-level default.  Individual profile fields may override this.
+    # Document-level default. Individual profile fields may override this.
     op.execute("""
         ALTER TABLE docintel.documents
         ADD COLUMN IF NOT EXISTS default_fact_role varchar(40)
@@ -45,8 +50,8 @@ def upgrade() -> None:
     """)
 
     # Separate the provider-facing extraction key from the canonical business
-    # field.  This is required for documents such as a Cost Sheet that can carry
-    # two instances of the same canonical fact in different roles.
+    # field. Existing published profile rows remain NULL here so their immutable
+    # child rows are never mutated. Runtime falls back to cf.field_key.
     op.execute("""
         ALTER TABLE docintel.extraction_profile_fields
         ADD COLUMN IF NOT EXISTS extraction_key varchar(160)
@@ -56,20 +61,9 @@ def upgrade() -> None:
         ADD COLUMN IF NOT EXISTS fact_role_override varchar(40)
             NOT NULL DEFAULT 'UNSPECIFIED'
     """)
-    op.execute("""
-        UPDATE docintel.extraction_profile_fields epf
-        SET extraction_key = cf.field_key
-        FROM docintel.canonical_fields cf
-        WHERE epf.canonical_field_id = cf.canonical_field_id
-          AND epf.extraction_key IS NULL
-    """)
-    op.execute("""
-        ALTER TABLE docintel.extraction_profile_fields
-        ALTER COLUMN extraction_key SET NOT NULL
-    """)
 
     # Persist the effective role on immutable machine facts and accepted/current
-    # values so downstream consumers never need to reconstruct role from today’s
+    # values so downstream consumers never need to reconstruct role from today's
     # profile configuration.
     op.execute("""
         ALTER TABLE docintel.extracted_facts
@@ -82,7 +76,7 @@ def upgrade() -> None:
             NOT NULL DEFAULT 'UNSPECIFIED'
     """)
 
-    # Controlled vocabulary.  Null is never a role; UNKNOWN context is the
+    # Controlled vocabulary. Null is never a role; unknown context is the
     # explicit UNSPECIFIED value so joins and uniqueness remain deterministic.
     op.execute(f"""
         DO $$ BEGIN
@@ -137,9 +131,9 @@ def upgrade() -> None:
         END $$
     """)
 
-    # Existing uniqueness assumed one canonical field per profile.  Schema V2
-    # permits the same canonical fact in two roles, while still requiring every
-    # provider-facing extraction key to be unique inside a profile.
+    # Existing uniqueness assumed one canonical field per profile. Schema V2
+    # permits the same canonical fact in two roles, while every explicit
+    # provider-facing extraction key remains unique inside its profile.
     op.execute("""
         ALTER TABLE docintel.extraction_profile_fields
         DROP CONSTRAINT IF EXISTS extraction_profile_fields_profile_id_canonical_field_id_key
@@ -150,6 +144,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_extraction_profile_field_key
         ON docintel.extraction_profile_fields(profile_id, extraction_key)
+        WHERE extraction_key IS NOT NULL
     """)
     op.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_extraction_profile_canonical_role
@@ -159,7 +154,7 @@ def upgrade() -> None:
     """)
 
     # Current accepted values are unique per document + canonical + effective
-    # role.  This prevents exchange facts from overwriting subject-vehicle facts.
+    # role. This prevents exchange facts from overwriting subject-vehicle facts.
     op.execute("DROP INDEX IF EXISTS docintel.uq_document_current_field_value")
     op.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_document_current_field_value
@@ -178,10 +173,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Downgrade is intentionally conservative.  Role-bearing evidence may have
-    # been created after upgrade; collapsing it back to a role-less uniqueness
-    # model could silently merge subject and exchange facts.  A rollback must be
-    # performed by restoring the pre-Schema-V2 database branch/snapshot.
+    # Role-bearing evidence cannot safely be collapsed to a role-less uniqueness
+    # model. Rollback is by restoring the pre-Schema-V2 Neon branch/snapshot.
     raise RuntimeError(
         "0018 is safety-nonreversible in place; restore the pre-schema-v2 Neon branch"
     )
