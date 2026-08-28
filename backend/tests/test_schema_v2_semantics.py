@@ -10,6 +10,11 @@ from verigence.di.document_ai.schemas import get_schema
 pytestmark = pytest.mark.no_docker
 
 _MAPPING = Path(__file__).resolve().parents[2] / "docs" / "schema-v2" / "WAVE1_SEMANTIC_MAPPING_v0.1.md"
+_PACKAGED_MAPPING = (
+    Path(__file__).resolve().parents[1]
+    / "schema-v2-assets"
+    / "WAVE1_SEMANTIC_MAPPING_v0.1.md"
+)
 
 
 def _rows(section: str) -> list[tuple[str, str, str, str, str]]:
@@ -31,6 +36,10 @@ def _rows(section: str) -> list[tuple[str, str, str, str, str]]:
             )
         )
     return result
+
+
+def test_deployed_wave1_mapping_asset_matches_frozen_design() -> None:
+    assert _PACKAGED_MAPPING.read_bytes() == _MAPPING.read_bytes()
 
 
 def test_wave1_frozen_mapping_has_expected_extraction_population() -> None:
