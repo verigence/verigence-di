@@ -15,15 +15,19 @@ from __future__ import annotations
 
 from verigence.di.document_ai.schemas._fallback import FALLBACK_SCHEMA
 from verigence.di.document_ai.schemas.aadhaar import AADHAAR_SCHEMA
+from verigence.di.document_ai.schemas.bank_approval_letter import BANK_APPROVAL_LETTER_SCHEMA
 from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEMA
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
+from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
+from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
+from verigence.di.document_ai.schemas.valuation_report import VALUATION_REPORT_SCHEMA
 
 __all__ = [
     "SCHEMA_REGISTRY",
@@ -43,6 +47,12 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "insurance_cover":        INSURANCE_COVER_SCHEMA,
     "pan_card":               PAN_CARD_SCHEMA,
     "aadhaar":                AADHAAR_SCHEMA,
+    # Schema V2 Wave 1. The DB migration/profile publication is deliberately
+    # separate so registry code can be reviewed and tested before activation.
+    "gst_certificate":        GST_CERTIFICATE_SCHEMA,
+    "corporate_id":           CORPORATE_ID_SCHEMA,
+    "bank_approval_letter":   BANK_APPROVAL_LETTER_SCHEMA,
+    "valuation_report":       VALUATION_REPORT_SCHEMA,
 }
 
 
