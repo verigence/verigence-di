@@ -17,7 +17,7 @@ jobs:
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
-      SERVICE: di-api
+      SERVICE: verigence-audit-core
       SANDBOX_HOST: ep-royal-pond-ayci3m0f-pooler.c-5.us-east-2.aws.neon.tech
     steps:
       - uses: actions/checkout@v6
@@ -42,20 +42,20 @@ jobs:
         run: |
           set -euo pipefail
           railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/dev/null
-          railway variable list --service "$SERVICE" --environment dev --json >/tmp/di-vars.json
+          railway variable list --service "$SERVICE" --environment dev --json >/tmp/audit-vars.json
           python - <<'PY'
           import json, os
           from pathlib import Path
           from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
-          values=json.loads(Path('/tmp/di-vars.json').read_text())
-          raw=str(values.get('DI_DATABASE_URL') or '').strip()
+          values=json.loads(Path('/tmp/audit-vars.json').read_text())
+          raw=str(values.get('DATABASE_URL') or '').strip()
           if not raw:
-              raise SystemExit('DI_DATABASE_URL is unavailable from Railway DEV')
+              raise SystemExit('Audit Core DATABASE_URL is unavailable from Railway DEV')
           raw=raw.replace('postgresql+asyncpg://','postgresql://',1).replace('postgres+asyncpg://','postgresql://',1)
           parts=urlsplit(raw)
           if not parts.username:
-              raise SystemExit('DI_DATABASE_URL has no database role')
+              raise SystemExit('Audit Core DATABASE_URL has no database role')
           auth=parts.username
           if parts.password is not None:
               auth += ':' + parts.password
@@ -66,6 +66,7 @@ jobs:
           sandbox=urlunsplit(('postgresql',netloc,parts.path or '/neondb',urlencode(query),''))
           Path('/tmp/sandbox-url').write_text(sandbox)
           print('SANDBOX_CONNECTION=RESOLVED')
+          print('SANDBOX_DB_ROLE='+parts.username)
           print('SANDBOX_HOST='+os.environ['SANDBOX_HOST'])
           PY
           echo "::add-mask::$(cat /tmp/sandbox-url)"
@@ -89,8 +90,6 @@ jobs:
         if: steps.baseline.outputs.version == '0017' && steps.baseline.outputs.extraction_key == 'NO'
         working-directory: backend
         shell: bash
-        env:
-          DI_DATABASE_URL: placeholder
         run: |
           set -euo pipefail
           export DI_DATABASE_URL="$(cat /tmp/sandbox-url)"
@@ -183,10 +182,10 @@ jobs:
 
               SELECT count(*) INTO v_bad
               FROM (VALUES
-                  ('schema_v2.structured_literal_parse','N'),
-                  ('schema_v2.scalar_literal_parse','N'),
-                  ('schema_v2.date_iso8601','N')
-              ) x(rule_key,kind)
+                  ('schema_v2.structured_literal_parse'),
+                  ('schema_v2.scalar_literal_parse'),
+                  ('schema_v2.date_iso8601')
+              ) x(rule_key)
               WHERE NOT EXISTS (
                   SELECT 1 FROM docintel.normalization_rule_catalog n
                   WHERE n.rule_key=x.rule_key AND n.status='ACTIVE'
