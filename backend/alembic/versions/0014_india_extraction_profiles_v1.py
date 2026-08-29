@@ -150,7 +150,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("delivery_order_number", "Delivery Order Number", "IDENTIFIER", False, False, 0.0, 20, "Extract delivery order/DO number only when visible.", ["do no", "delivery order no"]),
             ("delivery_date", "Delivery Date", "DATE", False, False, 0.0, 30, "Extract delivery/handover date only when visible.", ["delivery date", "handover date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 40, "Extract customer receiving the vehicle exactly as printed.", ["customer", "name"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"]),
             ("vehicle_model", "Vehicle Model", "STRING", False, False, 0.0, 60, "Extract vehicle model exactly as printed.", ["model"]),
             ("vehicle_variant", "Vehicle Variant", "STRING", False, False, 0.0, 70, "Extract vehicle variant/trim only when printed.", ["variant", "trim"]),
             ("vehicle_color", "Vehicle Color", "STRING", False, False, 0.0, 80, "Extract vehicle colour only when printed.", ["color", "colour"]),
