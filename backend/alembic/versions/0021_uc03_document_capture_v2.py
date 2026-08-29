@@ -71,7 +71,21 @@ def upgrade() -> None:
             (tenant_id, external_context_ref, phase, state, created_at_utc)
         """
     )
+    op.execute(
+        "ALTER TABLE docintel.document_capture_v2_uploads ENABLE ROW LEVEL SECURITY"
+    )
+    op.execute(
+        """
+        CREATE POLICY document_capture_v2_uploads_tenant_isolation
+        ON docintel.document_capture_v2_uploads
+        USING (tenant_id = docintel.current_tenant_id())
+        WITH CHECK (tenant_id = docintel.current_tenant_id())
+        """
+    )
 
+    # This is a global worker queue, deliberately matching the existing
+    # processing_jobs pattern. The worker learns tenant_id when it claims a row,
+    # therefore tenant RLS must not hide rows before claim.
     op.execute(
         """
         CREATE TABLE docintel.document_capture_v2_classification_jobs (
@@ -107,20 +121,6 @@ def upgrade() -> None:
         WHERE job_status='PENDING'
         """
     )
-
-    for table in (
-        "document_capture_v2_uploads",
-        "document_capture_v2_classification_jobs",
-    ):
-        op.execute(f"ALTER TABLE docintel.{table} ENABLE ROW LEVEL SECURITY")
-        op.execute(
-            f"""
-            CREATE POLICY {table}_tenant_isolation
-            ON docintel.{table}
-            USING (tenant_id = docintel.current_tenant_id())
-            WITH CHECK (tenant_id = docintel.current_tenant_id())
-            """
-        )
 
 
 def downgrade() -> None:
