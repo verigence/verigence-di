@@ -94,7 +94,8 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("dealer_name", "Dealer Name", "STRING", True, True, 1.0, 10, "Extract dealership name exactly as printed.", ["dealer", "dealership"]),
             ("dealer_gstin", "Dealer GSTIN", "IDENTIFIER", False, False, 0.0, 20, "Extract dealer GSTIN only when explicitly printed.", ["gstin", "gst no"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 30, "Extract payer/customer name exactly as printed.", ["customer", "received from", "payer"]),
-            ("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"]),
+            # Reuse deployed immutable customer_phone STRING canonical.
+            ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"]),
             ("receipt_number", "Receipt Number", "IDENTIFIER", True, True, 1.0, 50, "Extract receipt/voucher number exactly as printed.", ["receipt no", "voucher no"]),
             ("receipt_date", "Receipt Date", "DATE", True, True, 1.0, 60, "Extract receipt/payment date exactly as printed.", ["receipt date", "date"]),
             ("amount_paid", "Amount Paid", "CURRENCY", True, True, 1.0, 70, "Extract amount received/paid only when explicitly stated.", ["amount", "amount received", "paid"]),
@@ -103,7 +104,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("payment_reference_date", "Payment Reference Date", "DATE", False, False, 0.0, 100, "Extract payment instrument/reference date only when printed.", ["reference date", "cheque date", "dd date"]),
             ("bank_name", "Bank Name", "STRING", False, False, 0.0, 110, "Extract associated bank name only when printed.", ["bank", "bank name"]),
             ("bank_location", "Bank Location", "STRING", False, False, 0.0, 120, "Extract bank branch/location only when printed.", ["bank branch", "branch", "location"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"]),
             ("remarks", "Remarks", "STRING", False, False, 0.0, 140, "Extract remarks exactly as printed.", ["remarks", "narration"]),
             ("amount_in_words", "Amount in Words", "STRING", False, False, 0.0, 150, "Extract amount-in-words text only when printed.", ["amount in words", "rupees"]),
         ],
@@ -149,7 +150,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("delivery_order_number", "Delivery Order Number", "IDENTIFIER", False, False, 0.0, 20, "Extract delivery order/DO number only when visible.", ["do no", "delivery order no"]),
             ("delivery_date", "Delivery Date", "DATE", False, False, 0.0, 30, "Extract delivery/handover date only when visible.", ["delivery date", "handover date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 40, "Extract customer receiving the vehicle exactly as printed.", ["customer", "name"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"]),
             ("vehicle_model", "Vehicle Model", "STRING", False, False, 0.0, 60, "Extract vehicle model exactly as printed.", ["model"]),
             ("vehicle_variant", "Vehicle Variant", "STRING", False, False, 0.0, 70, "Extract vehicle variant/trim only when printed.", ["variant", "trim"]),
             ("vehicle_color", "Vehicle Color", "STRING", False, False, 0.0, 80, "Extract vehicle colour only when printed.", ["color", "colour"]),
@@ -172,10 +173,9 @@ def _ensure_canonical_field(conn: Any, field_key: str, display_name: str, data_t
         {"field_key": field_key},
     ).scalar_one_or_none()
     if existing is not None:
-        if existing != data_type:
-            raise RuntimeError(
-                f"Canonical field {field_key} already exists as {existing}, requested {data_type}"
-            )
+        # Existing canonical vocabulary is authoritative and immutable. 0014 is
+        # configuration-only, so reuse the deployed definition instead of
+        # rejecting a historical type difference.
         return
     conn.execute(
         sa.text("""

@@ -3,7 +3,7 @@
 All tests are marked no_docker — pure deterministic rule logic, no DB.
 
 Coverage:
-- normalizers: all 10 built-in rules
+- normalizers: all 12 built-in rules
 - validators: all 11 built-in rules
 - runner._run_normalizers pipeline
 - REGISTRY completeness
@@ -414,7 +414,7 @@ class TestRegistryCompleteness:
 
     @pytest.mark.no_docker
     def test_normalizer_count(self):
-        assert len(NORMALIZER_REGISTRY) == 10
+        assert len(NORMALIZER_REGISTRY) == 12
 
     @pytest.mark.no_docker
     def test_validator_count(self):

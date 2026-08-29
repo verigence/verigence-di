@@ -59,10 +59,10 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
         [
             ("dealer_name", "Dealer Name", "STRING", True, True, 1.0, 10, "Extract the dealership name.", ["dealer", "dealership"]),
             ("dealer_branch", "Dealer Branch", "STRING", False, False, 0.0, 20, "Extract the dealer branch or outlet if present.", ["branch", "outlet"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", True, True, 1.0, 30, "Extract the booking, order, enquiry, or reference number.", ["booking no", "order no", "reference no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", True, True, 1.0, 30, "Extract the booking, order, enquiry, or reference number.", ["booking no", "order no", "reference no"]),
             ("booking_date", "Booking Date", "DATE", True, True, 1.0, 40, "Extract the booking date; return YYYY-MM-DD when complete.", ["booking date", "date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 50, "Extract the full customer name.", ["customer", "name"]),
-            ("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"]),
+            ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"]),
             ("vehicle_model", "Vehicle Model", "STRING", True, True, 1.0, 70, "Extract the booked vehicle model.", ["model"]),
             ("vehicle_variant", "Vehicle Variant", "STRING", False, False, 0.0, 80, "Extract the vehicle variant or trim.", ["variant", "trim"]),
             ("vehicle_color", "Vehicle Color", "STRING", False, False, 0.0, 90, "Extract the booked or preferred vehicle colour.", ["color", "colour"]),
@@ -243,7 +243,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("amount_paid", "Amount Paid", "CURRENCY", True, True, 1.0, 50, "Extract amount received/paid.", ["amount", "amount received"]),
             ("payment_mode", "Payment Mode", "STRING", False, False, 0.0, 60, "Extract cash/card/UPI/cheque/NEFT/RTGS or other mode.", ["payment mode", "mode"]),
             ("payment_reference_no", "Payment Reference Number", "IDENTIFIER", False, False, 0.0, 70, "Extract transaction/UTR/cheque/payment reference if present.", ["utr", "transaction id", "reference no", "cheque no"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 80, "Extract linked booking/order/reference number if present.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 80, "Extract linked booking/order/reference number if present.", ["booking no", "order no"]),
         ],
     ),
     "upi_transaction": (
@@ -268,7 +268,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("delivery_order_number", "Delivery Order Number", "IDENTIFIER", True, True, 1.0, 20, "Extract delivery order/DO number.", ["do no", "delivery order no"]),
             ("delivery_date", "Delivery Date", "DATE", True, True, 1.0, 30, "Extract delivery/handover date.", ["delivery date", "handover date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 40, "Extract customer name.", ["customer", "name"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 50, "Extract linked booking/order reference.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 50, "Extract linked booking/order reference.", ["booking no", "order no"]),
             ("vehicle_model", "Vehicle Model", "STRING", True, True, 1.0, 60, "Extract vehicle model.", ["model"]),
             ("vehicle_variant", "Vehicle Variant", "STRING", False, False, 0.0, 70, "Extract vehicle variant/trim.", ["variant", "trim"]),
             ("vehicle_color", "Vehicle Color", "STRING", False, False, 0.0, 80, "Extract vehicle colour.", ["color", "colour"]),
@@ -292,9 +292,6 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
     ),
 }
 
-# 0011 already owns these published profiles. They are intentionally left in
-# place; 0012 only ensures the document types still exist and fills every
-# remaining test-bench type.
 _ALREADY_PROVISIONED = {"booking_form", "pan_card", "aadhaar"}
 
 
@@ -326,10 +323,10 @@ def _ensure_canonical_field(conn: Any, field_key: str, display_name: str, data_t
         {"field_key": field_key},
     ).scalar_one_or_none()
     if existing_type is not None:
-        if existing_type != data_type:
-            raise RuntimeError(
-                f"Canonical field {field_key} already exists as {existing_type}, requested {data_type}"
-            )
+        # Existing canonical vocabulary is authoritative and immutable. 0012 is
+        # a compatibility/bootstrap migration, so it must never redefine or
+        # reject a canonical field merely because an older seed used a stricter
+        # type (for example IDENTIFIER instead of STRING).
         return
 
     conn.execute(

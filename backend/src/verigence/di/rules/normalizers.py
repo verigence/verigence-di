@@ -11,6 +11,8 @@ Contract (DI_LLD_v2.2 §Processing Worker step 11):
 """
 from __future__ import annotations
 
+import ast
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -119,10 +121,10 @@ def _norm_date_iso8601(
     if m:
         d = int(m.group(1))
         mon_str = m.group(2)[:3].lower()
-        mo = _months.get(mon_str)
+        month_number = _months.get(mon_str)
         y = int(m.group(3))
-        if mo:
-            return _make_date_result(y, mo, d, raw)
+        if month_number is not None:
+            return _make_date_result(y, month_number, d, raw)
 
     return NormalizerResult(
         ok=False,
@@ -217,6 +219,130 @@ def _norm_replace(
     return NormalizerResult(ok=True, normalized_value=raw.replace(find, replacement))
 
 
+def _parse_literal(raw: str) -> tuple[bool, Any, str | None]:
+    try:
+        return True, json.loads(raw), None
+    except (json.JSONDecodeError, TypeError):
+        try:
+            return True, ast.literal_eval(raw), None
+        except (ValueError, SyntaxError) as exc:
+            return False, None, str(exc)
+
+
+def _norm_scalar_literal_parse(
+    raw: str | None,
+    params: dict[str, Any],
+) -> NormalizerResult:
+    """Parse provider text back into a typed number/integer/boolean scalar.
+
+    Gemini emits valid JSON values, but the current provider-neutral adapter stores
+    ``raw_value_text`` as text.  This rule converts that text back to the expected
+    scalar *without* forgiving currency symbols, percentages, words, or mixed
+    strings.  A model that ignored the requested JSON scalar type therefore causes
+    deterministic normalization failure and review instead of silent coercion.
+    """
+    if raw is None:
+        return NormalizerResult(ok=True, normalized_value=None)
+
+    expected = str(params.get("type", "")).lower()
+    if expected not in {"number", "integer", "boolean"}:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message="scalar_literal_parse requires type=number|integer|boolean",
+        )
+
+    ok, parsed, error = _parse_literal(raw.strip())
+    if not ok:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Cannot parse typed scalar: {error}",
+        )
+
+    if expected == "boolean":
+        if isinstance(parsed, bool):
+            return NormalizerResult(ok=True, normalized_value=parsed)
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected boolean scalar, got {type(parsed).__name__}",
+        )
+
+    if isinstance(parsed, bool) or not isinstance(parsed, (int, float)):
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected numeric scalar, got {type(parsed).__name__}",
+        )
+
+    if expected == "integer":
+        if isinstance(parsed, int):
+            return NormalizerResult(ok=True, normalized_value=parsed)
+        if isinstance(parsed, float) and parsed.is_integer():
+            return NormalizerResult(ok=True, normalized_value=int(parsed))
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected integer scalar, got non-integral value {parsed!r}",
+        )
+
+    return NormalizerResult(ok=True, normalized_value=parsed)
+
+
+def _norm_structured_literal_parse(
+    raw: str | None,
+    params: dict[str, Any],
+) -> NormalizerResult:
+    """Parse an extracted JSON/collection literal into a real JSON value.
+
+    Existing provider-neutral FieldResult stores ``raw_value_text`` as text.  Gemini
+    currently stringifies array/object values before they reach the rules layer;
+    Python's representation is therefore possible for older adapter output.  This
+    normalizer accepts strict JSON first and falls back to ``ast.literal_eval`` for
+    that backwards-compatible representation.  The result must be JSON-serialisable
+    and, when ``container`` is supplied, must match the requested top-level shape.
+
+    This rule only parses.  Typed row validation is performed by a separate
+    deterministic validator so malformed rows are visible as review conditions.
+    """
+    if raw is None:
+        return NormalizerResult(ok=True, normalized_value=None)
+
+    ok, parsed, error = _parse_literal(raw)
+    if not ok:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Cannot parse structured value: {error}",
+        )
+
+    container = params.get("container")
+    if container == "array" and not isinstance(parsed, list):
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected structured array, got {type(parsed).__name__}",
+        )
+    if container == "object" and not isinstance(parsed, dict):
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Expected structured object, got {type(parsed).__name__}",
+        )
+
+    try:
+        json.dumps(parsed)
+    except (TypeError, ValueError) as exc:
+        return NormalizerResult(
+            ok=False,
+            normalized_value=None,
+            message=f"Structured value is not JSON-serialisable: {exc}",
+        )
+
+    return NormalizerResult(ok=True, normalized_value=parsed)
+
+
 # ── Public registry: implementation_key → function ───────────────────────────
 # Keys must match normalization_rule_catalog.implementation_key in the DB.
 
@@ -231,6 +357,8 @@ NORMALIZER_REGISTRY: dict[str, NormalizerFn] = {
     "di.norm.truncate":                 _norm_truncate,
     "di.norm.regex_extract":            _norm_regex_extract,
     "di.norm.replace":                  _norm_replace,
+    "di.norm.scalar_literal_parse":     _norm_scalar_literal_parse,
+    "di.norm.structured_literal_parse": _norm_structured_literal_parse,
 }
 
 

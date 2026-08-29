@@ -20,6 +20,12 @@ Implements DI_LLD_v2.2 §Processing Worker, one full processing run per claimed 
   Step 16 — derive Human Verification Status
   Step 17 — set PROCESSED + CONFIRMED
 
+Schema V2 adds provider-facing ``extraction_key`` support and role-safe handling
+without replacing this pipeline.  The canonical field remains the stored business
+vocabulary; the extraction key is only the provider contract key.  Deterministic
+normalization/validation failures force human review rather than being silently
+ignored.
+
 All DB mutations go through the session passed in. Caller (processor.py) owns the
 session lifecycle and calls commit / rollback / fail_job on error.
 """
@@ -43,16 +49,14 @@ from verigence.di.document_ai.adapter import (
     ExtractionField,
     FieldResult,
 )
-from verigence.di.domain.enums import (
-    FoundStatus,
-)
+from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
 from verigence.di.repositories.search_index import upsert_search_index
 from verigence.di.rules.runner import ExtractedFieldInput, normalize_and_validate
 
 logger = structlog.get_logger(__name__)
 
-PIPELINE_VERSION = "2.2.0"
+PIPELINE_VERSION = "2.2.0-schema-v2"
 
 
 # ── Domain exceptions ─────────────────────────────────────────────────────────
@@ -366,7 +370,7 @@ async def _execute_steps(
 
     extract_fields = [
         ExtractionField(
-            field_key=pf["canonical_field_key"],
+            field_key=_provider_field_key(pf),
             aliases=pf.get("aliases") or [],
             instruction=pf.get("extraction_instruction"),
         )
@@ -417,10 +421,10 @@ async def _execute_steps(
 
     field_results: list[FieldResult] = extract_result.results  # type: ignore[assignment]
     _extract_ms = round((time.monotonic() - _extract_start) * 1000, 1)
-    _fields_found  = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
-    _fields_null   = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
-    _fields_low    = sum(1 for fr in field_results
-                        if fr.confidence is not None and fr.confidence <= Decimal("40.00"))
+    _fields_found = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
+    _fields_null = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
+    _fields_low = sum(1 for fr in field_results
+                      if fr.confidence is not None and fr.confidence <= Decimal("40.00"))
     log.info(
         "extraction_result",
         document_type_key=accepted_document_type_key,
@@ -430,30 +434,35 @@ async def _execute_steps(
         fields_low_confidence=_fields_low,
         duration_ms=_extract_ms,
     )
-    for fr in field_results:
+    for field_result in field_results:
         log.debug(
             "extraction_field_detail",
             document_type_key=accepted_document_type_key,
-            field_key=fr.field_key,
-            raw_value=fr.raw_value,
-            normalized_value=fr.normalized_value,
-            found_status=fr.found_status.value,
-            confidence=str(fr.confidence) if fr.confidence is not None else None,
+            field_key=field_result.field_key,
+            raw_value=field_result.raw_value,
+            normalized_value=field_result.normalized_value,
+            found_status=field_result.found_status.value,
+            confidence=(
+                str(field_result.confidence)
+                if field_result.confidence is not None
+                else None
+            ),
         )
 
     # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
-    # First persist the raw extracted_facts, then normalize them
+    # First persist the raw extracted_facts, then normalize them.
+    # Result lookup is provider-key based; persistence is canonical-field based.
     field_result_map: dict[str, FieldResult] = {fr.field_key: fr for fr in field_results}
-    profile_field_map: dict[str, dict] = {pf["canonical_field_key"]: pf for pf in profile_fields}
 
     extracted_inputs: list[ExtractedFieldInput] = []
-    fact_id_map: dict[str, uuid.UUID] = {}  # field_key → extracted_fact_id
+    fact_id_map: dict[uuid.UUID, uuid.UUID] = {}  # profile_field_id → extracted_fact_id
 
     for pf in profile_fields:
-        fkey = pf["canonical_field_key"]
-        fr = field_result_map.get(fkey)
+        provider_key = _provider_field_key(pf)
+        fr = field_result_map.get(provider_key)
+        profile_field_id = uuid.UUID(str(pf["profile_field_id"]))
         fact_id = uuid.uuid4()
-        fact_id_map[fkey] = fact_id
+        fact_id_map[profile_field_id] = fact_id
 
         found_status = fr.found_status.value if fr else FoundStatus.NOT_FOUND.value
         raw_value = fr.raw_value if fr else None
@@ -477,7 +486,7 @@ async def _execute_steps(
                 "fact_id": fact_id,
                 "run_id": processing_run_id,
                 "doc_id": document_id,
-                "pf_id": pf["profile_field_id"],
+                "pf_id": profile_field_id,
                 "cf_id": pf["canonical_field_id"],
                 "found_status": found_status,
                 "raw_value": raw_value,
@@ -491,7 +500,7 @@ async def _execute_steps(
 
         extracted_inputs.append(ExtractedFieldInput(
             extracted_fact_id=fact_id,
-            profile_field_id=uuid.UUID(str(pf["profile_field_id"])),
+            profile_field_id=profile_field_id,
             canonical_field_id=uuid.UUID(str(pf["canonical_field_id"])),
             raw_value_text=raw_value,
             found_status=found_status,
@@ -514,10 +523,11 @@ async def _execute_steps(
     norm_map = {n.extracted_fact_id: n for n in runner_output.normalized}
 
     for pf in profile_fields:
-        fkey = pf["canonical_field_key"]
-        fact_id = fact_id_map[fkey]
+        provider_key = _provider_field_key(pf)
+        profile_field_id = uuid.UUID(str(pf["profile_field_id"]))
+        fact_id = fact_id_map[profile_field_id]
         norm = norm_map.get(fact_id)
-        fr = field_result_map.get(fkey)
+        fr = field_result_map.get(provider_key)
 
         norm_value = norm.normalized_value if norm else (fr.normalized_value if fr else None)
         conf_score = float(fr.confidence) if fr and fr.confidence is not None else None
@@ -550,18 +560,19 @@ async def _execute_steps(
         )
 
     # ── Steps 11+12: Log normalization + validation summaries ────────────────
-    _norm_errors = [n for n in runner_output.normalized if getattr(n, "error", None)]
-    _val_failed  = [v for v in runner_output.validated if not getattr(v, "passed", True)]
+    _norm_errors = [n for n in runner_output.normalized if not n.normalization_ok]
+    _val_failed = [v for v in runner_output.validated if v.has_error_fail]
     log.info(
         "normalization_summary",
         fields_normalized=len(runner_output.normalized),
         normalization_errors=len(_norm_errors),
+        failed_fact_ids=[str(n.extracted_fact_id) for n in _norm_errors],
     )
     log.info(
         "validation_summary",
         fields_valid=len(runner_output.validated) - len(_val_failed),
         fields_failed=len(_val_failed),
-        failed_field_keys=[getattr(v, "field_key", "?") for v in _val_failed],
+        failed_fact_ids=[str(v.extracted_fact_id) for v in _val_failed],
     )
 
     # ── Steps 14–16: Score + verify ───────────────────────────────────────────
@@ -585,6 +596,9 @@ async def _execute_steps(
 
     confidence_score = conf_result.confidence_score
     hvs = conf_result.human_verification_status
+    deterministic_rules_force_review = bool(_norm_errors or _val_failed)
+    if deterministic_rules_force_review:
+        hvs = HumanVerificationStatus.MANDATORY
 
     _required_present = sum(1 for sf in scored_fields if sf.expected and sf.found_status == FoundStatus.FOUND)
     _required_missing = sum(1 for sf in scored_fields if sf.expected and sf.found_status != FoundStatus.FOUND)
@@ -602,7 +616,14 @@ async def _execute_steps(
         confidence_score=str(confidence_score),
         threshold=str(effective_threshold),
         human_verification_status=hvs.value,
-        reason="AUTO_CONFIRMED" if hvs.value == "NOT_REQUIRED" else "NEEDS_REVIEW",
+        deterministic_rules_force_review=deterministic_rules_force_review,
+        normalization_error_count=len(_norm_errors),
+        validation_error_count=len(_val_failed),
+        reason=(
+            "DETERMINISTIC_RULE_FAILURE"
+            if deterministic_rules_force_review
+            else ("AUTO_REVIEW_OPTIONAL" if hvs == HumanVerificationStatus.OPTIONAL else "NEEDS_REVIEW")
+        ),
     )
 
     # ── Step 17: Set PROCESSED + CONFIRMED ───────────────────────────────────
@@ -628,21 +649,24 @@ async def _execute_steps(
     )
 
     # ── Step 17b: Upsert document_search_index (D14) ─────────────────────────
-    # Build a map from field_key → normalized value, preferring norm_map (rules
-    # runner output) over the raw provider normalized_value.
-    field_key_to_norm_value: dict[str, object] = {}
-    for fkey, fact_id in fact_id_map.items():
+    # Use profile-field identity internally so duplicate canonicals in different
+    # roles cannot overwrite each other.  JSON search keys are role-qualified
+    # when a profile field has an explicit fact role.
+    profile_field_to_norm_value: dict[uuid.UUID, object] = {}
+    for pf in profile_fields:
+        profile_field_id = uuid.UUID(str(pf["profile_field_id"]))
+        fact_id = fact_id_map[profile_field_id]
         norm = norm_map.get(fact_id)
+        provider_key = _provider_field_key(pf)
         if norm is not None:
-            field_key_to_norm_value[fkey] = norm.normalized_value
-        elif fkey in field_result_map:
-            # fallback to raw normalized_value if rules runner didn't process this field
-            field_key_to_norm_value[fkey] = field_result_map[fkey].normalized_value
+            profile_field_to_norm_value[profile_field_id] = norm.normalized_value
+        elif provider_key in field_result_map:
+            profile_field_to_norm_value[profile_field_id] = field_result_map[provider_key].normalized_value
         else:
-            field_key_to_norm_value[fkey] = None
+            profile_field_to_norm_value[profile_field_id] = None
 
     indexed_fields: dict[str, object] = {
-        pf["canonical_field_key"]: field_key_to_norm_value.get(pf["canonical_field_key"])
+        _search_index_key(pf): profile_field_to_norm_value.get(uuid.UUID(str(pf["profile_field_id"])))
         for pf in profile_fields
     }
     await upsert_search_index(
@@ -689,7 +713,10 @@ async def _execute_steps(
 
 # ── DB helper functions ───────────────────────────────────────────────────────
 
-async def _get_tenant_settings(session: AsyncSession, tenant_id: str) -> dict:
+async def _get_tenant_settings(
+    session: AsyncSession,
+    tenant_id: str,
+) -> dict[str, Any]:
     row = (
         await session.execute(
             text("""
@@ -768,8 +795,9 @@ async def _get_requirement_keys(
 
 
 async def _form_candidate_set(
-    session: AsyncSession, tenant_id: str,
-) -> list[dict]:
+    session: AsyncSession,
+    tenant_id: str,
+) -> list[dict[str, Any]]:
     """
     Implements DI_CLASSIFICATION_v2.2.md §2 candidate-set algorithm steps 1-4.
 
@@ -817,15 +845,15 @@ async def _form_candidate_set(
 
 
 def _build_candidate_snapshot(
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     req_keys: set[str],
     hint_key: str | None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Build the JSON snapshot persisted on processing_runs.classification_candidate_set.
     Order per DI_CLASSIFICATION_v2.2 §2 step 9: hint first, then requirement, then rest.
     """
-    snapshot = []
+    snapshot: list[dict[str, Any]] = []
     for c in candidates:
         snapshot.append({
             "documentTypeId": str(c["document_type_id"]),
@@ -844,9 +872,9 @@ def _build_candidate_snapshot(
 
 def _accept_classification(
     classifications: list[ClassificationCandidate],
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     acceptance_score: Decimal,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """
     DI_CLASSIFICATION_v2.2 §2 step 11:
     Accept exactly one candidate above acceptance_score.
@@ -869,7 +897,7 @@ async def _persist_classifications(
     processing_run_id: uuid.UUID,
     document_id: uuid.UUID,
     classifications: list[ClassificationCandidate],
-    accepted: dict,
+    accepted: dict[str, Any],
     profile_id: uuid.UUID,
 ) -> None:
     now = datetime.now(UTC)
@@ -943,8 +971,8 @@ async def _load_original_artifact(
 async def _load_profile_fields(
     session: AsyncSession,
     profile_id: uuid.UUID,
-) -> list[dict]:
-    """Load enabled extraction profile fields with canonical field keys."""
+) -> list[dict[str, Any]]:
+    """Load enabled profile fields with provider extraction keys and fact roles."""
     rows = (
         await session.execute(
             text("""
@@ -957,18 +985,37 @@ async def _load_profile_fields(
                     epf.score_weight,
                     epf.aliases,
                     epf.extraction_instruction,
+                    epf.extraction_key,
+                    epf.fact_role_override,
                     cf.field_key AS canonical_field_key
                 FROM docintel.extraction_profile_fields epf
                 JOIN docintel.canonical_fields cf
                   ON cf.canonical_field_id = epf.canonical_field_id
                 WHERE epf.profile_id = :pid
                   AND epf.enabled = true
-                ORDER BY epf.display_sequence, cf.field_key
+                ORDER BY epf.display_sequence, cf.field_key, epf.fact_role_override
             """),
             {"pid": profile_id},
         )
     ).mappings().all()
     return [dict(r) for r in rows]
+
+
+def _provider_field_key(profile_field: dict[str, Any]) -> str:
+    """Return the provider-facing key while preserving legacy profiles."""
+    extraction_key = profile_field.get("extraction_key")
+    if isinstance(extraction_key, str) and extraction_key.strip():
+        return extraction_key.strip()
+    return str(profile_field["canonical_field_key"])
+
+
+def _search_index_key(profile_field: dict[str, Any]) -> str:
+    """Use role-qualified keys so role-distinct canonicals never overwrite."""
+    canonical_key = str(profile_field["canonical_field_key"])
+    role = str(profile_field.get("fact_role_override") or "UNSPECIFIED")
+    if role == "UNSPECIFIED":
+        return canonical_key
+    return f"{canonical_key}__{role.lower()}"
 
 
 async def _get_physical_form_type(
@@ -996,21 +1043,20 @@ async def _get_physical_form_type(
 
 
 
-
 def _build_scored_fields(
-    profile_fields: list[dict],
+    profile_fields: list[dict[str, Any]],
     field_result_map: dict[str, FieldResult],
 ) -> list[ScoredField]:
     scored = []
     for pf in profile_fields:
         if not pf["score_included"]:
             continue
-        fkey = pf["canonical_field_key"]
-        fr = field_result_map.get(fkey)
+        provider_key = _provider_field_key(pf)
+        fr = field_result_map.get(provider_key)
         found = fr.found_status if fr else FoundStatus.NOT_FOUND
         conf = fr.confidence if fr else None
         scored.append(ScoredField(
-            field_key=fkey,
+            field_key=provider_key,
             found_status=found,
             field_confidence=conf,
             score_weight=Decimal(str(pf["score_weight"])),
@@ -1054,7 +1100,7 @@ async def _update_invocation(
     invocation_id: uuid.UUID,
     outcome: str,
     provider_request_id: str | None = None,
-    usage_metrics: dict | None = None,
+    usage_metrics: dict[str, Any] | None = None,
     error_detail: str | None = None,
 ) -> None:
     now = datetime.now(UTC)
