@@ -9,6 +9,7 @@ from verigence.di.document_ai.schemas import get_schema
 
 pytestmark = pytest.mark.no_docker
 
+# Keep this suite on the normal PR CI path after legacy migration compatibility repairs.
 _MAPPING = Path(__file__).resolve().parents[2] / "docs" / "schema-v2" / "WAVE1_SEMANTIC_MAPPING_v0.1.md"
 _PACKAGED_MAPPING = (
     Path(__file__).resolve().parents[1]
