@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/one-shot-schema-v2-sandbox-sql-gate.yml'
       - 'backend/alembic/versions/0012_testbench_extraction_profiles.py'
+      - 'backend/alembic/versions/0014_india_extraction_profiles_v1.py'
 
 permissions:
   contents: read
