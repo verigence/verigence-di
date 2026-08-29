@@ -217,3 +217,5 @@ jobs:
           SELECT 'OVERALL_SQL_GATE=PASS' AS result;
           ROLLBACK;
           SQL
+
+# retriggered read-only after confirming sandbox is already at DI Alembic 0020
