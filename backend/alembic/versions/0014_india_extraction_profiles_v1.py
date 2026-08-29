@@ -94,7 +94,8 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("dealer_name", "Dealer Name", "STRING", True, True, 1.0, 10, "Extract dealership name exactly as printed.", ["dealer", "dealership"]),
             ("dealer_gstin", "Dealer GSTIN", "IDENTIFIER", False, False, 0.0, 20, "Extract dealer GSTIN only when explicitly printed.", ["gstin", "gst no"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 30, "Extract payer/customer name exactly as printed.", ["customer", "received from", "payer"]),
-            ("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"]),
+            # Reuse deployed immutable customer_phone STRING canonical.
+            ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"]),
             ("receipt_number", "Receipt Number", "IDENTIFIER", True, True, 1.0, 50, "Extract receipt/voucher number exactly as printed.", ["receipt no", "voucher no"]),
             ("receipt_date", "Receipt Date", "DATE", True, True, 1.0, 60, "Extract receipt/payment date exactly as printed.", ["receipt date", "date"]),
             ("amount_paid", "Amount Paid", "CURRENCY", True, True, 1.0, 70, "Extract amount received/paid only when explicitly stated.", ["amount", "amount received", "paid"]),
@@ -103,7 +104,7 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
             ("payment_reference_date", "Payment Reference Date", "DATE", False, False, 0.0, 100, "Extract payment instrument/reference date only when printed.", ["reference date", "cheque date", "dd date"]),
             ("bank_name", "Bank Name", "STRING", False, False, 0.0, 110, "Extract associated bank name only when printed.", ["bank", "bank name"]),
             ("bank_location", "Bank Location", "STRING", False, False, 0.0, 120, "Extract bank branch/location only when printed.", ["bank branch", "branch", "location"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"]),
+            ("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"]),
             ("remarks", "Remarks", "STRING", False, False, 0.0, 140, "Extract remarks exactly as printed.", ["remarks", "narration"]),
             ("amount_in_words", "Amount in Words", "STRING", False, False, 0.0, 150, "Extract amount-in-words text only when printed.", ["amount in words", "rupees"]),
         ],
