@@ -1,5 +1,6 @@
 name: One-shot Schema V2 secure DB diagnostic
 
+# One-shot diagnostic: ciphertext must be generated for this exact run.
 on:
   push:
     branches:
