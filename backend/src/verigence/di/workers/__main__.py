@@ -12,6 +12,7 @@ from contextlib import suppress
 import structlog
 
 logger = structlog.get_logger(__name__)
+_CAPTURE_V2_CONCURRENCY = 6
 
 
 async def _main() -> None:
@@ -23,7 +24,9 @@ async def _main() -> None:
     from verigence.di.workers.processor import ProcessingWorker
 
     worker = ProcessingWorker()
-    capture_v2_worker = CaptureV2ClassificationWorker()
+    capture_v2_workers = [
+        CaptureV2ClassificationWorker() for _ in range(_CAPTURE_V2_CONCURRENCY)
+    ]
     scheduler = EODRetryScheduler()
 
     stop_event = asyncio.Event()
@@ -39,7 +42,12 @@ async def _main() -> None:
 
     logger.info("di_worker_starting")
     worker.start()
-    capture_v2_worker.start()
+    for capture_v2_worker in capture_v2_workers:
+        capture_v2_worker.start()
+    logger.info(
+        "capture_v2_classifier_pool_started",
+        concurrency=_CAPTURE_V2_CONCURRENCY,
+    )
     scheduler_started = False
     try:
         scheduler.start()
@@ -47,12 +55,15 @@ async def _main() -> None:
         # Stable deployment verification markers consumed by deploy-dev.yml.
         print("DI_WORKER_STARTED=PASS", flush=True)
         print("DI_CAPTURE_V2_CLASSIFIER_STARTED=PASS", flush=True)
+        print(f"DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY={_CAPTURE_V2_CONCURRENCY}", flush=True)
         print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
         await stop_event.wait()
     finally:
         logger.info("di_worker_stopping")
-        await capture_v2_worker.stop()
+        await asyncio.gather(
+            *(capture_v2_worker.stop() for capture_v2_worker in capture_v2_workers)
+        )
         await worker.stop()
         if scheduler_started:
             scheduler.stop()
