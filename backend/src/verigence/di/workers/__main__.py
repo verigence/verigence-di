@@ -19,6 +19,7 @@ async def _main() -> None:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
     configure_logging()
 
+    from verigence.di.document_ai.v2_classifier import close_v2_classifier_client
     from verigence.di.scheduler.beat import EODRetryScheduler
     from verigence.di.workers.capture_v2_classifier import CaptureV2ClassificationWorker
     from verigence.di.workers.processor import ProcessingWorker
@@ -65,6 +66,7 @@ async def _main() -> None:
             *(capture_v2_worker.stop() for capture_v2_worker in capture_v2_workers)
         )
         await worker.stop()
+        await close_v2_classifier_client()
         if scheduler_started:
             scheduler.stop()
         logger.info("di_worker_stopped")
