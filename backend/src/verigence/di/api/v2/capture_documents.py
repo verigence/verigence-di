@@ -8,6 +8,7 @@ browser finalize call was lost.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
@@ -15,6 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
 
 from verigence.di.auth.service_integration import (
     ServiceIntegrationPrincipal,
@@ -375,7 +377,7 @@ async def _status_rows(
     external_context_ref: str,
     phase: str | None,
     document_id: UUID | None = None,
-):
+) -> Sequence[RowMapping]:
     async with tenant_session(tenant_id) as session:
         clauses = ["u.tenant_id=:tenant_id", "u.external_context_ref=:external_context_ref"]
         params: dict[str, object] = {
@@ -408,7 +410,7 @@ async def _status_rows(
         ).mappings().all()
 
 
-async def _public_status(tenant_id: str, row) -> V2CaptureDocumentStatus:
+async def _public_status(tenant_id: str, row: RowMapping) -> V2CaptureDocumentStatus:
     content_url: str | None = None
     if row["state"] in {"STORED", "CLASSIFYING", "CLASSIFIED", "UNKNOWN", "FAILED"} and row["content_state"] != "PURGED":
         try:
