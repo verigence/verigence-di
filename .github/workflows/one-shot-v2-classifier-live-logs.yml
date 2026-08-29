@@ -1,0 +1,42 @@
+name: One-shot V2 classifier live logs
+
+on:
+  push:
+    branches:
+      - diagnose/v2-classifier-live-logs
+    paths:
+      - .github/workflows/one-shot-v2-classifier-live-logs.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      DI_WORKER_SERVICE: di-worker
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: diagnose/v2-classifier-live-logs
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Read only V2 classifier lifecycle logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/dev/null
+          railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 500 >/tmp/worker.log
+          echo '--- V2 classifier logs ---'
+          grep -E 'DI_CAPTURE_V2_CLASSIFIER_STARTED|capture_v2_classifier_|capture_v2_classification_' /tmp/worker.log || true
+          grep -q 'DI_CAPTURE_V2_CLASSIFIER_STARTED=PASS' /tmp/worker.log || {
+            echo '::error::V2 classifier startup marker not found in live worker logs.'
+            exit 1
+          }
+          echo 'V2_CLASSIFIER_LIVE_START=PASS'
