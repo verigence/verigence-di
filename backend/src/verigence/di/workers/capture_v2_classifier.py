@@ -209,8 +209,9 @@ class CaptureV2ClassificationWorker:
             )
             await session.commit()
 
-        stream = await storage.get_stream(str(row["logical_object_key"]))
-        document_bytes = stream.read()
+        document_bytes = b"".join(
+            [chunk async for chunk in storage.get_stream(str(row["logical_object_key"]))]
+        )
         detected_mime = _detect_mime(document_bytes, str(row["original_filename"] or ""))
         sha256_hex = hashlib.sha256(document_bytes).hexdigest()
 
