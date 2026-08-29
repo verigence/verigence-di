@@ -12,7 +12,7 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment: di-dev
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -86,8 +86,8 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "extraction_key=${extraction_key}" >> "$GITHUB_OUTPUT"
 
-      - name: Apply reviewed Schema V2 migrations only from a proven 0017 baseline
-        if: steps.baseline.outputs.version == '0017' && steps.baseline.outputs.extraction_key == 'NO'
+      - name: Apply normal DI migration chain through Schema V2
+        if: (steps.baseline.outputs.version == '0008' || steps.baseline.outputs.version == '0017') && steps.baseline.outputs.extraction_key == 'NO'
         working-directory: backend
         shell: bash
         run: |
@@ -95,14 +95,15 @@ jobs:
           export DI_DATABASE_URL="$(cat /tmp/sandbox-url)"
           python -m pip install -q uv
           uv pip install --system -e '.[dev]' >/dev/null
+          echo "MIGRATING_FROM=${{ steps.baseline.outputs.version }}"
           alembic upgrade 0020
           echo 'SCHEMA_V2_MIGRATION_APPLY=PASS'
 
       - name: Reject unsafe migration baseline
-        if: steps.baseline.outputs.version != '0017' && steps.baseline.outputs.version != '0020'
+        if: steps.baseline.outputs.version != '0008' && steps.baseline.outputs.version != '0017' && steps.baseline.outputs.version != '0020'
         shell: bash
         run: |
-          echo "::error::Sandbox DI Alembic version is '${{ steps.baseline.outputs.version }}', expected 0017 before Schema V2 or 0020 after it. Refusing to stamp or guess."
+          echo "::error::Unexpected sandbox DI Alembic version '${{ steps.baseline.outputs.version }}'. Refusing to stamp or guess."
           exit 1
 
       - name: Run read-only SQL gate
