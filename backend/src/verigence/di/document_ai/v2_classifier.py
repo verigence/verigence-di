@@ -10,6 +10,7 @@ pypdf dependency before being sent to Gemini.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -29,6 +30,8 @@ _GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{_GEMINI_MODEL}:generateContent"
 )
+_GEMINI_CLIENT: httpx.AsyncClient | None = None
+_GEMINI_CLIENT_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,30 @@ class V2ClassificationResult:
 
 class V2ClassificationError(RuntimeError):
     pass
+
+
+async def _gemini_client() -> httpx.AsyncClient:
+    """Reuse HTTP/TLS connections across the V2 classifier worker pool."""
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is not None and not _GEMINI_CLIENT.is_closed:
+        return _GEMINI_CLIENT
+    async with _GEMINI_CLIENT_LOCK:
+        if _GEMINI_CLIENT is None or _GEMINI_CLIENT.is_closed:
+            _GEMINI_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_connections=12, max_keepalive_connections=12),
+                http2=True,
+            )
+        return _GEMINI_CLIENT
+
+
+async def close_v2_classifier_client() -> None:
+    """Close the shared provider client during worker shutdown."""
+    global _GEMINI_CLIENT
+    client = _GEMINI_CLIENT
+    _GEMINI_CLIENT = None
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
@@ -122,12 +149,12 @@ async def classify_document_v2(
             "responseMimeType": "application/json",
         },
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            _GEMINI_API_URL,
-            headers={"x-goog-api-key": settings.docai_gemini_api_key},
-            json=body,
-        )
+    client = await _gemini_client()
+    response = await client.post(
+        _GEMINI_API_URL,
+        headers={"x-goog-api-key": settings.docai_gemini_api_key},
+        json=body,
+    )
     if response.status_code != 200:
         raise V2ClassificationError(
             f"Gemini classification failed with HTTP {response.status_code}"
