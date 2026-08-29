@@ -59,7 +59,9 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
         [
             ("dealer_name", "Dealer Name", "STRING", True, True, 1.0, 10, "Extract the dealership name.", ["dealer", "dealership"]),
             ("dealer_branch", "Dealer Branch", "STRING", False, False, 0.0, 20, "Extract the dealer branch or outlet if present.", ["branch", "outlet"]),
-            ("booking_reference_number", "Booking Reference Number", "IDENTIFIER", True, True, 1.0, 30, "Extract the booking, order, enquiry, or reference number.", ["booking no", "order no", "reference no"]),
+            # The deployed canonical vocabulary already defines booking_reference_number as STRING.
+            # Reuse that immutable canonical type instead of trying to redefine it as IDENTIFIER.
+            ("booking_reference_number", "Booking Reference Number", "STRING", True, True, 1.0, 30, "Extract the booking, order, enquiry, or reference number.", ["booking no", "order no", "reference no"]),
             ("booking_date", "Booking Date", "DATE", True, True, 1.0, 40, "Extract the booking date; return YYYY-MM-DD when complete.", ["booking date", "date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 50, "Extract the full customer name.", ["customer", "name"]),
             ("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"]),
