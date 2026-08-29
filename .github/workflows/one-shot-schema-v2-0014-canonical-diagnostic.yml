@@ -1,0 +1,80 @@
+name: One-shot Schema V2 0014 canonical diagnostic
+
+on:
+  push:
+    branches: [feature/schema-v2-document-extraction]
+    paths:
+      - '.github/workflows/one-shot-schema-v2-0014-canonical-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      SERVICE: verigence-audit-core
+      SANDBOX_HOST: ep-royal-pond-ayci3m0f-pooler.c-5.us-east-2.aws.neon.tech
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/schema-v2-document-extraction
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install clients
+        run: |
+          python -m pip install -q sqlalchemy alembic psycopg2-binary
+          npm install --global @railway/cli >/dev/null
+      - name: Simulate canonical vocabulary through 0014
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$SERVICE" --json >/dev/null
+          railway variable list --service "$SERVICE" --environment dev --json >/tmp/audit-vars.json
+          python - <<'PY'
+          import importlib.util, json, os
+          from pathlib import Path
+          from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+          import psycopg2
+
+          values=json.loads(Path('/tmp/audit-vars.json').read_text())
+          raw=str(values['DATABASE_URL']).replace('postgresql+asyncpg://','postgresql://',1)
+          parts=urlsplit(raw); auth=parts.username or ''
+          if parts.password is not None: auth += ':' + parts.password
+          q=dict(parse_qsl(parts.query, keep_blank_values=True)); q.pop('ssl',None); q['sslmode']='require'
+          sandbox=urlunsplit(('postgresql',auth+'@'+os.environ['SANDBOX_HOST'],parts.path or '/neondb',urlencode(q),''))
+          with psycopg2.connect(sandbox) as conn, conn.cursor() as cur:
+              cur.execute("SELECT field_key,data_type FROM docintel.canonical_fields WHERE owner_tenant_id IS NULL")
+              effective=dict(cur.fetchall())
+              cur.execute("SELECT version_num FROM docintel.alembic_version LIMIT 1")
+              print('DI_ALEMBIC_VERSION='+cur.fetchone()[0])
+
+          def load(name):
+              path=Path('backend/alembic/versions')/name
+              spec=importlib.util.spec_from_file_location(name,path)
+              mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); return mod
+
+          m11=load('0011_baseline_extraction_profiles.py')
+          for _,(_,fields) in m11._PROFILE_DEFINITIONS.items():
+              for key,_display,dtype,*_ in fields: effective.setdefault(key,dtype)
+          m12=load('0012_testbench_extraction_profiles.py')
+          for _,(_,fields) in m12._PROFILES.items():
+              for key,_display,dtype,*_ in fields: effective.setdefault(key,dtype)
+
+          m14=load('0014_india_extraction_profiles_v1.py')
+          requested={}; internal=[]
+          for doc,(_,fields) in m14._PROFILES.items():
+              for key,_display,dtype,*_ in fields:
+                  prior=requested.get(key)
+                  if prior and prior != dtype: internal.append((key,prior,dtype,doc))
+                  requested.setdefault(key,dtype)
+          mismatches=sorted((k,effective[k],v) for k,v in requested.items() if k in effective and effective[k] != v)
+          print('INTERNAL_0014_TYPE_CONFLICTS='+str(internal))
+          print('0014_CANONICAL_TYPE_MISMATCH_COUNT='+str(len(mismatches)))
+          for row in mismatches: print('MISMATCH %s: effective=%s requested=%s' % row)
+          PY
