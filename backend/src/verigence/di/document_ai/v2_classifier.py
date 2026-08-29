@@ -55,8 +55,8 @@ def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, s
         return output.getvalue(), "application/pdf"
 
     if mime_type.startswith("image/"):
-        with Image.open(io.BytesIO(document_bytes)) as image:
-            image = image.convert("RGB")
+        with Image.open(io.BytesIO(document_bytes)) as source_image:
+            image: Image.Image = source_image.convert("RGB")
             longest = max(image.width, image.height)
             if longest > 768:
                 ratio = 768 / longest
