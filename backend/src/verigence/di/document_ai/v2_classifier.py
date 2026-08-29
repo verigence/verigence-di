@@ -56,7 +56,6 @@ async def _gemini_client() -> httpx.AsyncClient:
             _GEMINI_CLIENT = httpx.AsyncClient(
                 timeout=httpx.Timeout(30.0, connect=10.0),
                 limits=httpx.Limits(max_connections=12, max_keepalive_connections=12),
-                http2=True,
             )
         return _GEMINI_CLIENT
 
