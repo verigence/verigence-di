@@ -1,0 +1,54 @@
+name: One-shot Schema V2 repair migration 0012
+
+on:
+  push:
+    branches: [feature/schema-v2-document-extraction]
+    paths:
+      - '.github/workflows/one-shot-schema-v2-repair-0012.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/schema-v2-document-extraction
+          fetch-depth: 0
+      - name: Align 0012 declarations to deployed canonical vocabulary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('backend/alembic/versions/0012_testbench_extraction_profiles.py')
+          text=p.read_text()
+          replacements={
+            '("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"])':
+            '("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"])',
+            '("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 80, "Extract linked booking/order/reference number if present.", ["booking no", "order no"])':
+            '("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 80, "Extract linked booking/order/reference number if present.", ["booking no", "order no"])',
+            '("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 50, "Extract linked booking/order reference.", ["booking no", "order no"])':
+            '("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 50, "Extract linked booking/order reference.", ["booking no", "order no"])',
+          }
+          for old,new in replacements.items():
+              count=text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one occurrence for repair, found {count}: {old[:80]}')
+              text=text.replace(old,new)
+          marker='    "booking_docket": (\n        "Booking Docket Baseline Extraction",\n        ['
+          note='            # Reuse the deployed immutable customer_phone STRING canonical; do not redefine it as PHONE.\n'
+          needle='            ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"]),\n'
+          if note not in text:
+              text=text.replace(needle,note+needle,1)
+          p.write_text(text)
+          PY
+          git diff --check
+          git diff -- backend/alembic/versions/0012_testbench_extraction_profiles.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/alembic/versions/0012_testbench_extraction_profiles.py
+          git commit -m 'fix(di): align 0012 with deployed canonical types'
+          git push origin HEAD:feature/schema-v2-document-extraction
