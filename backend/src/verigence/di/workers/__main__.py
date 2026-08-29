@@ -1,4 +1,4 @@
-"""workers/__main__.py — Standalone entry point for the processing worker.
+"""workers/__main__.py — Standalone entry point for DI background workers.
 
 Run as:  python -m verigence.di.workers
 Used by: dedicated Railway worker service
@@ -19,9 +19,11 @@ async def _main() -> None:
     configure_logging()
 
     from verigence.di.scheduler.beat import EODRetryScheduler
+    from verigence.di.workers.capture_v2_classifier import CaptureV2ClassificationWorker
     from verigence.di.workers.processor import ProcessingWorker
 
     worker = ProcessingWorker()
+    capture_v2_worker = CaptureV2ClassificationWorker()
     scheduler = EODRetryScheduler()
 
     stop_event = asyncio.Event()
@@ -37,17 +39,20 @@ async def _main() -> None:
 
     logger.info("di_worker_starting")
     worker.start()
+    capture_v2_worker.start()
     scheduler_started = False
     try:
         scheduler.start()
         scheduler_started = True
         # Stable deployment verification markers consumed by deploy-dev.yml.
         print("DI_WORKER_STARTED=PASS", flush=True)
+        print("DI_CAPTURE_V2_CLASSIFIER_STARTED=PASS", flush=True)
         print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
         await stop_event.wait()
     finally:
         logger.info("di_worker_stopping")
+        await capture_v2_worker.stop()
         await worker.stop()
         if scheduler_started:
             scheduler.stop()
