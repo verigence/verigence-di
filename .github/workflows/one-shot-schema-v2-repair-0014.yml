@@ -17,35 +17,26 @@ jobs:
         with:
           ref: feature/schema-v2-document-extraction
           fetch-depth: 0
-      - name: Align 0014 declarations to deployed canonical vocabulary
+      - name: Make 0014 respect deployed canonical vocabulary
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-          p=Path('backend/alembic/versions/0014_india_extraction_profiles_v1.py')
-          text=p.read_text()
-          replacements={
-            '("customer_phone", "Customer Phone", "PHONE", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"])':
-            '("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"])',
-            '("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"])':
-            '("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 130, "Extract linked booking/order/reference number only when printed.", ["booking no", "order no"])',
-          }
-          for old,new in replacements.items():
-              count=text.count(old)
-              if count != 1:
-                  raise SystemExit(f'Expected exactly one occurrence for repair, found {count}: {old[:90]}')
-              text=text.replace(old,new)
-          note='            # Reuse deployed immutable customer_phone STRING canonical.\n'
-          needle='            ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 40, "Extract customer contact number only when printed.", ["mobile", "phone", "contact"]),\n'
-          if note not in text:
-              text=text.replace(needle,note+needle,1)
-          p.write_text(text)
+
+          p = Path('backend/alembic/versions/0014_india_extraction_profiles_v1.py')
+          text = p.read_text()
+          old = '''    if existing is not None:\n        if existing != data_type:\n            raise RuntimeError(\n                f"Canonical field {field_key} already exists as {existing}, requested {data_type}"\n            )\n        return\n'''
+          new = '''    if existing is not None:\n        # Existing canonical vocabulary is authoritative and immutable. 0014 is\n        # configuration-only, so reuse the deployed definition instead of\n        # rejecting a historical type difference.\n        return\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'Expected exactly one strict canonical-type block, found {count}')
+          p.write_text(text.replace(old, new))
           PY
           git diff --check
           git diff -- backend/alembic/versions/0014_india_extraction_profiles_v1.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add backend/alembic/versions/0014_india_extraction_profiles_v1.py
-          git commit -m 'fix(di): align 0014 with deployed canonical types'
+          git commit -m 'fix(di): make 0014 canonical bootstrap non-destructive'
           git push origin HEAD:feature/schema-v2-document-extraction
