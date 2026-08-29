@@ -93,18 +93,24 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
-        """Start background worker + EOD scheduler on startup; stop on shutdown."""
+        """Start background workers + EOD scheduler on startup; stop on shutdown."""
         del fastapi_app
         from verigence.di.scheduler.beat import get_eod_scheduler  # noqa: PLC0415
+        from verigence.di.workers.capture_v2_classifier import (  # noqa: PLC0415
+            get_capture_v2_classifier_worker,
+        )
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
         worker = get_worker()
+        capture_v2_worker = get_capture_v2_classifier_worker()
         scheduler = get_eod_scheduler()
         if settings.worker_enabled:
             worker.start()
+            capture_v2_worker.start()
             scheduler.start()
         await _validate_schema_profile_consistency()
         yield
         if settings.worker_enabled:
+            await capture_v2_worker.stop()
             await worker.stop()
             scheduler.stop()
 
@@ -296,6 +302,9 @@ def create_app() -> FastAPI:
     from verigence.di.api.v1.whatsapp_system import (
         router as whatsapp_system_router,  # noqa: PLC0415
     )
+    from verigence.di.api.v2.capture_documents import (  # noqa: PLC0415
+        router as capture_v2_router,
+    )
 
     app.include_router(health_router)
     app.include_router(subjects_router)
@@ -317,6 +326,7 @@ def create_app() -> FastAPI:
     app.include_router(unassigned_router)
     app.include_router(whatsapp_system_router)
     app.include_router(analyse_router)
+    app.include_router(capture_v2_router)
 
     if settings.sentry_dsn:
         try:
