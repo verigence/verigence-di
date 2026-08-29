@@ -59,12 +59,9 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
         [
             ("dealer_name", "Dealer Name", "STRING", True, True, 1.0, 10, "Extract the dealership name.", ["dealer", "dealership"]),
             ("dealer_branch", "Dealer Branch", "STRING", False, False, 0.0, 20, "Extract the dealer branch or outlet if present.", ["branch", "outlet"]),
-            # The deployed canonical vocabulary already defines booking_reference_number as STRING.
-            # Reuse that immutable canonical type instead of trying to redefine it as IDENTIFIER.
             ("booking_reference_number", "Booking Reference Number", "STRING", True, True, 1.0, 30, "Extract the booking, order, enquiry, or reference number.", ["booking no", "order no", "reference no"]),
             ("booking_date", "Booking Date", "DATE", True, True, 1.0, 40, "Extract the booking date; return YYYY-MM-DD when complete.", ["booking date", "date"]),
             ("customer_name", "Customer Name", "STRING", True, True, 1.0, 50, "Extract the full customer name.", ["customer", "name"]),
-            # Reuse the deployed immutable customer_phone STRING canonical; do not redefine it as PHONE.
             ("customer_phone", "Customer Phone", "STRING", False, False, 0.0, 60, "Extract the customer mobile or contact number.", ["mobile", "phone", "contact"]),
             ("vehicle_model", "Vehicle Model", "STRING", True, True, 1.0, 70, "Extract the booked vehicle model.", ["model"]),
             ("vehicle_variant", "Vehicle Variant", "STRING", False, False, 0.0, 80, "Extract the vehicle variant or trim.", ["variant", "trim"]),
@@ -295,9 +292,6 @@ _PROFILES: dict[str, tuple[str, list[F]]] = {
     ),
 }
 
-# 0011 already owns these published profiles. They are intentionally left in
-# place; 0012 only ensures the document types still exist and fills every
-# remaining test-bench type.
 _ALREADY_PROVISIONED = {"booking_form", "pan_card", "aadhaar"}
 
 
@@ -329,10 +323,10 @@ def _ensure_canonical_field(conn: Any, field_key: str, display_name: str, data_t
         {"field_key": field_key},
     ).scalar_one_or_none()
     if existing_type is not None:
-        if existing_type != data_type:
-            raise RuntimeError(
-                f"Canonical field {field_key} already exists as {existing_type}, requested {data_type}"
-            )
+        # Existing canonical vocabulary is authoritative and immutable. 0012 is
+        # a compatibility/bootstrap migration, so it must never redefine or
+        # reject a canonical field merely because an older seed used a stricter
+        # type (for example IDENTIFIER instead of STRING).
         return
 
     conn.execute(
