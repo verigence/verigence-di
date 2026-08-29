@@ -1,7 +1,7 @@
 """Add isolated UC03 Document Capture V2 upload/classification state.
 
-Revision ID: 0021_uc03_document_capture_v2
-Revises: 0020_schema_v2_wave1
+Revision ID: 0021
+Revises: 0020
 Create Date: 2026-08-29
 
 The legacy document intake, adapter and processing-job contracts are unchanged.
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0021_uc03_document_capture_v2"
-down_revision = "0020_schema_v2_wave1"
+revision = "0021"
+down_revision = "0020"
 branch_labels = None
 depends_on = None
 
