@@ -17,7 +17,7 @@ jobs:
         with:
           ref: feature/schema-v2-document-extraction
           fetch-depth: 0
-      - name: Make 0014 respect deployed canonical vocabulary
+      - name: Normalize booking reference canonical declaration in 0014
         shell: bash
         run: |
           set -euo pipefail
@@ -26,11 +26,11 @@ jobs:
 
           p = Path('backend/alembic/versions/0014_india_extraction_profiles_v1.py')
           text = p.read_text()
-          old = '''    if existing is not None:\n        if existing != data_type:\n            raise RuntimeError(\n                f"Canonical field {field_key} already exists as {existing}, requested {data_type}"\n            )\n        return\n'''
-          new = '''    if existing is not None:\n        # Existing canonical vocabulary is authoritative and immutable. 0014 is\n        # configuration-only, so reuse the deployed definition instead of\n        # rejecting a historical type difference.\n        return\n'''
+          old = '("booking_reference_number", "Booking Reference Number", "IDENTIFIER", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"])'
+          new = '("booking_reference_number", "Booking Reference Number", "STRING", False, False, 0.0, 50, "Extract linked booking/order reference only when printed.", ["booking no", "order no"])'
           count = text.count(old)
           if count != 1:
-              raise SystemExit(f'Expected exactly one strict canonical-type block, found {count}')
+              raise SystemExit(f'Expected exactly one delivery-order booking reference declaration, found {count}')
           p.write_text(text.replace(old, new))
           PY
           git diff --check
@@ -38,5 +38,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add backend/alembic/versions/0014_india_extraction_profiles_v1.py
-          git commit -m 'fix(di): make 0014 canonical bootstrap non-destructive'
+          git commit -m 'fix(di): normalize booking reference canonical type in 0014'
           git push origin HEAD:feature/schema-v2-document-extraction
