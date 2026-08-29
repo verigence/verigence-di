@@ -1,4 +1,4 @@
-name: One-shot Schema V2 secure SQL gate
+name: One-shot Schema V2 secure DB diagnostic
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   keygen:
-    name: Generate ephemeral SQL-gate key
+    name: Generate ephemeral DB-diagnostic key
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -22,10 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
-            echo '::error::RAILWAY_API_TOKEN is required to protect the ephemeral key.'
-            exit 1
-          }
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || exit 1
           umask 077
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/schema-v2-private.pem >/dev/null 2>&1
           openssl pkey -in /tmp/schema-v2-private.pem -pubout -out /tmp/schema-v2-public.pem
@@ -39,7 +36,6 @@ jobs:
           echo
           echo 'SCHEMA_V2_GATE_PUBLIC_KEY_END'
           rm -f /tmp/schema-v2-public.pem
-
       - uses: actions/upload-artifact@v4
         with:
           name: schema-v2-encrypted-private-key
@@ -47,8 +43,8 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  gate:
-    name: Secure Schema V2 sandbox SQL gate
+  diagnostic:
+    name: Read-only Schema V2 sandbox diagnostic
     needs: keygen
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -60,35 +56,26 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-
       - name: Install SQL client
         run: python -m pip install 'psycopg[binary]>=3.2,<4'
-
       - uses: actions/download-artifact@v4
         with:
           name: schema-v2-encrypted-private-key
           path: /tmp/schema-v2-key
-
       - name: Recover ephemeral private key in runner memory
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
-            echo '::error::RAILWAY_API_TOKEN is required to recover the ephemeral key.'
-            exit 1
-          }
           umask 077
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in /tmp/schema-v2-key/schema-v2-private.enc \
             -out /tmp/schema-v2-private.pem \
             -pass env:RAILWAY_API_TOKEN
           rm -f /tmp/schema-v2-key/schema-v2-private.enc
-
-      - name: Wait for encrypted sandbox credential and run read-only gate
+      - name: Wait for encrypted sandbox credential and run read-only diagnostic
         shell: bash
         run: |
           set -euo pipefail
@@ -102,10 +89,7 @@ jobs:
             fi
             sleep 5
           done
-          [ "$found" = "1" ] || {
-            echo '::error::Timed out waiting for encrypted sandbox credential.'
-            exit 1
-          }
+          [ "$found" = "1" ] || exit 1
           base64 -d /tmp/schema-v2-cipher.b64 >/tmp/schema-v2-cipher.bin
           openssl pkeyutl -decrypt \
             -inkey /tmp/schema-v2-private.pem \
@@ -114,6 +98,6 @@ jobs:
             -pkeyopt rsa_oaep_md:sha256 \
             -out /tmp/schema-v2-db-url
           export DI_DATABASE_URL="$(cat /tmp/schema-v2-db-url)"
-          python backend/scripts/schema_v2_sql_gate.py --sandbox-host "$SANDBOX_HOST"
+          python backend/scripts/schema_v2_db_diagnostic.py --expected-host "$SANDBOX_HOST"
           unset DI_DATABASE_URL
           rm -f /tmp/schema-v2-db-url /tmp/schema-v2-cipher.bin /tmp/schema-v2-cipher.b64 /tmp/schema-v2-private.pem
