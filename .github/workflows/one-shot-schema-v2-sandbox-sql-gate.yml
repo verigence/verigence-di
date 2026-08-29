@@ -5,6 +5,7 @@ on:
     branches: [feature/schema-v2-document-extraction]
     paths:
       - '.github/workflows/one-shot-schema-v2-sandbox-sql-gate.yml'
+      - 'backend/alembic/versions/0012_testbench_extraction_profiles.py'
 
 permissions:
   contents: read
