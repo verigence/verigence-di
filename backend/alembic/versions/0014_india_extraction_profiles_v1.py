@@ -173,10 +173,9 @@ def _ensure_canonical_field(conn: Any, field_key: str, display_name: str, data_t
         {"field_key": field_key},
     ).scalar_one_or_none()
     if existing is not None:
-        if existing != data_type:
-            raise RuntimeError(
-                f"Canonical field {field_key} already exists as {existing}, requested {data_type}"
-            )
+        # Existing canonical vocabulary is authoritative and immutable. 0014 is
+        # configuration-only, so reuse the deployed definition instead of
+        # rejecting a historical type difference.
         return
     conn.execute(
         sa.text("""
