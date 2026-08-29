@@ -11,11 +11,49 @@ permissions:
   contents: read
 
 jobs:
+  keygen:
+    name: Generate ephemeral SQL-gate key
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+    steps:
+      - name: Generate and protect ephemeral transport key
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo '::error::RAILWAY_API_TOKEN is required to protect the ephemeral key.'
+            exit 1
+          }
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/schema-v2-private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/schema-v2-private.pem -pubout -out /tmp/schema-v2-public.pem
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -in /tmp/schema-v2-private.pem \
+            -out /tmp/schema-v2-private.enc \
+            -pass env:RAILWAY_API_TOKEN
+          rm -f /tmp/schema-v2-private.pem
+          echo 'SCHEMA_V2_GATE_PUBLIC_KEY_BEGIN'
+          base64 -w0 /tmp/schema-v2-public.pem
+          echo
+          echo 'SCHEMA_V2_GATE_PUBLIC_KEY_END'
+          rm -f /tmp/schema-v2-public.pem
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: schema-v2-encrypted-private-key
+          path: /tmp/schema-v2-private.enc
+          retention-days: 1
+          if-no-files-found: error
+
   gate:
     name: Secure Schema V2 sandbox SQL gate
+    needs: keygen
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       SANDBOX_HOST: ep-royal-pond-ayci3m0f.c-5.us-east-2.aws.neon.tech
       CIPHERTEXT_PATH: backend/scripts/.schema_v2_gate_ciphertext.b64
     steps:
@@ -30,17 +68,25 @@ jobs:
       - name: Install SQL client
         run: python -m pip install 'psycopg[binary]>=3.2,<4'
 
-      - name: Generate ephemeral transport key
+      - uses: actions/download-artifact@v4
+        with:
+          name: schema-v2-encrypted-private-key
+          path: /tmp/schema-v2-key
+
+      - name: Recover ephemeral private key in runner memory
         shell: bash
         run: |
           set -euo pipefail
+          [ -n "${RAILWAY_API_TOKEN:-}" ] || {
+            echo '::error::RAILWAY_API_TOKEN is required to recover the ephemeral key.'
+            exit 1
+          }
           umask 077
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out /tmp/schema-v2-private.pem >/dev/null 2>&1
-          openssl pkey -in /tmp/schema-v2-private.pem -pubout -out /tmp/schema-v2-public.pem
-          echo 'SCHEMA_V2_GATE_PUBLIC_KEY_BEGIN'
-          base64 -w0 /tmp/schema-v2-public.pem
-          echo
-          echo 'SCHEMA_V2_GATE_PUBLIC_KEY_END'
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in /tmp/schema-v2-key/schema-v2-private.enc \
+            -out /tmp/schema-v2-private.pem \
+            -pass env:RAILWAY_API_TOKEN
+          rm -f /tmp/schema-v2-key/schema-v2-private.enc
 
       - name: Wait for encrypted sandbox credential and run read-only gate
         shell: bash
@@ -70,4 +116,4 @@ jobs:
           export DI_DATABASE_URL="$(cat /tmp/schema-v2-db-url)"
           python backend/scripts/schema_v2_sql_gate.py --sandbox-host "$SANDBOX_HOST"
           unset DI_DATABASE_URL
-          rm -f /tmp/schema-v2-db-url /tmp/schema-v2-cipher.bin /tmp/schema-v2-cipher.b64 /tmp/schema-v2-private.pem /tmp/schema-v2-public.pem
+          rm -f /tmp/schema-v2-db-url /tmp/schema-v2-cipher.bin /tmp/schema-v2-cipher.b64 /tmp/schema-v2-private.pem
