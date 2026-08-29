@@ -1,9 +1,16 @@
 """Schema V2 fact-role and profile extraction-key foundation.
 
-Additive foundation for role-safe document extraction. A canonical field keeps
-one business meaning (for example ``vehicle_registration_number``) while a new
-extraction-profile field may use document-native output wording and an effective
-fact role (for example SUBJECT_VEHICLE vs EXCHANGE_VEHICLE).
+Additive foundation for role-safe document extraction. Before any V2 changes are
+applied, the migration takes a one-time data snapshot of every V1 table touched
+by the Schema V2 migrations into the separate ``docintel_v1_backup`` schema.
+The operational ``docintel`` tables remain the runtime source of truth while the
+V2 implementation is validated; the snapshot provides a deterministic rollback
+and comparison baseline without renaming or deleting existing tables.
+
+A canonical field keeps one business meaning (for example
+``vehicle_registration_number``) while a new extraction-profile field may use
+document-native output wording and an effective fact role (for example
+SUBJECT_VEHICLE vs EXCHANGE_VEHICLE).
 
 Existing published extraction-profile children are immutable by design. For that
 reason historical rows are NOT backfilled or edited: ``extraction_key`` remains
@@ -16,11 +23,6 @@ role from the immutable extracted fact to the accepted/current value. This lets
 existing worker inserts remain backward compatible while role propagation is
 introduced safely and gives the sandbox an end-to-end collision test before the
 more complex multi-role-in-one-document extraction-key work begins.
-
-The migration is intentionally idempotent because the Schema V2 sandbox may be
-exercised before the parent environment has been brought through the complete
-existing Alembic chain. Production promotion still happens through normal
-Alembic ordering after revision 0017.
 
 Revision ID: 0018
 Revises: 0017
@@ -48,7 +50,49 @@ _ALLOWED_ROLES_SQL = """
 """
 
 
+def _snapshot_v1_tables() -> None:
+    """Take an idempotent pre-V2 data snapshot outside the operational schema."""
+    op.execute("CREATE SCHEMA IF NOT EXISTS docintel_v1_backup")
+    op.execute("""
+        DO $$
+        DECLARE
+            table_name text;
+        BEGIN
+            FOREACH table_name IN ARRAY ARRAY[
+                'documents',
+                'extraction_profile_fields',
+                'extracted_facts',
+                'document_field_values',
+                'normalization_rule_catalog',
+                'validation_rule_catalog',
+                'document_types',
+                'tenant_document_types',
+                'canonical_fields',
+                'extraction_profiles',
+                'profile_field_normalizers',
+                'profile_field_validators'
+            ]
+            LOOP
+                IF to_regclass('docintel.' || table_name) IS NOT NULL
+                   AND to_regclass('docintel_v1_backup.' || table_name) IS NULL THEN
+                    EXECUTE format(
+                        'CREATE TABLE docintel_v1_backup.%I AS TABLE docintel.%I WITH DATA',
+                        table_name,
+                        table_name
+                    );
+                END IF;
+            END LOOP;
+        END
+        $$
+    """)
+
+
 def upgrade() -> None:
+    # Never begin V2 mutation without a recoverable V1 baseline. The snapshot is
+    # idempotent and lives in a separate schema so normal runtime queries cannot
+    # accidentally hit backup tables.
+    _snapshot_v1_tables()
+
     # Document-level default. Individual profile fields may override this.
     op.execute("""
         ALTER TABLE docintel.documents
@@ -249,8 +293,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Role-bearing evidence cannot safely be collapsed to a role-less uniqueness
-    # model. Rollback is by restoring the pre-Schema-V2 Neon branch/snapshot.
+    # Role-bearing evidence cannot safely be collapsed automatically. Restore or
+    # compare against docintel_v1_backup (or the pre-V2 database snapshot) instead.
     raise RuntimeError(
-        "0018 is safety-nonreversible in place; restore the pre-schema-v2 Neon branch"
+        "0018 is safety-nonreversible in place; restore the docintel_v1_backup baseline"
     )
