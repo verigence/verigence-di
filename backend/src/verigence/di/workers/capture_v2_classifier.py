@@ -160,12 +160,27 @@ class CaptureV2ClassificationWorker:
                     "job_id": row["classification_job_id"],
                 },
             )
+            logger.info(
+                "capture_v2_classification_job_claimed",
+                tenant_id=str(row["tenant_id"]),
+                document_id=str(row["document_id"]),
+                classification_job_id=str(row["classification_job_id"]),
+                attempt_no=int(row["attempt_no"]),
+                worker_id=worker_id,
+            )
             return dict(row)
 
     async def _process(self, job: dict[str, Any]) -> None:
         tenant_id = str(job["tenant_id"])
         document_id = uuid.UUID(str(job["document_id"]))
         job_id = uuid.UUID(str(job["classification_job_id"]))
+        logger.info(
+            "capture_v2_classification_started",
+            tenant_id=tenant_id,
+            document_id=str(document_id),
+            classification_job_id=str(job_id),
+            attempt_no=int(job["attempt_no"]),
+        )
         try:
             await self._classify(tenant_id, document_id, job_id)
         except Exception as exc:  # noqa: BLE001
@@ -306,6 +321,16 @@ class CaptureV2ClassificationWorker:
             and result.confidence >= Decimal(str(threshold))
             else None
         )
+        logger.info(
+            "capture_v2_classification_result",
+            tenant_id=tenant_id,
+            document_id=str(document_id),
+            classification_job_id=str(job_id),
+            result_document_type_key=result.document_type_key,
+            accepted_document_type_key=accepted,
+            confidence=str(result.confidence),
+            acceptance_threshold=str(threshold),
+        )
 
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
@@ -329,6 +354,12 @@ class CaptureV2ClassificationWorker:
                 )
                 await self._complete_job(session, tenant_id, job_id, now)
                 await session.commit()
+                logger.warning(
+                    "capture_v2_classification_unknown",
+                    tenant_id=tenant_id,
+                    document_id=str(document_id),
+                    classification_job_id=str(job_id),
+                )
                 return
 
             type_row = (
@@ -411,6 +442,16 @@ class CaptureV2ClassificationWorker:
 
             await self._complete_job(session, tenant_id, job_id, now)
             await session.commit()
+            logger.info(
+                "capture_v2_classification_completed",
+                tenant_id=tenant_id,
+                document_id=str(document_id),
+                classification_job_id=str(job_id),
+                document_type_key=accepted,
+                extraction_queued=bool(
+                    type_row["requires_processing"] and type_row["has_published_profile"]
+                ),
+            )
 
     async def _complete_job(
         self,
@@ -488,6 +529,14 @@ class CaptureV2ClassificationWorker:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
             if attempt_no < 2:
+                logger.warning(
+                    "capture_v2_classification_retry",
+                    tenant_id=tenant_id,
+                    document_id=str(document_id),
+                    classification_job_id=str(job_id),
+                    attempt_no=attempt_no,
+                    error=error[:500],
+                )
                 await session.execute(
                     text(
                         """
@@ -518,6 +567,14 @@ class CaptureV2ClassificationWorker:
                     {"tenant_id": tenant_id, "document_id": document_id, "now": now},
                 )
             else:
+                logger.error(
+                    "capture_v2_classification_failed",
+                    tenant_id=tenant_id,
+                    document_id=str(document_id),
+                    classification_job_id=str(job_id),
+                    attempt_no=attempt_no,
+                    error=error[:500],
+                )
                 await self._finish_failed(
                     session,
                     tenant_id=tenant_id,
