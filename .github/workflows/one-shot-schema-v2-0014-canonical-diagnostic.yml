@@ -78,3 +78,5 @@ jobs:
           print('0014_CANONICAL_TYPE_MISMATCH_COUNT='+str(len(mismatches)))
           for row in mismatches: print('MISMATCH %s: effective=%s requested=%s' % row)
           PY
+
+# retriggered after CI #370 passed to inspect the real sandbox read-only
