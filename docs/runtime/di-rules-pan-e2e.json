@@ -1,12 +1,12 @@
 {
   "scenario": "pan-card-real-extraction",
-  "startedAtUtc": "2026-08-24T04:14:57.536948+00:00",
+  "startedAtUtc": "2026-08-29T11:41:35.016172+00:00",
   "baseUrl": "https://di-api-dev.up.railway.app",
   "tenantId": "70c5661e-bab2-46e7-8199-0f9c32acbac3",
   "subject": {
     "displayName": "ABHISHEK KHUNTIA",
     "subjectType": "PERSON",
-    "subjectId": "d26c269e-c973-4cd9-8d08-9e3a54e1440c"
+    "subjectId": "f5361488-8afa-4357-a081-115bcc7d4161"
   },
   "documents": [
     {
@@ -18,32 +18,91 @@
         "pan_name": "ABHISHEK KHUNTIA",
         "date_of_birth": "1990-02-13"
       },
-      "fields": [],
+      "fields": [
+        {
+          "canonicalFieldId": "a206bca2-9783-4297-b9a9-77b0a8746bef",
+          "fieldKey": "date_of_birth",
+          "currentValue": "1990-02-13",
+          "valueSource": "MACHINE",
+          "confidenceScore": 92.0,
+          "versionNo": 1,
+          "acceptedAt": "2026-08-29T11:41:52.768204+00:00",
+          "pageNo": 1,
+          "evidenceRegion": {
+            "box": [
+              550,
+              40,
+              604,
+              229
+            ],
+            "type": "BOX_2D",
+            "coordinateSystem": "NORMALIZED_1000"
+          }
+        },
+        {
+          "canonicalFieldId": "d7f64c79-edc0-4d10-8863-2c56b6ed9bd5",
+          "fieldKey": "pan_name",
+          "currentValue": "ABHISHEK KHUNTIA",
+          "valueSource": "MACHINE",
+          "confidenceScore": 92.0,
+          "versionNo": 1,
+          "acceptedAt": "2026-08-29T11:41:52.768204+00:00",
+          "pageNo": 1,
+          "evidenceRegion": {
+            "box": [
+              271,
+              31,
+              323,
+              359
+            ],
+            "type": "BOX_2D",
+            "coordinateSystem": "NORMALIZED_1000"
+          }
+        },
+        {
+          "canonicalFieldId": "3088fb28-aace-43a1-87c6-000b881df611",
+          "fieldKey": "pan_number",
+          "currentValue": "DJFPK8448P",
+          "valueSource": "MACHINE",
+          "confidenceScore": 92.0,
+          "versionNo": 1,
+          "acceptedAt": "2026-08-29T11:41:52.768204+00:00",
+          "pageNo": 1,
+          "evidenceRegion": {
+            "box": [
+              718,
+              48,
+              774,
+              300
+            ],
+            "type": "BOX_2D",
+            "coordinateSystem": "NORMALIZED_1000"
+          }
+        }
+      ],
       "errors": [],
       "upload": {
-        "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+        "documentId": "831f5b6e-ab49-44d5-87cc-6954608fd0ef",
         "uploadStatus": "ACCEPTED",
         "processingStatus": "PENDING",
         "errorCode": "000",
         "errorMessage": "File Uploaded Successfully"
       },
-      "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+      "documentId": "831f5b6e-ab49-44d5-87cc-6954608fd0ef",
       "document": {
-        "documentId": "039ded02-3dc7-4796-8d59-876757ad1d2c",
+        "documentId": "831f5b6e-ab49-44d5-87cc-6954608fd0ef",
         "documentTypeKey": "pan_card",
         "uploadStatus": "ACCEPTED",
-        "processingStatus": "FAILED",
-        "confirmationStatus": "NOT_CONFIRMED",
-        "confidenceScore": null,
-        "registeredAtUtc": "2026-08-24T04:14:58.396177Z"
+        "processingStatus": "PROCESSED",
+        "confirmationStatus": "CONFIRMED",
+        "confidenceScore": "92.00",
+        "registeredAtUtc": "2026-08-29T11:41:36.218701Z"
       }
     }
   ],
   "analysis": null,
-  "errors": [
-    "pan-card: extraction failed; processingStatus=FAILED"
-  ],
-  "passed": false,
-  "finishedAtUtc": "2026-08-24T04:15:23.303159+00:00",
-  "durationSeconds": 25.766
+  "errors": [],
+  "passed": true,
+  "finishedAtUtc": "2026-08-29T11:42:05.768061+00:00",
+  "durationSeconds": 30.752
 }
