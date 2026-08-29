@@ -19,7 +19,7 @@ jobs:
           ref: fix/v2-classifier-worker-observability
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Apply narrow V2 worker logging and deployment verification changes
+      - name: Apply narrow V2 classifier lifecycle logging
         shell: python
         run: |
           from pathlib import Path
@@ -27,61 +27,48 @@ jobs:
           worker = Path('backend/src/verigence/di/workers/capture_v2_classifier.py')
           text = worker.read_text()
 
-          old = '''            await session.execute(\n                text(\n                    \"\"\"\n                    UPDATE docintel.document_capture_v2_classification_jobs\n                    SET job_status='RUNNING', locked_by=:worker_id,\n                        locked_at_utc=:now, started_at_utc=:now, updated_at_utc=:now\n                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id\n                    \"\"\"\n                ),\n                {\n                    \"worker_id\": worker_id,\n                    \"now\": now,\n                    \"tenant_id\": row[\"tenant_id\"],\n                    \"job_id\": row[\"classification_job_id\"],\n                },\n            )\n            return dict(row)\n'''
-          new = '''            await session.execute(\n                text(\n                    \"\"\"\n                    UPDATE docintel.document_capture_v2_classification_jobs\n                    SET job_status='RUNNING', locked_by=:worker_id,\n                        locked_at_utc=:now, started_at_utc=:now, updated_at_utc=:now\n                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id\n                    \"\"\"\n                ),\n                {\n                    \"worker_id\": worker_id,\n                    \"now\": now,\n                    \"tenant_id\": row[\"tenant_id\"],\n                    \"job_id\": row[\"classification_job_id\"],\n                },\n            )\n            logger.info(\n                \"capture_v2_classification_job_claimed\",\n                tenant_id=str(row[\"tenant_id\"]),\n                document_id=str(row[\"document_id\"]),\n                classification_job_id=str(row[\"classification_job_id\"]),\n                attempt_no=int(row[\"attempt_no\"]),\n                worker_id=worker_id,\n            )\n            return dict(row)\n'''
-          if old not in text:
-              raise SystemExit('claim anchor not found')
-          text = text.replace(old, new, 1)
+          replacements = [
+              (
+                  '''            await session.execute(\n                text(\n                    \"\"\"\n                    UPDATE docintel.document_capture_v2_classification_jobs\n                    SET job_status='RUNNING', locked_by=:worker_id,\n                        locked_at_utc=:now, started_at_utc=:now, updated_at_utc=:now\n                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id\n                    \"\"\"\n                ),\n                {\n                    \"worker_id\": worker_id,\n                    \"now\": now,\n                    \"tenant_id\": row[\"tenant_id\"],\n                    \"job_id\": row[\"classification_job_id\"],\n                },\n            )\n            return dict(row)\n''',
+                  '''            await session.execute(\n                text(\n                    \"\"\"\n                    UPDATE docintel.document_capture_v2_classification_jobs\n                    SET job_status='RUNNING', locked_by=:worker_id,\n                        locked_at_utc=:now, started_at_utc=:now, updated_at_utc=:now\n                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id\n                    \"\"\"\n                ),\n                {\n                    \"worker_id\": worker_id,\n                    \"now\": now,\n                    \"tenant_id\": row[\"tenant_id\"],\n                    \"job_id\": row[\"classification_job_id\"],\n                },\n            )\n            logger.info(\n                \"capture_v2_classification_job_claimed\",\n                tenant_id=str(row[\"tenant_id\"]),\n                document_id=str(row[\"document_id\"]),\n                classification_job_id=str(row[\"classification_job_id\"]),\n                attempt_no=int(row[\"attempt_no\"]),\n                worker_id=worker_id,\n            )\n            return dict(row)\n'''
+              ),
+              (
+                  '''        job_id = uuid.UUID(str(job[\"classification_job_id\"]))\n        try:\n            await self._classify(tenant_id, document_id, job_id)\n''',
+                  '''        job_id = uuid.UUID(str(job[\"classification_job_id\"]))\n        logger.info(\n            \"capture_v2_classification_started\",\n            tenant_id=tenant_id,\n            document_id=str(document_id),\n            classification_job_id=str(job_id),\n            attempt_no=int(job[\"attempt_no\"]),\n        )\n        try:\n            await self._classify(tenant_id, document_id, job_id)\n'''
+              ),
+              (
+                  '''        accepted = (\n            result.document_type_key\n            if result.document_type_key is not None\n            and result.confidence >= Decimal(str(threshold))\n            else None\n        )\n\n        async with tenant_session(tenant_id) as session:\n''',
+                  '''        accepted = (\n            result.document_type_key\n            if result.document_type_key is not None\n            and result.confidence >= Decimal(str(threshold))\n            else None\n        )\n        logger.info(\n            \"capture_v2_classification_result\",\n            tenant_id=tenant_id,\n            document_id=str(document_id),\n            classification_job_id=str(job_id),\n            result_document_type_key=result.document_type_key,\n            accepted_document_type_key=accepted,\n            confidence=str(result.confidence),\n            acceptance_threshold=str(threshold),\n        )\n\n        async with tenant_session(tenant_id) as session:\n'''
+              ),
+              (
+                  '''                await self._complete_job(session, tenant_id, job_id, now)\n                await session.commit()\n                return\n\n            type_row = (\n''',
+                  '''                await self._complete_job(session, tenant_id, job_id, now)\n                await session.commit()\n                logger.warning(\n                    \"capture_v2_classification_unknown\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                )\n                return\n\n            type_row = (\n'''
+              ),
+              (
+                  '''            await self._complete_job(session, tenant_id, job_id, now)\n            await session.commit()\n\n    async def _complete_job(\n''',
+                  '''            await self._complete_job(session, tenant_id, job_id, now)\n            await session.commit()\n            logger.info(\n                \"capture_v2_classification_completed\",\n                tenant_id=tenant_id,\n                document_id=str(document_id),\n                classification_job_id=str(job_id),\n                document_type_key=accepted,\n                extraction_queued=bool(\n                    type_row[\"requires_processing\"] and type_row[\"has_published_profile\"]\n                ),\n            )\n\n    async def _complete_job(\n'''
+              ),
+              (
+                  '''            if attempt_no < 2:\n                await session.execute(\n''',
+                  '''            if attempt_no < 2:\n                logger.warning(\n                    \"capture_v2_classification_retry\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                    attempt_no=attempt_no,\n                    error=error[:500],\n                )\n                await session.execute(\n'''
+              ),
+              (
+                  '''            else:\n                await self._finish_failed(\n''',
+                  '''            else:\n                logger.error(\n                    \"capture_v2_classification_failed\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                    attempt_no=attempt_no,\n                    error=error[:500],\n                )\n                await self._finish_failed(\n'''
+              ),
+          ]
 
-          old = '''        job_id = uuid.UUID(str(job[\"classification_job_id\"]))\n        try:\n            await self._classify(tenant_id, document_id, job_id)\n'''
-          new = '''        job_id = uuid.UUID(str(job[\"classification_job_id\"]))\n        logger.info(\n            \"capture_v2_classification_started\",\n            tenant_id=tenant_id,\n            document_id=str(document_id),\n            classification_job_id=str(job_id),\n            attempt_no=int(job[\"attempt_no\"]),\n        )\n        try:\n            await self._classify(tenant_id, document_id, job_id)\n'''
-          if old not in text:
-              raise SystemExit('process anchor not found')
-          text = text.replace(old, new, 1)
+          for index, (old, new) in enumerate(replacements, 1):
+              if old not in text:
+                  raise SystemExit(f'worker logging anchor {index} not found')
+              text = text.replace(old, new, 1)
 
-          old = '''        accepted = (\n            result.document_type_key\n            if result.document_type_key is not None\n            and result.confidence >= Decimal(str(threshold))\n            else None\n        )\n\n        async with tenant_session(tenant_id) as session:\n'''
-          new = '''        accepted = (\n            result.document_type_key\n            if result.document_type_key is not None\n            and result.confidence >= Decimal(str(threshold))\n            else None\n        )\n        logger.info(\n            \"capture_v2_classification_result\",\n            tenant_id=tenant_id,\n            document_id=str(document_id),\n            classification_job_id=str(job_id),\n            result_document_type_key=result.document_type_key,\n            accepted_document_type_key=accepted,\n            confidence=str(result.confidence),\n            acceptance_threshold=str(threshold),\n        )\n\n        async with tenant_session(tenant_id) as session:\n'''
-          if old not in text:
-              raise SystemExit('result anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''                await self._complete_job(session, tenant_id, job_id, now)\n                await session.commit()\n                return\n\n            type_row = (\n'''
-          new = '''                await self._complete_job(session, tenant_id, job_id, now)\n                await session.commit()\n                logger.warning(\n                    \"capture_v2_classification_unknown\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                )\n                return\n\n            type_row = (\n'''
-          if old not in text:
-              raise SystemExit('unknown anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''            await self._complete_job(session, tenant_id, job_id, now)\n            await session.commit()\n\n    async def _complete_job(\n'''
-          new = '''            await self._complete_job(session, tenant_id, job_id, now)\n            await session.commit()\n            logger.info(\n                \"capture_v2_classification_completed\",\n                tenant_id=tenant_id,\n                document_id=str(document_id),\n                classification_job_id=str(job_id),\n                document_type_key=accepted,\n                extraction_queued=bool(\n                    type_row[\"requires_processing\"] and type_row[\"has_published_profile\"]\n                ),\n            )\n\n    async def _complete_job(\n'''
-          if old not in text:
-              raise SystemExit('complete anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''            if attempt_no < 2:\n                await session.execute(\n'''
-          new = '''            if attempt_no < 2:\n                logger.warning(\n                    \"capture_v2_classification_retry\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                    attempt_no=attempt_no,\n                    error=error[:500],\n                )\n                await session.execute(\n'''
-          if old not in text:
-              raise SystemExit('retry anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''            else:\n                await self._finish_failed(\n'''
-          new = '''            else:\n                logger.error(\n                    \"capture_v2_classification_failed\",\n                    tenant_id=tenant_id,\n                    document_id=str(document_id),\n                    classification_job_id=str(job_id),\n                    attempt_no=attempt_no,\n                    error=error[:500],\n                )\n                await self._finish_failed(\n'''
-          if old not in text:
-              raise SystemExit('failed anchor not found')
-          text = text.replace(old, new, 1)
           worker.write_text(text)
 
-          deploy = Path('.github/workflows/deploy-dev.yml')
-          text = deploy.read_text()
-          old = '''          grep -q 'DI_WORKER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }\n          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }\n          echo 'DI_WORKER=PASS'\n          echo 'DI_EOD_SCHEDULER=PASS'\n'''
-          new = '''          grep -q 'DI_WORKER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }\n          grep -q 'DI_CAPTURE_V2_CLASSIFIER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }\n          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }\n          echo 'DI_WORKER=PASS'\n          echo 'DI_CAPTURE_V2_CLASSIFIER=PASS'\n          echo 'DI_EOD_SCHEDULER=PASS'\n'''
-          if old not in text:
-              raise SystemExit('deploy verification anchor not found')
-          deploy.write_text(text.replace(old, new, 1))
-
-      - name: Commit narrow fix
+      - name: Commit narrow source fix
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add backend/src/verigence/di/workers/capture_v2_classifier.py .github/workflows/deploy-dev.yml
-          git commit -m 'fix(v2): add classifier lifecycle observability and startup gate'
+          git add backend/src/verigence/di/workers/capture_v2_classifier.py
+          git commit -m 'fix(v2): add classifier lifecycle observability'
           git push origin HEAD:fix/v2-classifier-worker-observability
