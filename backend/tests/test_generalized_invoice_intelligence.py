@@ -49,8 +49,8 @@ def test_invoice_amount_fields_preserve_decimal_source_precision() -> None:
         "grand_total_amount",
     ):
         field = fields[key]
-        assert getattr(field, "field_type") == "number"
-        assert getattr(field, "normalization") is None
+        assert field.field_type == "number"
+        assert field.normalization is None
 
 
 def test_classifier_adds_one_generic_invoice_fallback_only_for_invoice_candidates() -> None:
