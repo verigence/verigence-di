@@ -1,36 +1,37 @@
 # UC03 DI Identity and Booking Date Amendment
 
 **Date:** 2026-08-25  
+**Updated:** 2026-08-30  
 **Status:** Implementation baseline  
 **Scope:** DI publication boundary for UC03 Booking
 
-## 1. Legal Name sources
+## 1. Customer-name model
 
-UC03 distinguishes the Process Coordinator's initial Entered Name from evidence-derived Legal Name.
+UC03 intentionally keeps the Process Coordinator's entered customer name and every document-extracted customer name as separate facts.
 
-DI does not own or overwrite either customer field. DI only publishes source facts and preserves machine provenance. Audit Core decides whether an extracted value is accepted or corrected and owns typed customer persistence.
+DI does not own or overwrite the PC-entered customer name. Audit Core stores that operational value separately and keeps it immutable after Journey creation. DI publishes document-extracted names with their original source/provenance so they can be compared visibly.
 
 The identity-authoritative Legal Name sources currently supported by UC03 are:
 
 | Document | DI document type | DI field | UC03 meaning |
 | --- | --- | --- | --- |
-| PAN | `pan_card` | `pan_name` | Legal Name proposal |
-| Aadhaar | `aadhaar` | `aadhaar_name` | Legal Name proposal |
+| PAN | `pan_card` | `pan_name` | Identity-authoritative Legal Name proposal |
+| Aadhaar | `aadhaar` | `aadhaar_name` | Identity-authoritative Legal Name proposal |
 
 `aadhaar_name` is the full name exactly as printed on the Aadhaar evidence. `pan_name` is the corresponding PAN identity-name field.
 
 ## 2. Booking Form customer name
 
-The broad Booking Form extraction schema continues to extract `customer_name` because it is a valid source-document fact. However, it is **not** published into the UC03 Booking proposal stream as an identity-authoritative customer name.
+The Booking Form extraction schema extracts `customer_name`, and UC03 now publishes it into the Booking evidence/review stream.
 
-Rationale:
+This does **not** make the Booking Form name an identity-authoritative Legal Name source. It remains a genuine source-document fact that is retained for comparison with:
 
-- the PC-entered name must remain immutable audit input;
-- a Booking Form is not the approved identity source for Legal Name;
-- PAN/Aadhaar may later prove a materially different Legal Name;
-- DI must not silently cause one source to overwrite another.
+- the PC-entered customer name; and
+- PAN/Aadhaar identity names when those documents are available.
 
-The Booking Form `customer_name` remains available in the document/extraction result for evidence comparison and review.
+Audit Core source precedence remains PAN/Aadhaar first for Legal Name. Booking Form `customer_name` must never overwrite the immutable PC-entered name or a PAN/Aadhaar-derived Legal Name.
+
+The same publication correction applies to Booking Form `customer_email`: because it is already extracted and is useful to UC03 review, it is published instead of being silently filtered out.
 
 ## 3. Actual Booking Date
 
@@ -41,7 +42,7 @@ The existing Booking Form schema defines:
 - meaning: Booking date explicitly visible on the form
 - normalization: `date_dd_mm_yyyy`
 
-UC03 now publishes this field into the Booking proposal stream. Audit Core maps the accepted/corrected value to the existing `bookings.booking_date`, whose business label is **Actual Booking Date**.
+UC03 publishes this field into the Booking proposal stream. Audit Core maps the accepted/corrected value to the existing `bookings.booking_date`, whose business label is **Actual Booking Date**.
 
 DI must not infer a missing Booking date from upload time, document metadata, Journey creation time, or any other timestamp.
 
@@ -53,18 +54,21 @@ This separation allows a Booking performed at a satellite outlet on one day to b
 
 ## 5. Publication rules
 
-The UC03 Booking proposal boundary now follows these rules:
+The UC03 Booking proposal/evidence boundary follows these rules:
 
-1. `pan_name` -> publish as identity evidence for Legal Name.
-2. `aadhaar_name` -> publish as identity evidence for Legal Name.
-3. `booking_form.customer_name` -> do not publish as identity-authoritative proposal; keep as document fact.
-4. `booking_form.booking_date` -> publish as Actual Booking Date proposal.
-5. DI never chooses between PAN and Aadhaar when names differ.
-6. DI never overwrites an accepted/corrected value or an operational value in Audit Core.
-7. All machine values, confidence and source provenance remain unchanged at the DI boundary.
+1. `pan_name` -> publish as identity-authoritative evidence for Legal Name.
+2. `aadhaar_name` -> publish as identity-authoritative evidence for Legal Name.
+3. `booking_form.customer_name` -> publish as genuine Booking-document evidence for comparison, but not as an identity-authoritative Legal Name source.
+4. `booking_form.customer_email` -> publish as Booking-document evidence.
+5. `booking_form.booking_date` -> publish as Actual Booking Date proposal.
+6. DI never chooses between PAN and Aadhaar when names differ.
+7. DI never overwrites an accepted/corrected value or an operational value in Audit Core.
+8. All machine values, confidence and source provenance remain unchanged at the DI boundary.
 
 ## 6. Conflict ownership
 
-If PAN and Aadhaar produce different validated names, DI publishes both source facts independently. Audit Core owns comparison, Legal Name status and conflict/audit handling.
+If the PC-entered name, Booking Form name, PAN name or Aadhaar name differ, all source values remain available. Audit Core owns comparison, Legal Name status and conflict/audit handling.
 
-No fuzzy identity merge or silent source precedence is introduced in DI by this amendment.
+PAN/Aadhaar remain the authoritative identity sources. A Booking Form name mismatch is audit evidence; it is not permission to replace either the PC-entered name or verified Legal Name.
+
+No fuzzy identity merge or silent source overwrite is introduced in DI by this amendment.
