@@ -11,7 +11,8 @@ cloning every currently-published field and adding only the verified field gaps.
 
 No value is inferred by this migration. The extraction instructions explicitly
 forbid splitting combined charges, deriving commercial totals, or inventing
-identity relationships.
+identity relationships. PAN and Aadhaar relationship fields use source-specific
+canonical keys so two documents cannot be accidentally combined into one pair.
 """
 from __future__ import annotations
 
@@ -54,16 +55,16 @@ _ADDITIONS: dict[str, tuple[str, list[F]]] = {
     "pan_card": (
         "PAN Card Identity Relations Extraction v1.1",
         [
-            ("father_name", "Father Name", "STRING", False, False, 0.0, 40, "Extract the father's name only from a separately identifiable PAN father-name line or label. Do not return the PAN holder name here.", ["father name", "father's name"]),
-            ("relationship_type", "Relationship Type", "STRING", False, False, 0.0, 50, "Extract only an explicitly visible W/O, S/O, or D/O marker associated with a related person's name. Never infer S/O from an unlabeled father-name line.", ["w/o", "s/o", "d/o"]),
-            ("relationship_name", "Relationship Name", "STRING", False, False, 0.0, 60, "Extract the name immediately associated with an explicitly visible W/O, S/O, or D/O marker. Return null when no such explicit marker is present.", ["wife of", "son of", "daughter of"]),
+            ("pan_father_name", "PAN Father Name", "STRING", False, False, 0.0, 40, "Extract the father's name only from a separately identifiable PAN father-name line or label. Do not return the PAN holder name here.", ["father name", "father's name"]),
+            ("pan_relationship_type", "PAN Relationship Type", "STRING", False, False, 0.0, 50, "Extract only an explicitly visible W/O, S/O, or D/O marker associated with a related person's name on PAN evidence. Never infer S/O from an unlabeled father-name line.", ["w/o", "s/o", "d/o"]),
+            ("pan_relationship_name", "PAN Relationship Name", "STRING", False, False, 0.0, 60, "Extract the name immediately associated with an explicitly visible PAN W/O, S/O, or D/O marker. Return null when no such explicit marker is present.", ["wife of", "son of", "daughter of"]),
         ],
     ),
     "aadhaar": (
         "Aadhaar Identity Relations Extraction v1.1",
         [
-            ("relationship_type", "Relationship Type", "STRING", False, False, 0.0, 60, "Extract only an explicitly visible W/O, S/O, or D/O marker associated with a related person's name. Never infer a relationship from address text, surname, gender, or context.", ["w/o", "s/o", "d/o"]),
-            ("relationship_name", "Relationship Name", "STRING", False, False, 0.0, 70, "Extract the name immediately associated with an explicitly visible W/O, S/O, or D/O marker. Return null when no such explicit marker is present.", ["wife of", "son of", "daughter of"]),
+            ("aadhaar_relationship_type", "Aadhaar Relationship Type", "STRING", False, False, 0.0, 60, "Extract only an explicitly visible W/O, S/O, or D/O marker associated with a related person's name on Aadhaar evidence. Never infer a relationship from address text, surname, gender, or context.", ["w/o", "s/o", "d/o"]),
+            ("aadhaar_relationship_name", "Aadhaar Relationship Name", "STRING", False, False, 0.0, 70, "Extract the name immediately associated with an explicitly visible Aadhaar W/O, S/O, or D/O marker. Return null when no such explicit marker is present.", ["wife of", "son of", "daughter of"]),
         ],
     ),
 }
@@ -263,8 +264,8 @@ def _publish_extended_profile(
         )
 
     if document_type_key == "booking_form":
-        # Clarify the two legacy fields without removing them. These children are
-        # still DRAFT here, so changing their instructions is allowed.
+        # Clarify legacy fields without removing them. These children are still
+        # DRAFT here, so changing their instructions is allowed.
         conn.execute(
             sa.text(
                 """
