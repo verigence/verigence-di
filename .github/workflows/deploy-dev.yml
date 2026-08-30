@@ -114,12 +114,15 @@ jobs:
             echo "DI_V2_SERVICE=EXISTS|$DI_V2_WORKER_SERVICE"
           fi
 
-          # Keep the existing worker as the single legacy/V1 + EOD lane.
+          # Keep the existing worker as the single legacy/V1 + EOD lane. Set the
+          # custom Dockerfile explicitly because Railway Config-as-Code is deprecated
+          # and newly-created services do not opt into railway.toml configuration.
           railway variable set \
             --service "$DI_WORKER_SERVICE" \
             --environment "$RAILWAY_ENVIRONMENT" \
             --skip-deploys \
-            DI_WORKER_MODE=legacy >/dev/null
+            DI_WORKER_MODE=legacy \
+            RAILWAY_DOCKERFILE_PATH=Dockerfile.worker >/dev/null
 
           # Copy DI runtime configuration without printing secret values. Worker-specific
           # topology keys are set explicitly below.
@@ -147,6 +150,7 @@ jobs:
               'DI_WORKER_MODE=v2',
               'DI_V2_CLASSIFICATION_CONCURRENCY=4',
               'DI_V2_EXTRACTION_CONCURRENCY=4',
+              'RAILWAY_DOCKERFILE_PATH=Dockerfile.worker',
           ]
           subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
           print('DI_V2_VARIABLE_COPY=PASS')
@@ -181,8 +185,11 @@ jobs:
               raise SystemExit('di-worker-v2 classification concurrency must be 4')
           if v2.get('DI_V2_EXTRACTION_CONCURRENCY') != '4':
               raise SystemExit('di-worker-v2 extraction concurrency must be 4')
+          if v2.get('RAILWAY_DOCKERFILE_PATH') != 'Dockerfile.worker':
+              raise SystemExit('di-worker-v2 must build from Dockerfile.worker')
           print('DI_V2_PERSISTED_CONFIG=PASS')
           print('DI_LEGACY_V2_CONFIG_PARITY=PASS')
+          print('DI_V2_DOCKERFILE_PATH=PASS')
           PY
 
       - name: Prepare DI Railway configs
@@ -343,6 +350,10 @@ jobs:
           grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
           if grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-v2-worker.log; then
             echo '::error::Dedicated V2 worker unexpectedly started the EOD scheduler.'
+            exit 1
+          fi
+          if grep -q 'Uvicorn running' /tmp/di-v2-worker.log; then
+            echo '::error::Dedicated V2 worker unexpectedly started the API/Uvicorn runtime.'
             exit 1
           fi
           echo 'DI_V2_WORKER_TOPOLOGY=PASS'
