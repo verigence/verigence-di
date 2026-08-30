@@ -6,6 +6,10 @@ whose semantic key is commercial, that machine fact remains available to the
 audit-consumption stream regardless of document type. Audit Core remains the
 business-logic owner and decides how (or whether) the fact is used.
 
+Customer identity intentionally preserves multiple sources. The PC-entered name is
+owned by Audit Core and is never overwritten by DI. Booking-form ``customer_name``
+is published as a source-document fact for visible comparison, while PAN/Aadhaar
+names are the identity-authoritative sources used by Audit Core for Legal Name.
 Identity relationship fields are publication-only evidence facts. PAN and Aadhaar
 use source-specific keys so two different printed relationships cannot be
 accidentally merged into one resolved attribute.
@@ -23,7 +27,9 @@ UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
     "booking_form": frozenset(
         {
             "booking_date",
+            "customer_name",
             "customer_phone",
+            "customer_email",
             "vehicle_model",
             "vehicle_variant",
             "vehicle_color",
@@ -99,14 +105,13 @@ _COMMERCIAL_FIELD_MARKERS = frozenset(
     }
 )
 
-# Explicitly document broad Booking Form fields that remain intentionally outside
-# the UC03 proposal/review stream. customer_name cannot establish Legal Name from
-# Booking Form evidence; identity-authoritative PAN/Aadhaar sources own that rule.
+# Broad Booking Form fields that remain intentionally outside the UC03
+# proposal/review stream. customer_name is deliberately NOT listed here: it is
+# retained as document evidence, but Audit Core source precedence prevents it
+# from replacing the immutable PC-entered name or PAN/Aadhaar Legal Name.
 UC03_BOOKING_NON_PUBLISHED_FIELDS: dict[str, frozenset[str]] = {
     "booking_form": frozenset(
         {
-            "customer_name",
-            "customer_email",
             "customer_address",
             "sales_person",
         }
