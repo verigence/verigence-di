@@ -4,7 +4,9 @@ Identity evidence policy:
 - preserve Aadhaar masking exactly;
 - extract only relationship markers and names explicitly visible on the supplied
   Aadhaar evidence;
-- never infer family relationships from names, gender, address, or other context.
+- never infer family relationships from names, gender, address, or other context;
+- use Aadhaar-specific relationship keys so PAN and Aadhaar evidence cannot be
+  accidentally combined into one resolved relationship.
 """
 from __future__ import annotations
 
@@ -53,22 +55,22 @@ AADHAAR_SCHEMA = SchemaDefinition(
             description="Postal address printed on the Aadhaar document, if present.",
         ),
         FieldSpec(
-            key="relationship_type",
+            key="aadhaar_relationship_type",
             field_type="string",
             required=False,
             description=(
-                "Explicit relationship marker only when W/O, S/O, or D/O is visibly "
+                "Explicit Aadhaar relationship marker only when W/O, S/O, or D/O is visibly "
                 "printed/written with a related person's name. Never infer a relationship "
                 "from the address, surname, gender, or surrounding text."
             ),
             enum=["W/O", "S/O", "D/O"],
         ),
         FieldSpec(
-            key="relationship_name",
+            key="aadhaar_relationship_name",
             field_type="string",
             required=False,
             description=(
-                "Name immediately associated with an explicitly visible W/O, S/O, or D/O "
+                "Name immediately associated with an explicitly visible Aadhaar W/O, S/O, or D/O "
                 "marker. Return null when no such explicit marker is present."
             ),
         ),
@@ -85,6 +87,6 @@ AADHAAR_SCHEMA = SchemaDefinition(
         "Do not confuse enrolment numbers, VID values, QR data, or other numbers with the Aadhaar number.",
         "If only Year of Birth is printed, do not fabricate a complete date of birth.",
         "For multi-page Aadhaar PDFs, use the address section when one is visibly present.",
-        "relationship_type and relationship_name are populated only when W/O, S/O, or D/O is explicitly visible. Do not infer a relationship from a care-of line or an unlabeled name.",
+        "aadhaar_relationship_type and aadhaar_relationship_name are populated only when W/O, S/O, or D/O is explicitly visible. Do not infer a relationship from a care-of line or an unlabeled name.",
     ],
 )
