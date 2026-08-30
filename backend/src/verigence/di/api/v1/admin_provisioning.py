@@ -427,20 +427,6 @@ async def purge_project_data(
     for logical_key in artifact_keys:
         await storage.delete(logical_key)
 
-    # Remove tenant-owned profile children that do not themselves carry tenant_id.
-    await session.execute(
-        text(
-            """
-            DELETE FROM docintel.extraction_profile_fields
-            WHERE profile_id IN (
-                SELECT profile_id FROM docintel.extraction_profiles
-                WHERE scope_tenant_id=:tid
-            )
-            """
-        ),
-        {"tid": tenantId},
-    )
-
     # tenant_settings points at its active retention policy while the retention
     # policy also belongs to the same Tenant. Break this deliberate ownership cycle
     # before generic FK child-first cleanup, mirroring provisioning compensation.
@@ -452,10 +438,11 @@ async def purge_project_data(
         {"tid": tenantId},
     )
 
-    # Delete tenant-scoped operational/link tables in FK-child-first order, but keep
-    # tenant_settings until the tenant-owned Document Types that reference it are
-    # removed below. This adapts to additive tenant_id tables without breaking the
-    # explicit ownership FK from document_types.owner_tenant_id -> tenant_settings.
+    # Delete tenant-scoped operational/link tables first. This is intentionally
+    # before deleting extraction-profile configuration: extracted_facts has a FK
+    # to extraction_profile_fields, so removing profile fields first can violate
+    # referential integrity when the Project has already processed documents.
+    # The recursive FK depth keeps additive tenant_id tables child-first.
     await session.execute(
         text(
             """
@@ -510,10 +497,60 @@ async def purge_project_data(
         )
     )
 
-    # Tenant custom extraction/document definitions use ownership columns instead
-    # of tenant_id and therefore require explicit cleanup after tenant links are gone.
+    # Project-owned extraction configuration does not carry tenant_id on every
+    # child table. Delete it after operational facts are gone, in FK-child-first
+    # order. Include profiles attached to a tenant-owned Document Type even if a
+    # historical row has no scope_tenant_id, but never select a global profile
+    # merely because the Project inherited its global Document Type.
+    target_profiles_sql = """
+        SELECT ep.profile_id
+        FROM docintel.extraction_profiles ep
+        LEFT JOIN docintel.document_types dt
+          ON dt.document_type_id=ep.document_type_id
+        WHERE ep.scope_tenant_id=:tid
+           OR dt.owner_tenant_id=:tid
+    """
     await session.execute(
-        text("DELETE FROM docintel.extraction_profiles WHERE scope_tenant_id=:tid"),
+        text(
+            "DELETE FROM docintel.profile_field_validators "
+            "WHERE profile_field_id IN ("
+            "  SELECT epf.profile_field_id FROM docintel.extraction_profile_fields epf "
+            f"  WHERE epf.profile_id IN ({target_profiles_sql})"
+            ")"
+        ),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.profile_field_normalizers "
+            "WHERE profile_field_id IN ("
+            "  SELECT epf.profile_field_id FROM docintel.extraction_profile_fields epf "
+            f"  WHERE epf.profile_id IN ({target_profiles_sql})"
+            ")"
+        ),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.extraction_profile_fields "
+            f"WHERE profile_id IN ({target_profiles_sql})"
+        ),
+        {"tid": tenantId},
+    )
+    await session.execute(
+        text(
+            "DELETE FROM docintel.extraction_profiles ep "
+            "USING docintel.document_types dt "
+            "WHERE dt.document_type_id=ep.document_type_id "
+            "AND (ep.scope_tenant_id=:tid OR dt.owner_tenant_id=:tid)"
+        ),
+        {"tid": tenantId},
+    )
+
+    # Tenant custom vocabularies/Document Types are Project-owned definitions.
+    # Global Verigence defaults have NULL owner_tenant_id and are untouched.
+    await session.execute(
+        text("DELETE FROM docintel.canonical_fields WHERE owner_tenant_id=:tid"),
         {"tid": tenantId},
     )
     await session.execute(
