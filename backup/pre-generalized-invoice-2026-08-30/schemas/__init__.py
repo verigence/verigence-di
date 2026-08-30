@@ -24,16 +24,6 @@ from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEM
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
-from verigence.di.document_ai.schemas.invoice import (
-    ACCESSORY_INVOICE_DMS_SCHEMA,
-    ACCESSORY_INVOICE_TALLY_SCHEMA,
-    CUSTOMER_INVOICE_DMS_SCHEMA,
-    EW_INVOICE_SCHEMA,
-    GENERIC_INVOICE_SCHEMA,
-    RSA_INVOICE_SCHEMA,
-    TAX_INVOICE_TALLY_SCHEMA,
-    WHOLESALE_INVOICE_SCHEMA,
-)
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
@@ -48,32 +38,21 @@ __all__ = [
 
 # Keys must match document_types.document_type_key in the DB exactly.
 SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
-    "booking_form": BOOKING_FORM_SCHEMA,
-    "dealer_receipt": DEALER_RECEIPT_SCHEMA,
+    "booking_form":           BOOKING_FORM_SCHEMA,
+    "dealer_receipt":         DEALER_RECEIPT_SCHEMA,
     "bank_statement_extract": BANK_STATEMENT_SCHEMA,
-    "upi_transaction": UPI_TRANSACTION_SCHEMA,
-    "delivery_order_cover": DELIVERY_ORDER_SCHEMA,
-    "upi_screenshot": UPI_SCREENSHOT_SCHEMA,
-    "insurance_cover": INSURANCE_COVER_SCHEMA,
-    "pan_card": PAN_CARD_SCHEMA,
-    "aadhaar": AADHAAR_SCHEMA,
+    "upi_transaction":        UPI_TRANSACTION_SCHEMA,
+    "delivery_order_cover":   DELIVERY_ORDER_SCHEMA,
+    "upi_screenshot":         UPI_SCREENSHOT_SCHEMA,
+    "insurance_cover":        INSURANCE_COVER_SCHEMA,
+    "pan_card":               PAN_CARD_SCHEMA,
+    "aadhaar":                AADHAAR_SCHEMA,
     # Schema V2 Wave 1. The DB migration/profile publication is deliberately
     # separate so registry code can be reviewed and tested before activation.
-    "gst_certificate": GST_CERTIFICATE_SCHEMA,
-    "corporate_id": CORPORATE_ID_SCHEMA,
-    "bank_approval_letter": BANK_APPROVAL_LETTER_SCHEMA,
-    "valuation_report": VALUATION_REPORT_SCHEMA,
-    # Generalized invoice intelligence. Existing business requirement keys remain
-    # stable; all are backed by one common invoice schema factory with small
-    # purpose-specific extensions.
-    "wholesale_invoice": WHOLESALE_INVOICE_SCHEMA,
-    "customer_invoice_dms": CUSTOMER_INVOICE_DMS_SCHEMA,
-    "tax_invoice_tally": TAX_INVOICE_TALLY_SCHEMA,
-    "accessory_invoice_dms": ACCESSORY_INVOICE_DMS_SCHEMA,
-    "accessory_invoice_tally": ACCESSORY_INVOICE_TALLY_SCHEMA,
-    "ew_invoice": EW_INVOICE_SCHEMA,
-    "rsa_invoice": RSA_INVOICE_SCHEMA,
-    "invoice_generic": GENERIC_INVOICE_SCHEMA,
+    "gst_certificate":        GST_CERTIFICATE_SCHEMA,
+    "corporate_id":           CORPORATE_ID_SCHEMA,
+    "bank_approval_letter":   BANK_APPROVAL_LETTER_SCHEMA,
+    "valuation_report":       VALUATION_REPORT_SCHEMA,
 }
 
 

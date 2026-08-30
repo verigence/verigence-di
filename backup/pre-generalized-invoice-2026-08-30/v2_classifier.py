@@ -23,11 +23,6 @@ import httpx
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
-from verigence.di.document_ai.invoice_taxonomy import (
-    GENERIC_INVOICE_TYPE_KEY,
-    INVOICE_CLASSIFICATION_HINTS,
-    INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS,
-)
 from verigence.di.settings import get_settings
 
 _GEMINI_MODEL = "gemini-3-flash-preview"
@@ -101,37 +96,12 @@ def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, s
     return document_bytes, mime_type
 
 
-def _with_invoice_fallback(candidates: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Add one internal generic invoice candidate without another provider call."""
-    keys = {key for key, _ in candidates}
-    if (
-        GENERIC_INVOICE_TYPE_KEY not in keys
-        and any(key in INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS for key in keys)
-    ):
-        return [*candidates, (GENERIC_INVOICE_TYPE_KEY, "Other Invoice")]
-    return candidates
-
-
-def _candidate_line(key: str, label: str) -> str:
-    semantic_hint = INVOICE_CLASSIFICATION_HINTS.get(key)
-    if semantic_hint is None:
-        return f"- {key}: {label}"
-    return f"- {key}: {label}. Invoice discriminator: {semantic_hint}."
-
-
 def _prompt(candidates: list[tuple[str, str]]) -> str:
-    choices = "\n".join(_candidate_line(key, label) for key, label in candidates)
+    choices = "\n".join(f"- {key}: {label}" for key, label in candidates)
     return (
         "Classify the uploaded automobile-dealership audit document. "
         "Choose exactly one of the candidate document types below, or UNKNOWN if the "
-        "document is not clearly one of them. Do not infer a type from file name. "
-        "For invoice candidates, distinguish the goods/service being invoiced from the "
-        "invoice heading: a document titled Tax Invoice can still be a vehicle, accessory, "
-        "EW, RSA, or another invoice. Prefer a specific invoice candidate only when its "
-        "purpose/source is supported by visible evidence. Use invoice_generic only when "
-        "the document is clearly an invoice but none of the specific invoice candidates "
-        "can be established reliably. This is one classification call; do not request a "
-        "separate invoice subtype pass.\n\n"
+        "document is not clearly one of them. Do not infer a type from file name.\n\n"
         f"Candidates:\n{choices}\n- UNKNOWN: none of the candidates\n\n"
         "Return ONLY JSON in this form: "
         '{"documentTypeKey":"<candidate key or UNKNOWN>","confidence":<0-100 integer>}. '
@@ -148,10 +118,9 @@ async def classify_document_v2(
     if not candidates:
         raise V2ClassificationError("V2 classifier requires at least one candidate type")
 
-    effective_candidates = _with_invoice_fallback(candidates)
     settings = get_settings()
     if settings.docai_mock:
-        key = effective_candidates[0][0]
+        key = candidates[0][0]
         return V2ClassificationResult(
             document_type_key=key,
             confidence=Decimal("95.00"),
@@ -170,7 +139,7 @@ async def classify_document_v2(
                             "data": base64.b64encode(payload_bytes).decode("ascii"),
                         }
                     },
-                    {"text": _prompt(effective_candidates)},
+                    {"text": _prompt(candidates)},
                 ]
             }
         ],
@@ -199,7 +168,7 @@ async def classify_document_v2(
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise V2ClassificationError("Gemini returned an invalid classification payload") from exc
 
-    allowed = {key for key, _ in effective_candidates}
+    allowed = {key for key, _ in candidates}
     if observed == "UNKNOWN":
         selected: str | None = None
     elif observed in allowed:
