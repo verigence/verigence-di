@@ -1,0 +1,197 @@
+name: Recover DI V2 Worker DEV
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/recover-di-v2-worker-dev.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: di-v2-worker-dev-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      DI_V2_WORKER_SERVICE: di-worker-v2
+      DEPLOY_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Check out exact DEV revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Link Railway DEV and validate V2 configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${RAILWAY_API_TOKEN:-}" ]] || { echo '::error::RAILWAY_API_TOKEN is required.'; exit 1; }
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
+          railway service list --json >/tmp/services.json
+          railway variable list --service "$DI_V2_WORKER_SERVICE" --json >/tmp/v2-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          services=json.loads(Path('/tmp/services.json').read_text())
+          vars_=json.loads(Path('/tmp/v2-vars.json').read_text())
+          if not any(row.get('name') == 'di-worker-v2' for row in services):
+              raise SystemExit('di-worker-v2 service is missing')
+          required=[
+              'DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT',
+              'DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY','DI_DATABASE_URL',
+              'DI_SECURITY_JWKS_URL','DI_WORKER_NOTIFY_DB_URL','DI_DOCAI_GEMINI_API_KEY',
+          ]
+          missing=[key for key in required if not vars_.get(key)]
+          if missing:
+              raise SystemExit('di-worker-v2 missing configuration: '+','.join(missing))
+          expected={
+              'DI_WORKER_MODE':'v2',
+              'DI_V2_CLASSIFICATION_CONCURRENCY':'4',
+              'DI_V2_EXTRACTION_CONCURRENCY':'4',
+              'RAILWAY_DOCKERFILE_PATH':'Dockerfile.worker',
+          }
+          wrong=[f'{k}={vars_.get(k)!r}' for k,v in expected.items() if vars_.get(k) != v]
+          if wrong:
+              raise SystemExit('di-worker-v2 topology configuration mismatch: '+','.join(wrong))
+          print('DI_V2_RECOVERY_CONFIG=PASS')
+          PY
+
+      - name: Record current V2 deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway deployment list --service "$DI_V2_WORKER_SERVICE" --limit 1 --json >/tmp/v2-before.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/v2-before.json').read_text())
+          print('DI_V2_PREVIOUS_DEPLOYMENT='+(rows[0].get('id','') if rows else 'NONE'))
+          PY
+
+      - name: Deploy V2 worker in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > backend/railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile.worker"
+
+          [deploy]
+          startCommand = "python -m verigence.di.workers"
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 10
+          TOML
+          railway up backend --path-as-root --service "$DI_V2_WORKER_SERVICE" --detach --yes \
+            --message "DI V2 isolated recovery ${DEPLOY_SHA}" >/dev/null
+
+      - name: Verify isolated V2 deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_id="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/v2-before.json').read_text())
+          print(rows[0].get('id','') if rows else '')
+          PY
+          )"
+          deployment_id=''
+          status=''
+          for attempt in $(seq 1 36); do
+            railway deployment list --service "$DI_V2_WORKER_SERVICE" --limit 1 --json >/tmp/v2-deployment.json
+            read -r deployment_id status <<<"$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/v2-deployment.json').read_text())
+          if rows:
+              print(rows[0].get('id',''), rows[0].get('status',''))
+          else:
+              print(' ')
+          PY
+          )"
+            if [[ -z "$deployment_id" || "$deployment_id" == "$previous_id" ]]; then
+              echo "Waiting for fresh V2 deployment (attempt $attempt/36)"
+              sleep 10
+              continue
+            fi
+            case "$status" in
+              SUCCESS)
+                echo "DI_V2_RECOVERY_DEPLOYMENT=PASS|$deployment_id"
+                break
+                ;;
+              FAILED|CRASHED|REMOVED)
+                echo "::error::V2 deployment failed: $status ($deployment_id)"
+                echo '--- Railway deployment logs ---'
+                railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 320 || true
+                echo '--- Railway build logs (if available) ---'
+                railway logs --service "$DI_V2_WORKER_SERVICE" --latest --build --lines 320 || true
+                exit 1
+                ;;
+            esac
+            if [[ "$attempt" == "36" ]]; then
+              railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 320 || true
+              railway logs --service "$DI_V2_WORKER_SERVICE" --latest --build --lines 320 || true
+              echo "::error::Fresh V2 deployment did not reach SUCCESS: $status"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          for attempt in $(seq 1 30); do
+            railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 420 >/tmp/v2-runtime.log || true
+            if grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/v2-runtime.log; then
+              break
+            fi
+            echo "Waiting for V2 startup markers (attempt $attempt/30)"
+            sleep 3
+          done
+          grep -q 'DI_WORKER_MODE=v2' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_V2_WORKER_STARTED=PASS' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY=4' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          if grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/v2-runtime.log; then
+            echo '::error::V2 worker unexpectedly started EOD scheduler.'
+            exit 1
+          fi
+          if grep -q 'Uvicorn running' /tmp/v2-runtime.log; then
+            echo '::error::V2 worker unexpectedly started API runtime.'
+            exit 1
+          fi
+          echo 'DI_V2_RECOVERY_TOPOLOGY=PASS'
+
+      - name: Scale V2 worker to two replicas
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_region="$(grep 'DI_WORKER_REPLICA_REGION=' /tmp/v2-runtime.log | tail -n 1 | sed 's/.*DI_WORKER_REPLICA_REGION=//' | tr -d '\r' | xargs)"
+          if [[ -z "$runtime_region" || "$runtime_region" == "unknown" ]]; then
+            echo '::error::Could not resolve V2 Railway runtime region.'
+            exit 1
+          fi
+          case "$runtime_region" in
+            sin) scale_region="southeast-asia" ;;
+            sjc) scale_region="us-west" ;;
+            iad) scale_region="us-east" ;;
+            ams) scale_region="eu-west" ;;
+            southeast-asia|us-west|us-east|eu-west|asia-southeast1-eqsg3a|us-west2|us-east4-eqdc4a|europe-west4-drams3a) scale_region="$runtime_region" ;;
+            *) echo "::error::Unsupported Railway runtime region: $runtime_region"; exit 1 ;;
+          esac
+          railway scale --service "$DI_V2_WORKER_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json \
+            "${scale_region}=2" >/tmp/v2-scale.json
+          echo "DI_V2_RECOVERY_SCALE=PASS|region=$scale_region|replicas=2"
