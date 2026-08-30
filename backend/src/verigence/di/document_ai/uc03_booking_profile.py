@@ -23,6 +23,7 @@ UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
             "vehicle_model",
             "vehicle_variant",
             "vehicle_color",
+            "sku_code",
         }
     ),
     "pan_card": frozenset({"pan_number", "pan_name"}),

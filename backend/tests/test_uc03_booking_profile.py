@@ -14,17 +14,19 @@ def test_booking_form_keeps_reconciled_non_commercial_profile() -> None:
         "vehicle_model",
         "vehicle_variant",
         "vehicle_color",
+        "sku_code",
     }
     assert "customer_name" not in supported
     assert "customer_name" in UC03_BOOKING_NON_PUBLISHED_FIELDS["booking_form"]
 
 
-def test_booking_form_publishes_commercial_facts_without_making_name_authoritative() -> None:
+def test_booking_form_publishes_commercial_and_sku_facts_without_name_authority() -> None:
     extraction = {
         "booking_date": {"value": "2026-08-24", "confidence": "high"},
         "customer_name": {"value": "A Customer", "confidence": "high"},
         "vehicle_model": {"value": "Model X", "confidence": "medium"},
         "vehicle_variant": {"value": "AX7 L", "confidence": "medium"},
+        "sku_code": {"value": "XUV700-AX7L-R", "confidence": "high"},
         "ex_showroom_price": {"value": 1000000, "confidence": "high"},
         "insurance_amount": {"value": 50000, "confidence": "high"},
         "road_tax_registration": {"value": 80000, "confidence": "high"},
@@ -41,6 +43,7 @@ def test_booking_form_publishes_commercial_facts_without_making_name_authoritati
     assert filtered["booking_date"] == extraction["booking_date"]
     assert filtered["vehicle_model"] == extraction["vehicle_model"]
     assert filtered["vehicle_variant"] == extraction["vehicle_variant"]
+    assert filtered["sku_code"] == extraction["sku_code"]
     for field_key in (
         "ex_showroom_price",
         "insurance_amount",
@@ -80,6 +83,7 @@ def test_commercial_semantic_key_detection_is_broad_but_not_arbitrary() -> None:
     assert is_commercial_field("grand_total")
     assert not is_commercial_field("customer_address")
     assert not is_commercial_field("vehicle_model")
+    assert not is_commercial_field("sku_code")
 
 
 def test_pan_card_supported_profile_includes_pan_identity() -> None:
