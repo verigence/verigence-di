@@ -6,7 +6,9 @@ Government of India. Standard card format — printed black on white.
 Identity evidence policy:
 - extract only identity text explicitly visible on the supplied PAN evidence;
 - never infer a relationship marker from an unlabeled parent-name line;
-- keep the card holder's name distinct from the father's/relationship name.
+- keep the card holder's name distinct from the father's/relationship name;
+- use PAN-specific relationship keys so PAN and Aadhaar evidence cannot be
+  accidentally combined into one resolved relationship.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ PAN_CARD_SCHEMA = SchemaDefinition(
             ),
         ),
         FieldSpec(
-            key="father_name",
+            key="pan_father_name",
             field_type="string",
             required=False,
             description=(
@@ -46,22 +48,22 @@ PAN_CARD_SCHEMA = SchemaDefinition(
             ),
         ),
         FieldSpec(
-            key="relationship_type",
+            key="pan_relationship_type",
             field_type="string",
             required=False,
             description=(
-                "Explicit relationship marker only when W/O, S/O, or D/O is visibly "
+                "Explicit PAN relationship marker only when W/O, S/O, or D/O is visibly "
                 "printed/written with a related person's name. Never infer S/O merely "
                 "because a separate father-name line exists."
             ),
             enum=["W/O", "S/O", "D/O"],
         ),
         FieldSpec(
-            key="relationship_name",
+            key="pan_relationship_name",
             field_type="string",
             required=False,
             description=(
-                "Name immediately associated with an explicitly visible W/O, S/O, or D/O "
+                "Name immediately associated with an explicitly visible PAN W/O, S/O, or D/O "
                 "marker. Return null when no such explicit marker is present."
             ),
         ),
@@ -89,8 +91,8 @@ PAN_CARD_SCHEMA = SchemaDefinition(
     prompt_notes=[
         "pan_number is always exactly 10 characters: 5 letters, 4 digits, 1 letter.",
         "pan_name is the card HOLDER's name and must not be replaced by a father/relationship name.",
-        "father_name may be extracted from a separately identifiable PAN father-name line even when no relationship prefix is printed.",
-        "relationship_type and relationship_name are populated only when W/O, S/O, or D/O is explicitly visible. Never infer the marker from father_name or from gender.",
+        "pan_father_name may be extracted from a separately identifiable PAN father-name line even when no relationship prefix is printed.",
+        "pan_relationship_type and pan_relationship_name are populated only when W/O, S/O, or D/O is explicitly visible. Never infer the marker from pan_father_name or from gender.",
         "date_of_birth appears as DD/MM/YYYY on the card — return it as YYYY-MM-DD.",
         "If the image is partially obscured, extract what is clearly visible and return null + low confidence for anything uncertain.",
     ],
