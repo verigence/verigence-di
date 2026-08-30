@@ -362,18 +362,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          region="$(grep 'DI_WORKER_REPLICA_REGION=' /tmp/di-v2-worker.log | tail -n 1 | sed 's/.*DI_WORKER_REPLICA_REGION=//' | tr -d '\r' | xargs)"
-          if [[ -z "$region" || "$region" == "unknown" ]]; then
+          runtime_region="$(grep 'DI_WORKER_REPLICA_REGION=' /tmp/di-v2-worker.log | tail -n 1 | sed 's/.*DI_WORKER_REPLICA_REGION=//' | tr -d '\r' | xargs)"
+          if [[ -z "$runtime_region" || "$runtime_region" == "unknown" ]]; then
             echo '::error::Could not resolve the Railway region of di-worker-v2; refusing to guess a region.'
             tail -n 220 /tmp/di-v2-worker.log >&2
             exit 1
           fi
+          case "$runtime_region" in
+            sin) scale_region="southeast-asia" ;;
+            sjc) scale_region="us-west" ;;
+            iad) scale_region="us-east" ;;
+            ams) scale_region="eu-west" ;;
+            southeast-asia|us-west|us-east|eu-west|asia-southeast1-eqsg3a|us-west2|us-east4-eqdc4a|europe-west4-drams3a)
+              scale_region="$runtime_region"
+              ;;
+            *)
+              echo "::error::Unsupported Railway runtime region alias: $runtime_region"
+              exit 1
+              ;;
+          esac
           railway scale \
             --service "$DI_V2_WORKER_SERVICE" \
             --environment "$RAILWAY_ENVIRONMENT" \
             --json \
-            "${region}=2" >/tmp/di-v2-scale.json
-          echo "DI_V2_REPLICA_SCALE=PASS|region=$region|replicas=2"
+            "${scale_region}=2" >/tmp/di-v2-scale.json
+          echo "DI_V2_REPLICA_SCALE=PASS|runtime_region=$runtime_region|scale_region=$scale_region|replicas=2"
 
       - name: Resolve or create DI API public domain
         shell: bash
