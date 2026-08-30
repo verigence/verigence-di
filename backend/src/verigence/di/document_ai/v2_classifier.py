@@ -23,6 +23,7 @@ import httpx
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from verigence.di.document_ai.invoice_taxonomy import INVOICE_CLASSIFICATION_HINTS
 from verigence.di.settings import get_settings
 
 _GEMINI_MODEL = "gemini-3-flash-preview"
@@ -96,12 +97,26 @@ def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, s
     return document_bytes, mime_type
 
 
+def _candidate_line(key: str, label: str) -> str:
+    semantic_hint = INVOICE_CLASSIFICATION_HINTS.get(key)
+    if semantic_hint is None:
+        return f"- {key}: {label}"
+    return f"- {key}: {label}. Invoice discriminator: {semantic_hint}."
+
+
 def _prompt(candidates: list[tuple[str, str]]) -> str:
-    choices = "\n".join(f"- {key}: {label}" for key, label in candidates)
+    choices = "\n".join(_candidate_line(key, label) for key, label in candidates)
     return (
         "Classify the uploaded automobile-dealership audit document. "
         "Choose exactly one of the candidate document types below, or UNKNOWN if the "
-        "document is not clearly one of them. Do not infer a type from file name.\n\n"
+        "document is not clearly one of them. Do not infer a type from file name. "
+        "For invoice candidates, distinguish the goods/service being invoiced from the "
+        "invoice heading: a document titled Tax Invoice can still be a vehicle, accessory, "
+        "EW, RSA, or another invoice. Prefer a specific invoice candidate only when its "
+        "purpose/source is supported by visible evidence. Use invoice_generic only when "
+        "the document is clearly an invoice but none of the specific invoice candidates "
+        "can be established reliably. This is one classification call; do not request a "
+        "separate invoice subtype pass.\n\n"
         f"Candidates:\n{choices}\n- UNKNOWN: none of the candidates\n\n"
         "Return ONLY JSON in this form: "
         '{"documentTypeKey":"<candidate key or UNKNOWN>","confidence":<0-100 integer>}. '
