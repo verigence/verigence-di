@@ -1,0 +1,132 @@
+name: One-shot Booking Form field diagnostic
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-booking-form-field-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - run: npm install --global @railway/cli
+
+      - name: Link Railway DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-worker --json >/dev/null
+
+      - name: Inspect Booking Form profile and recent extraction facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/runtime
+          cat >/tmp/booking_diag.py <<'PY'
+          import os
+          import psycopg2
+          import psycopg2.extras
+
+          url=os.environ.get('DI_DATABASE_URL','').strip().replace('postgresql+asyncpg://','postgresql://',1)
+          if not url:
+              raise SystemExit('DI_DATABASE_URL missing')
+          conn=psycopg2.connect(url, connect_timeout=15)
+          conn.autocommit=True
+          cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+          out=[]
+          out.append('BOOKING_FORM_LIVE_FIELD_DIAGNOSTIC')
+          try:
+              cur.execute('SELECT version_num FROM docintel.alembic_version')
+              out.append('ALEMBIC_VERSION='+','.join(str(r['version_num']) for r in cur.fetchall()))
+          except Exception as exc:
+              out.append('ALEMBIC_VERSION_ERROR='+type(exc).__name__)
+
+          cur.execute("""
+              SELECT ep.profile_id, ep.version_no, ep.profile_name, ep.status,
+                     ep.published_at_utc
+              FROM docintel.extraction_profiles ep
+              JOIN docintel.document_types dt ON dt.document_type_id=ep.document_type_id
+              WHERE dt.owner_tenant_id IS NULL
+                AND dt.document_type_key='booking_form'
+                AND ep.scope_tenant_id IS NULL
+                AND ep.status='PUBLISHED'
+              ORDER BY ep.version_no DESC
+          """)
+          profiles=cur.fetchall()
+          out.append('PUBLISHED_PROFILE_COUNT='+str(len(profiles)))
+          for p in profiles:
+              out.append('PROFILE|version=%s|name=%s|published=%s' % (p['version_no'], p['profile_name'], p['published_at_utc']))
+              cur.execute("""
+                  SELECT cf.field_key, epf.extraction_key, epf.enabled, epf.expected
+                  FROM docintel.extraction_profile_fields epf
+                  JOIN docintel.canonical_fields cf ON cf.canonical_field_id=epf.canonical_field_id
+                  WHERE epf.profile_id=%s
+                  ORDER BY epf.display_sequence, cf.field_key
+              """, (p['profile_id'],))
+              fields=cur.fetchall()
+              out.append('PROFILE_FIELD_COUNT='+str(len(fields)))
+              for f in fields:
+                  out.append('PROFILE_FIELD|canonical=%s|extraction=%s|enabled=%s|expected=%s' % (
+                      f['field_key'], f['extraction_key'], f['enabled'], f['expected']))
+
+          cur.execute("""
+              SELECT d.tenant_id, d.document_id, d.current_processing_run_id,
+                     d.processing_status, d.registered_at_utc
+              FROM docintel.documents d
+              LEFT JOIN docintel.document_types dt ON dt.document_type_id=d.document_type_id
+              WHERE lower(COALESCE(dt.document_type_key,d.document_type_hint_key,''))='booking_form'
+              ORDER BY d.registered_at_utc DESC
+              LIMIT 12
+          """)
+          docs=cur.fetchall()
+          out.append('RECENT_BOOKING_FORM_COUNT='+str(len(docs)))
+          for i,d in enumerate(docs,1):
+              out.append('DOC|%d|processing=%s|registered=%s' % (i,d['processing_status'],d['registered_at_utc']))
+              if d['current_processing_run_id'] is None:
+                  out.append('FACTS|%d|NO_CURRENT_RUN' % i)
+                  continue
+              cur.execute("""
+                  SELECT cf.field_key, ef.found_status,
+                         CASE WHEN ef.normalized_value IS NULL AND ef.raw_value_text IS NULL THEN false ELSE true END AS has_value,
+                         ef.confidence_score
+                  FROM docintel.extracted_facts ef
+                  JOIN docintel.canonical_fields cf ON cf.canonical_field_id=ef.canonical_field_id
+                  WHERE ef.tenant_id=%s AND ef.document_id=%s AND ef.processing_run_id=%s
+                  ORDER BY cf.field_key
+              """, (d['tenant_id'],d['document_id'],d['current_processing_run_id']))
+              facts=cur.fetchall()
+              out.append('FACT_COUNT|%d|%d' % (i,len(facts)))
+              for f in facts:
+                  out.append('FACT|%d|%s|status=%s|has_value=%s|confidence=%s' % (
+                      i,f['field_key'],f['found_status'],f['has_value'],f['confidence_score']))
+
+          print('\n'.join(out))
+          cur.close(); conn.close()
+          PY
+          timeout 90s railway ssh --service di-worker --environment dev -- python - </tmp/booking_diag.py | tee docs/runtime/booking-form-field-diagnostic.txt
+
+      - name: Record diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/runtime/booking-form-field-diagnostic.txt 2>/dev/null || true
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'docs(dev): record Booking Form field diagnostic [skip ci]'
+          git pull --rebase origin dev
+          git push origin HEAD:dev
