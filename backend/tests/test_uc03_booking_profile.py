@@ -10,7 +10,9 @@ def test_booking_form_keeps_reconciled_non_commercial_profile() -> None:
     supported = supported_uc03_booking_fields("booking_form")
     assert supported == {
         "booking_date",
+        "customer_name",
         "customer_phone",
+        "customer_email",
         "vehicle_model",
         "vehicle_variant",
         "vehicle_color",
@@ -22,14 +24,17 @@ def test_booking_form_keeps_reconciled_non_commercial_profile() -> None:
         "expected_delivery",
         "expected_delivery_date",
     }
-    assert "customer_name" not in supported
-    assert "customer_name" in UC03_BOOKING_NON_PUBLISHED_FIELDS["booking_form"]
+    assert "customer_name" in supported
+    assert "customer_email" in supported
+    assert "customer_name" not in UC03_BOOKING_NON_PUBLISHED_FIELDS["booking_form"]
+    assert "customer_email" not in UC03_BOOKING_NON_PUBLISHED_FIELDS["booking_form"]
 
 
-def test_booking_form_publishes_completed_commercial_fields_without_name_authority() -> None:
+def test_booking_form_publishes_customer_name_as_evidence_and_commercial_fields() -> None:
     extraction = {
         "booking_date": {"value": "2026-08-24", "confidence": "high"},
         "customer_name": {"value": "A Customer", "confidence": "high"},
+        "customer_email": {"value": "a.customer@example.com", "confidence": "high"},
         "vehicle_model": {"value": "Model X", "confidence": "medium"},
         "vehicle_variant": {"value": "AX7 L", "confidence": "medium"},
         "sku_code": {"value": "XUV700-AX7L-R", "confidence": "high"},
@@ -60,18 +65,15 @@ def test_booking_form_publishes_completed_commercial_fields_without_name_authori
         "payment_reference_no": {"value": "PAY123", "confidence": "high"},
     }
     filtered = filter_uc03_booking_result("booking_form", extraction)
-    assert "customer_name" not in filtered
-    for field_key, value in extraction.items():
-        if field_key != "customer_name":
-            assert filtered[field_key] == value
+    assert filtered == extraction
 
 
-def test_commercial_facts_are_published_from_any_document_type() -> None:
+def test_booking_form_name_publication_does_not_make_other_documents_identity_sources() -> None:
     extraction = {
         "invoice_value": {"value": 1200000, "confidence": "high"},
         "dealer_discount_amount": {"value": 25000, "confidence": "medium"},
         "emi_amount": {"value": 22000, "confidence": "medium"},
-        "customer_name": {"value": "Do not publish", "confidence": "high"},
+        "customer_name": {"value": "Do not publish from unknown source", "confidence": "high"},
         "unrelated_reference": {"value": "ABC", "confidence": "high"},
     }
     filtered = filter_uc03_booking_result("future_commercial_document", extraction)
