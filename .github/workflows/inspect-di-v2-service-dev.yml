@@ -1,0 +1,85 @@
+name: Inspect DI V2 Service DEV
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/inspect-di-v2-service-dev.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+    steps:
+      - uses: actions/checkout@v6
+      - run: npm install --global @railway/cli
+      - name: Inspect Railway service and deployment metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --json >/tmp/link.json
+          railway status --json >/tmp/status.json
+          railway service list --json >/tmp/services.json
+          railway deployment list --service di-worker --limit 5 --json >/tmp/legacy-deployments.json
+          railway deployment list --service di-worker-v2 --limit 5 --json >/tmp/v2-deployments.json
+          railway variable list --service di-worker --environment dev --json >/tmp/legacy-vars.json
+          railway variable list --service di-worker-v2 --environment dev --json >/tmp/v2-vars.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          status=json.loads(Path('/tmp/status.json').read_text())
+          services=json.loads(Path('/tmp/services.json').read_text())
+          legacy=json.loads(Path('/tmp/legacy-deployments.json').read_text())
+          v2=json.loads(Path('/tmp/v2-deployments.json').read_text())
+          legacy_vars=json.loads(Path('/tmp/legacy-vars.json').read_text())
+          v2_vars=json.loads(Path('/tmp/v2-vars.json').read_text())
+
+          def scrub(value):
+              if isinstance(value, dict):
+                  out={}
+                  for k,v in value.items():
+                      low=k.lower()
+                      if any(word in low for word in ('token','secret','password','apikey','api_key')):
+                          out[k]='[REDACTED]'
+                      elif 'variable' in low and isinstance(v, dict):
+                          out[k]='[VARIABLE_MAP_REDACTED]'
+                      else:
+                          out[k]=scrub(v)
+                  return out
+              if isinstance(value, list):
+                  return [scrub(v) for v in value]
+              return value
+
+          print('RAILWAY_STATUS_BEGIN')
+          print(json.dumps(scrub(status), indent=2, sort_keys=True))
+          print('RAILWAY_STATUS_END')
+          print('RAILWAY_SERVICES_BEGIN')
+          selected=[row for row in services if row.get('name') in {'di-worker','di-worker-v2'}]
+          print(json.dumps(scrub(selected), indent=2, sort_keys=True))
+          print('RAILWAY_SERVICES_END')
+          print('LEGACY_DEPLOYMENTS_BEGIN')
+          print(json.dumps(scrub(legacy), indent=2, sort_keys=True))
+          print('LEGACY_DEPLOYMENTS_END')
+          print('V2_DEPLOYMENTS_BEGIN')
+          print(json.dumps(scrub(v2), indent=2, sort_keys=True))
+          print('V2_DEPLOYMENTS_END')
+
+          safe_keys=[
+              'DI_WORKER_MODE','DI_V2_CLASSIFICATION_CONCURRENCY','DI_V2_EXTRACTION_CONCURRENCY',
+              'RAILWAY_DOCKERFILE_PATH','RAILWAY_SERVICE_ID','RAILWAY_SERVICE_NAME','RAILWAY_ENVIRONMENT_NAME',
+              'RAILWAY_PROJECT_ID','RAILWAY_REPLICA_REGION','RAILWAY_DEPLOYMENT_ID',
+          ]
+          print('LEGACY_SAFE_VARS='+json.dumps({k:legacy_vars.get(k) for k in safe_keys}, sort_keys=True))
+          print('V2_SAFE_VARS='+json.dumps({k:v2_vars.get(k) for k in safe_keys}, sort_keys=True))
+          PY
