@@ -306,7 +306,26 @@ jobs:
             done
           done
 
-          railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 320 >/tmp/di-worker.log
+          wait_for_worker_marker() {
+            local service="$1"
+            local logfile="$2"
+            local marker="$3"
+            local lines="$4"
+            for attempt in $(seq 1 20); do
+              railway logs --service "$service" --latest --deployment --lines "$lines" >"$logfile" || true
+              if grep -q "$marker" "$logfile"; then
+                echo "DI_WORKER_LOG_READY=PASS|$service|attempt=$attempt"
+                return 0
+              fi
+              echo "Waiting for $service startup markers (attempt $attempt/20)"
+              sleep 3
+            done
+            tail -n 220 "$logfile" >&2 || true
+            echo "::error::$service deployment reached SUCCESS but startup markers did not become visible." >&2
+            return 1
+          }
+
+          wait_for_worker_marker "$DI_WORKER_SERVICE" /tmp/di-worker.log 'DI_EOD_SCHEDULER_STARTED=PASS' 320
           grep -q 'DI_WORKER_MODE=legacy' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
           grep -q 'DI_LEGACY_PROCESSING_STARTED=PASS' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
           grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
@@ -317,7 +336,7 @@ jobs:
           echo 'DI_LEGACY_WORKER=PASS'
           echo 'DI_EOD_SCHEDULER=PASS'
 
-          railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 360 >/tmp/di-v2-worker.log
+          wait_for_worker_marker "$DI_V2_WORKER_SERVICE" /tmp/di-v2-worker.log 'DI_V2_EXTRACTION_CONCURRENCY=4' 360
           grep -q 'DI_WORKER_MODE=v2' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
           grep -q 'DI_V2_WORKER_STARTED=PASS' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
           grep -q 'DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY=4' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
