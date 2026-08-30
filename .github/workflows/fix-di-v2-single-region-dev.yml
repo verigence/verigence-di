@@ -1,0 +1,194 @@
+name: Fix DI V2 Single Region DEV
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/fix-di-v2-single-region-dev.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: di-v2-worker-dev-region-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      DI_V2_WORKER_SERVICE: di-worker-v2
+      DEPLOY_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Check out exact DEV revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Link Railway DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${RAILWAY_API_TOKEN:-}" ]] || { echo '::error::RAILWAY_API_TOKEN is required.'; exit 1; }
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
+          railway variable list --service "$DI_V2_WORKER_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/v2-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          v=json.loads(Path('/tmp/v2-vars.json').read_text())
+          required=[
+              'DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT',
+              'DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY','DI_DATABASE_URL',
+              'DI_SECURITY_JWKS_URL','DI_WORKER_NOTIFY_DB_URL','DI_DOCAI_GEMINI_API_KEY',
+          ]
+          missing=[k for k in required if not v.get(k)]
+          if missing:
+              raise SystemExit('di-worker-v2 missing configuration: '+','.join(missing))
+          if v.get('DI_WORKER_MODE') != 'v2':
+              raise SystemExit('di-worker-v2 DI_WORKER_MODE must be v2')
+          print('DI_V2_REGION_REPAIR_CONFIG=PASS')
+          PY
+
+      - name: Normalize V2 to one Southeast Asia region
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The service currently contains both the legacy `sin` key and Railway's
+          # current Southeast Asia region. DEV plan permits one region only.
+          # A zero replica assignment removes the stale region.
+          railway scale --service "$DI_V2_WORKER_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json \
+            sin=0 southeast-asia=1 >/tmp/v2-scale.json
+          railway service list --json >/tmp/services-after-scale.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/services-after-scale.json').read_text())
+          row=next((r for r in rows if r.get('name')=='di-worker-v2'), None)
+          if not row:
+              raise SystemExit('di-worker-v2 service not found after scale')
+          regions=[r for r in row.get('regions',[]) if int(r.get('configured') or 0) > 0]
+          if len(regions) != 1:
+              raise SystemExit('di-worker-v2 must have exactly one configured region after repair: '+json.dumps(regions))
+          print('DI_V2_SINGLE_REGION=PASS|'+str(regions[0].get('name'))+'|replicas='+str(regions[0].get('configured')))
+          PY
+
+      - name: Record pre-deploy V2 state
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway deployment list --service "$DI_V2_WORKER_SERVICE" --limit 1 --json >/tmp/v2-before.json
+
+      - name: Deploy V2 worker after region repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > backend/railway.toml <<'TOML'
+          [build]
+          builder = "DOCKERFILE"
+          dockerfilePath = "Dockerfile.worker"
+
+          [deploy]
+          startCommand = "python -m verigence.di.workers"
+          restartPolicyType = "ON_FAILURE"
+          restartPolicyMaxRetries = 10
+          TOML
+          railway up backend --path-as-root --service "$DI_V2_WORKER_SERVICE" --detach --yes \
+            --message "DI V2 single-region repair ${DEPLOY_SHA}" >/dev/null
+
+      - name: Verify V2 deployment and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_id="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/v2-before.json').read_text())
+          print(rows[0].get('id','') if rows else '')
+          PY
+          )"
+          deployment_id=''
+          status=''
+          for attempt in $(seq 1 36); do
+            railway deployment list --service "$DI_V2_WORKER_SERVICE" --limit 1 --json >/tmp/v2-deployment.json
+            read -r deployment_id status <<<"$(python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/v2-deployment.json').read_text())
+          if rows:
+              print(rows[0].get('id',''), rows[0].get('status',''))
+          else:
+              print(' ')
+          PY
+          )"
+            if [[ -z "$deployment_id" || "$deployment_id" == "$previous_id" ]]; then
+              echo "Waiting for fresh V2 deployment (attempt $attempt/36)"
+              sleep 10
+              continue
+            fi
+            case "$status" in
+              SUCCESS)
+                echo "DI_V2_REGION_REPAIR_DEPLOYMENT=PASS|$deployment_id"
+                break
+                ;;
+              FAILED|CRASHED|REMOVED)
+                railway deployment list --service "$DI_V2_WORKER_SERVICE" --limit 1 --json || true
+                railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 320 || true
+                railway logs --service "$DI_V2_WORKER_SERVICE" --latest --build --lines 320 || true
+                echo "::error::V2 deployment failed after region repair: $status"
+                exit 1
+                ;;
+            esac
+            if [[ "$attempt" == "36" ]]; then
+              echo "::error::Fresh V2 deployment did not reach SUCCESS: $status"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          for attempt in $(seq 1 30); do
+            railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 420 >/tmp/v2-runtime.log || true
+            if grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/v2-runtime.log; then
+              break
+            fi
+            sleep 3
+          done
+          grep -q 'DI_WORKER_MODE=v2' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_V2_WORKER_STARTED=PASS' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY=4' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/v2-runtime.log || { tail -n 260 /tmp/v2-runtime.log >&2; exit 1; }
+          if grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/v2-runtime.log; then
+            echo '::error::V2 worker unexpectedly started EOD scheduler.'
+            exit 1
+          fi
+          echo 'DI_V2_REGION_REPAIR_RUNTIME=PASS'
+
+      - name: Confirm final single-region state
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway service list --json >/tmp/services-final.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('/tmp/services-final.json').read_text())
+          row=next((r for r in rows if r.get('name')=='di-worker-v2'), None)
+          if not row:
+              raise SystemExit('di-worker-v2 service missing')
+          regions=[r for r in row.get('regions',[]) if int(r.get('configured') or 0) > 0]
+          if len(regions) != 1:
+              raise SystemExit('final V2 config is not single-region: '+json.dumps(regions))
+          if int((row.get('replicas') or {}).get('running') or 0) < 1:
+              raise SystemExit('di-worker-v2 has no running replicas')
+          print('DI_V2_DEV_HEALTH=PASS|region='+str(regions[0].get('name'))+'|running='+str(row['replicas']['running']))
+          PY
