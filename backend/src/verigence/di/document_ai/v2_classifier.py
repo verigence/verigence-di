@@ -23,7 +23,11 @@ import httpx
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
-from verigence.di.document_ai.invoice_taxonomy import INVOICE_CLASSIFICATION_HINTS
+from verigence.di.document_ai.invoice_taxonomy import (
+    GENERIC_INVOICE_TYPE_KEY,
+    INVOICE_CLASSIFICATION_HINTS,
+    INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS,
+)
 from verigence.di.settings import get_settings
 
 _GEMINI_MODEL = "gemini-3-flash-preview"
@@ -97,6 +101,17 @@ def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, s
     return document_bytes, mime_type
 
 
+def _with_invoice_fallback(candidates: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Add one internal generic invoice candidate without another provider call."""
+    keys = {key for key, _ in candidates}
+    if (
+        GENERIC_INVOICE_TYPE_KEY not in keys
+        and any(key in INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS for key in keys)
+    ):
+        return [*candidates, (GENERIC_INVOICE_TYPE_KEY, "Other Invoice")]
+    return candidates
+
+
 def _candidate_line(key: str, label: str) -> str:
     semantic_hint = INVOICE_CLASSIFICATION_HINTS.get(key)
     if semantic_hint is None:
@@ -133,9 +148,10 @@ async def classify_document_v2(
     if not candidates:
         raise V2ClassificationError("V2 classifier requires at least one candidate type")
 
+    effective_candidates = _with_invoice_fallback(candidates)
     settings = get_settings()
     if settings.docai_mock:
-        key = candidates[0][0]
+        key = effective_candidates[0][0]
         return V2ClassificationResult(
             document_type_key=key,
             confidence=Decimal("95.00"),
@@ -154,7 +170,7 @@ async def classify_document_v2(
                             "data": base64.b64encode(payload_bytes).decode("ascii"),
                         }
                     },
-                    {"text": _prompt(candidates)},
+                    {"text": _prompt(effective_candidates)},
                 ]
             }
         ],
@@ -183,7 +199,7 @@ async def classify_document_v2(
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise V2ClassificationError("Gemini returned an invalid classification payload") from exc
 
-    allowed = {key for key, _ in candidates}
+    allowed = {key for key, _ in effective_candidates}
     if observed == "UNKNOWN":
         selected: str | None = None
     elif observed in allowed:
