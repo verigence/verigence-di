@@ -23,6 +23,7 @@ jobs:
       RAILWAY_ENVIRONMENT: dev
       DI_API_SERVICE: di-api
       DI_WORKER_SERVICE: di-worker
+      DI_V2_WORKER_SERVICE: di-worker-v2
       DB_SERVICE: Postgres
       DEPLOY_SHA: ${{ github.sha }}
 
@@ -95,6 +96,95 @@ jobs:
           print('DI_CONFIG_PARITY=PASS')
           PY
 
+      - name: Ensure dedicated V2 worker service and variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway service list --json >/tmp/services-before-v2.json
+          if ! SERVICE_FILE=/tmp/services-before-v2.json SERVICE_NAME="$DI_V2_WORKER_SERVICE" python - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows=json.loads(Path(os.environ['SERVICE_FILE']).read_text())
+          raise SystemExit(0 if any(row.get('name') == os.environ['SERVICE_NAME'] for row in rows) else 1)
+          PY
+          then
+            railway add --service "$DI_V2_WORKER_SERVICE" --json >/tmp/di-v2-service-create.json
+            echo "DI_V2_SERVICE=CREATED|$DI_V2_WORKER_SERVICE"
+          else
+            echo "DI_V2_SERVICE=EXISTS|$DI_V2_WORKER_SERVICE"
+          fi
+
+          # Keep the existing worker as the single legacy/V1 + EOD lane.
+          railway variable set \
+            --service "$DI_WORKER_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --skip-deploys \
+            DI_WORKER_MODE=legacy >/dev/null
+
+          # Copy DI runtime configuration without printing secret values. Worker-specific
+          # topology keys are set explicitly below.
+          railway variable list --service "$DI_WORKER_SERVICE" --json >/tmp/di-worker-vars-copy.json
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          source=json.loads(Path('/tmp/di-worker-vars-copy.json').read_text())
+          excluded={
+              'DI_WORKER_MODE',
+              'DI_V2_CLASSIFICATION_CONCURRENCY',
+              'DI_V2_EXTRACTION_CONCURRENCY',
+          }
+          assignments=[
+              f'{key}={value}'
+              for key, value in source.items()
+              if key.startswith('DI_') and key not in excluded and value is not None
+          ]
+          cmd=[
+              'railway','variable','set',
+              '--service',os.environ['DI_V2_WORKER_SERVICE'],
+              '--environment',os.environ['RAILWAY_ENVIRONMENT'],
+              '--skip-deploys',
+              *assignments,
+              'DI_WORKER_MODE=v2',
+              'DI_V2_CLASSIFICATION_CONCURRENCY=4',
+              'DI_V2_EXTRACTION_CONCURRENCY=4',
+          ]
+          subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+          print('DI_V2_VARIABLE_COPY=PASS')
+          PY
+
+          railway variable list --service "$DI_V2_WORKER_SERVICE" --json >/tmp/di-v2-worker-vars.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy=json.loads(Path('/tmp/di-worker-vars-copy.json').read_text())
+          v2=json.loads(Path('/tmp/di-v2-worker-vars.json').read_text())
+          required=[
+              'DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT',
+              'DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY','DI_DATABASE_URL',
+              'DI_SECURITY_JWKS_URL','DI_WORKER_NOTIFY_DB_URL',
+          ]
+          missing=[key for key in required if not v2.get(key)]
+          if missing:
+              raise SystemExit('di-worker-v2 missing persisted DI configuration: '+','.join(missing))
+          shared=[
+              'DI_SECRET_KEY','DI_STORAGE_PROVIDER','DI_STORAGE_BUCKET','DI_STORAGE_ENDPOINT',
+              'DI_STORAGE_REGION','DI_STORAGE_ACCESS_KEY_ID','DI_STORAGE_SECRET_ACCESS_KEY',
+              'DI_DOCAI_MOCK','DI_DOCAI_GEMINI_API_KEY','DI_DATABASE_URL','DI_SECURITY_JWKS_URL',
+              'DI_WORKER_NOTIFY_DB_URL',
+          ]
+          drift=[key for key in shared if (legacy.get(key) or '') != (v2.get(key) or '')]
+          if drift:
+              raise SystemExit('legacy/V2 worker configuration drift: '+','.join(drift))
+          if v2.get('DI_WORKER_MODE') != 'v2':
+              raise SystemExit('di-worker-v2 must run with DI_WORKER_MODE=v2')
+          if v2.get('DI_V2_CLASSIFICATION_CONCURRENCY') != '4':
+              raise SystemExit('di-worker-v2 classification concurrency must be 4')
+          if v2.get('DI_V2_EXTRACTION_CONCURRENCY') != '4':
+              raise SystemExit('di-worker-v2 extraction concurrency must be 4')
+          print('DI_V2_PERSISTED_CONFIG=PASS')
+          print('DI_LEGACY_V2_CONFIG_PARITY=PASS')
+          PY
+
       - name: Prepare DI Railway configs
         shell: bash
         run: |
@@ -127,13 +217,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE" "$DI_V2_WORKER_SERVICE"; do
             railway deployment list --service "$service" --limit 1 --json >"/tmp/${service}-before.json"
           done
           python - <<'PY'
           import json, os
           from pathlib import Path
-          for service in (os.environ['DI_API_SERVICE'], os.environ['DI_WORKER_SERVICE']):
+          for service in (
+              os.environ['DI_API_SERVICE'],
+              os.environ['DI_WORKER_SERVICE'],
+              os.environ['DI_V2_WORKER_SERVICE'],
+          ):
               rows=json.loads(Path(f'/tmp/{service}-before.json').read_text())
               previous=rows[0].get('id','') if rows else ''
               print(f'DI_PREVIOUS_DEPLOYMENT|{service}|{previous or "NONE"}')
@@ -147,19 +241,27 @@ jobs:
           railway up backend --path-as-root --service "$DI_API_SERVICE" --detach --yes \
             --message "DI API DEV ${DEPLOY_SHA}" >/dev/null
 
-      - name: Deploy DI worker
+      - name: Deploy legacy DI worker
         shell: bash
         run: |
           set -euo pipefail
           cp /tmp/di-worker-railway.toml backend/railway.toml
           railway up backend --path-as-root --service "$DI_WORKER_SERVICE" --detach --yes \
-            --message "DI worker DEV ${DEPLOY_SHA}" >/dev/null
+            --message "DI legacy worker DEV ${DEPLOY_SHA}" >/dev/null
+
+      - name: Deploy dedicated V2 DI worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/di-worker-railway.toml backend/railway.toml
+          railway up backend --path-as-root --service "$DI_V2_WORKER_SERVICE" --detach --yes \
+            --message "DI V2 worker DEV ${DEPLOY_SHA}" >/dev/null
 
       - name: Verify fresh DI deployments and worker topology
         shell: bash
         run: |
           set -euo pipefail
-          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE"; do
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE" "$DI_V2_WORKER_SERVICE"; do
             previous_id="$(SERVICE_FILE="/tmp/${service}-before.json" python - <<'PY'
           import json, os
           from pathlib import Path
@@ -203,11 +305,45 @@ jobs:
               sleep 10
             done
           done
-          railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 260 >/tmp/di-worker.log
-          grep -q 'DI_WORKER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }
-          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-worker.log || { tail -n 180 /tmp/di-worker.log >&2; exit 1; }
-          echo 'DI_WORKER=PASS'
+
+          railway logs --service "$DI_WORKER_SERVICE" --latest --deployment --lines 320 >/tmp/di-worker.log
+          grep -q 'DI_WORKER_MODE=legacy' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
+          grep -q 'DI_LEGACY_PROCESSING_STARTED=PASS' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
+          grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-worker.log || { tail -n 200 /tmp/di-worker.log >&2; exit 1; }
+          if grep -q 'DI_V2_WORKER_STARTED=PASS' /tmp/di-worker.log; then
+            echo '::error::Legacy di-worker unexpectedly started V2 pools.'
+            exit 1
+          fi
+          echo 'DI_LEGACY_WORKER=PASS'
           echo 'DI_EOD_SCHEDULER=PASS'
+
+          railway logs --service "$DI_V2_WORKER_SERVICE" --latest --deployment --lines 360 >/tmp/di-v2-worker.log
+          grep -q 'DI_WORKER_MODE=v2' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
+          grep -q 'DI_V2_WORKER_STARTED=PASS' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
+          grep -q 'DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY=4' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
+          grep -q 'DI_V2_EXTRACTION_CONCURRENCY=4' /tmp/di-v2-worker.log || { tail -n 220 /tmp/di-v2-worker.log >&2; exit 1; }
+          if grep -q 'DI_EOD_SCHEDULER_STARTED=PASS' /tmp/di-v2-worker.log; then
+            echo '::error::Dedicated V2 worker unexpectedly started the EOD scheduler.'
+            exit 1
+          fi
+          echo 'DI_V2_WORKER_TOPOLOGY=PASS'
+
+      - name: Scale dedicated V2 worker to two replicas
+        shell: bash
+        run: |
+          set -euo pipefail
+          region="$(grep 'DI_WORKER_REPLICA_REGION=' /tmp/di-v2-worker.log | tail -n 1 | sed 's/.*DI_WORKER_REPLICA_REGION=//' | tr -d '\r' | xargs)"
+          if [[ -z "$region" || "$region" == "unknown" ]]; then
+            echo '::error::Could not resolve the Railway region of di-worker-v2; refusing to guess a region.'
+            tail -n 220 /tmp/di-v2-worker.log >&2
+            exit 1
+          fi
+          railway scale \
+            --service "$DI_V2_WORKER_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --json \
+            "${region}=2" >/tmp/di-v2-scale.json
+          echo "DI_V2_REPLICA_SCALE=PASS|region=$region|replicas=2"
 
       - name: Resolve or create DI API public domain
         shell: bash
