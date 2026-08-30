@@ -15,8 +15,8 @@ Implements DI_LLD_v2.2 §Processing Worker, one full processing run per claimed 
   Step 11 — normalize fields (rules.runner)
   Step 12 — run deterministic validation rules (rules.runner)
   Step 13 — persist immutable extracted_facts + MACHINE document_field_values
-  Step 14 — calculate Document confidence score
-  Step 15 — persist verification_threshold_applied=90.00
+  Step 14 — calculate Document confidence score when the profile is scoreable
+  Step 15 — persist verification threshold only when scoring applies
   Step 16 — derive Human Verification Status
   Step 17 — set PROCESSED + CONFIRMED
 
@@ -161,7 +161,6 @@ async def run_processing_job(
             job_start=_job_start,
         )
     except ProcessingError as exc:
-        # Mark the Processing Run as FAILED
         await _fail_processing_run(
             session=session,
             tenant_id=tenant_id,
@@ -182,7 +181,6 @@ async def run_processing_job(
             retryable=exc.retryable,
         )
     except Exception as exc:
-        # Unexpected error — treat as retryable
         err_detail = f"Unexpected worker error: {exc}"
         await _fail_processing_run(
             session=session,
@@ -223,7 +221,6 @@ async def _execute_steps(
     """All 17 processing steps — raises ProcessingError on failure."""
     now = started_at
 
-    # ── Step 3: Set Document PROCESSING ──────────────────────────────────────
     await session.execute(
         text("""
             UPDATE docintel.documents
@@ -236,7 +233,6 @@ async def _execute_steps(
          "run_id": processing_run_id, "now": now},
     )
 
-    # ── Step 4: Form classification candidate set ─────────────────────────────
     tenant_row = await _get_tenant_settings(session, tenant_id)
     acceptance_score = Decimal(str(tenant_row["classification_acceptance_score"]))
     hint_key = await _get_document_hint_key(session, tenant_id, document_id)
@@ -249,8 +245,6 @@ async def _execute_steps(
         hint_key=hint_key,
     )
 
-    # ── Step 5: Persist candidate snapshot ───────────────────────────────────
-    # Need requirement context for flags
     subject_id = await _get_document_subject_id(session, tenant_id, document_id)
     req_keys = await _get_requirement_keys(session, tenant_id, subject_id) if subject_id else set()
 
@@ -268,14 +262,12 @@ async def _execute_steps(
         },
     )
 
-    # ── Step 6: Zero candidates check ────────────────────────────────────────
     if not candidates:
         raise NonRetryableError(
             "CLASSIFICATION_NO_CANDIDATES",
             "No ACTIVE Document Types with a PUBLISHED Extraction Profile exist for this Tenant",
         )
 
-    # ── Step 7: Call classifier ───────────────────────────────────────────────
     artifact_bytes, mime_type = await _load_original_artifact(session, tenant_id, document_id)
     candidate_keys = [c["document_type_key"] for c in candidates]
 
@@ -306,7 +298,6 @@ async def _execute_steps(
 
     classifications: list[ClassificationCandidate] = classify_result.results  # type: ignore[assignment]
 
-    # ── Step 8: Accept single winner ─────────────────────────────────────────
     accepted = _accept_classification(classifications, candidates, acceptance_score)
     if accepted is None:
         scores = [(c["document_type_key"], c.get("classification_score")) for c in candidates]
@@ -321,7 +312,6 @@ async def _execute_steps(
             f"No single candidate met acceptance score {acceptance_score}; scores: {scores}",
         )
 
-    # Find runner-up for diagnostics
     others = [c for c in classifications if c.document_type_key != accepted["document_type_key"]]
     runner_up = max(others, key=lambda c: float(c.confidence or 0), default=None)
     log.info(
@@ -333,11 +323,9 @@ async def _execute_steps(
         runner_up_score=str(runner_up.confidence) if runner_up else None,
     )
 
-    # ── Step 9: Use the profileId from the snapshotted candidate ─────────────
     profile_id = uuid.UUID(str(accepted["profile_id"]))
     document_type_id = uuid.UUID(str(accepted["document_type_id"]))
 
-    # Persist document classification row + update extraction_profile_id on run
     await _persist_classifications(
         session, tenant_id, processing_run_id, document_id,
         classifications, accepted, profile_id,
@@ -350,7 +338,6 @@ async def _execute_steps(
         """),
         {"tid": tenant_id, "run_id": processing_run_id, "pid": profile_id},
     )
-    # Set document_type_id on the document row
     await session.execute(
         text("""
             UPDATE docintel.documents
@@ -360,7 +347,6 @@ async def _execute_steps(
         {"tid": tenant_id, "doc_id": document_id, "dtid": document_type_id, "now": now},
     )
 
-    # ── Step 10: Extract fields ───────────────────────────────────────────────
     profile_fields = await _load_profile_fields(session, profile_id)
     if not profile_fields:
         raise NonRetryableError(
@@ -377,7 +363,6 @@ async def _execute_steps(
         for pf in profile_fields
     ]
 
-    # D22: fetch physical_form_type for the accepted document type
     accepted_document_type_key: str = accepted["document_type_key"]
     physical_form_type_for_extract = await _get_physical_form_type(
         session, tenant_id, document_type_id,
@@ -449,13 +434,10 @@ async def _execute_steps(
             ),
         )
 
-    # ── Step 11 + 12: Normalize + Validate ───────────────────────────────────
-    # First persist the raw extracted_facts, then normalize them.
-    # Result lookup is provider-key based; persistence is canonical-field based.
     field_result_map: dict[str, FieldResult] = {fr.field_key: fr for fr in field_results}
 
     extracted_inputs: list[ExtractedFieldInput] = []
-    fact_id_map: dict[uuid.UUID, uuid.UUID] = {}  # profile_field_id → extracted_fact_id
+    fact_id_map: dict[uuid.UUID, uuid.UUID] = {}
 
     for pf in profile_fields:
         provider_key = _provider_field_key(pf)
@@ -515,8 +497,6 @@ async def _execute_steps(
         extracted_fields=extracted_inputs,
     )
 
-    # ── Step 13: Persist MACHINE document_field_values ────────────────────────
-    # Build a system actor row if not present (worker writes as system actor)
     system_actor_id = "worker.system"
     await _ensure_system_actor(session, tenant_id, system_actor_id)
 
@@ -559,7 +539,6 @@ async def _execute_steps(
             },
         )
 
-    # ── Steps 11+12: Log normalization + validation summaries ────────────────
     _norm_errors = [n for n in runner_output.normalized if not n.normalization_ok]
     _val_failed = [v for v in runner_output.validated if v.has_error_fail]
     log.info(
@@ -578,7 +557,6 @@ async def _execute_steps(
     # ── Steps 14–16: Score + verify ───────────────────────────────────────────
     scored_fields = _build_scored_fields(profile_fields, field_result_map)
 
-    # Resolve effective threshold: tenant DB value → system-wide default
     from decimal import Decimal as _Decimal
 
     from verigence.di.repositories.documents import get_verification_threshold
@@ -589,44 +567,61 @@ async def _execute_steps(
     else:
         effective_threshold = _Decimal(str(get_settings().verification_threshold))
 
-    try:
-        conf_result = calculate_confidence_score(scored_fields, threshold=effective_threshold)
-    except ValueError as exc:
-        raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc)) from exc
-
-    confidence_score = conf_result.confidence_score
-    hvs = conf_result.human_verification_status
     deterministic_rules_force_review = bool(_norm_errors or _val_failed)
+    non_scoring_profile = not scored_fields
+
+    if non_scoring_profile:
+        confidence_score: Decimal | None = None
+        threshold_applied: Decimal | None = None
+        hvs = HumanVerificationStatus.OPTIONAL
+    else:
+        try:
+            conf_result = calculate_confidence_score(scored_fields, threshold=effective_threshold)
+        except ValueError as exc:
+            # A profile that declares scored fields but still produces no positive
+            # denominator remains a genuine configuration error.  Only profiles
+            # with no score_included fields are intentionally non-scoring.
+            raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc)) from exc
+        confidence_score = conf_result.confidence_score
+        threshold_applied = conf_result.verification_threshold_applied
+        hvs = conf_result.human_verification_status
+
     if deterministic_rules_force_review:
         hvs = HumanVerificationStatus.MANDATORY
 
     _required_present = sum(1 for sf in scored_fields if sf.expected and sf.found_status == FoundStatus.FOUND)
     _required_missing = sum(1 for sf in scored_fields if sf.expected and sf.found_status != FoundStatus.FOUND)
+    hvs_reason = (
+        "DETERMINISTIC_RULE_FAILURE"
+        if deterministic_rules_force_review
+        else (
+            "NON_SCORING_PROFILE"
+            if non_scoring_profile
+            else ("AUTO_REVIEW_OPTIONAL" if hvs == HumanVerificationStatus.OPTIONAL else "NEEDS_REVIEW")
+        )
+    )
     log.info(
         "score_calculated",
         document_type_key=accepted_document_type_key,
-        confidence_score=str(confidence_score),
-        threshold_applied=str(effective_threshold),
+        confidence_score=(str(confidence_score) if confidence_score is not None else None),
+        threshold_applied=(str(threshold_applied) if threshold_applied is not None else None),
+        scoreable_field_count=len(scored_fields),
+        non_scoring_profile=non_scoring_profile,
         required_present=_required_present,
         required_missing=_required_missing,
     )
     log.info(
         "hvs_derived",
         document_type_key=accepted_document_type_key,
-        confidence_score=str(confidence_score),
-        threshold=str(effective_threshold),
+        confidence_score=(str(confidence_score) if confidence_score is not None else None),
+        threshold=(str(threshold_applied) if threshold_applied is not None else None),
         human_verification_status=hvs.value,
         deterministic_rules_force_review=deterministic_rules_force_review,
         normalization_error_count=len(_norm_errors),
         validation_error_count=len(_val_failed),
-        reason=(
-            "DETERMINISTIC_RULE_FAILURE"
-            if deterministic_rules_force_review
-            else ("AUTO_REVIEW_OPTIONAL" if hvs == HumanVerificationStatus.OPTIONAL else "NEEDS_REVIEW")
-        ),
+        reason=hvs_reason,
     )
 
-    # ── Step 17: Set PROCESSED + CONFIRMED ───────────────────────────────────
     await session.execute(
         text("""
             UPDATE docintel.documents
@@ -641,17 +636,13 @@ async def _execute_steps(
         {
             "tid": tenant_id,
             "doc_id": document_id,
-            "conf": float(confidence_score),
-            "threshold": float(effective_threshold),
+            "conf": float(confidence_score) if confidence_score is not None else None,
+            "threshold": float(threshold_applied) if threshold_applied is not None else None,
             "hvs": hvs.value,
             "now": now,
         },
     )
 
-    # ── Step 17b: Upsert document_search_index (D14) ─────────────────────────
-    # Use profile-field identity internally so duplicate canonicals in different
-    # roles cannot overwrite each other.  JSON search keys are role-qualified
-    # when a profile field has an explicit fact role.
     profile_field_to_norm_value: dict[uuid.UUID, object] = {}
     for pf in profile_fields:
         profile_field_id = uuid.UUID(str(pf["profile_field_id"]))
@@ -679,7 +670,6 @@ async def _execute_steps(
         schema_version=PIPELINE_VERSION,
     )
 
-    # Mark Processing Run COMPLETED
     await session.execute(
         text("""
             UPDATE docintel.processing_runs
@@ -697,7 +687,7 @@ async def _execute_steps(
         document_type_key=accepted_document_type_key,
         processing_run_id=str(processing_run_id),
         confirmation_status="CONFIRMED",
-        confidence_score=str(confidence_score),
+        confidence_score=(str(confidence_score) if confidence_score is not None else None),
         human_verification_status=hvs.value,
         indexed_field_keys=indexed_keys,
         total_duration_ms=_total_ms,
@@ -772,7 +762,6 @@ async def _get_document_subject_id(
 async def _get_requirement_keys(
     session: AsyncSession, tenant_id: str, subject_id: uuid.UUID,
 ) -> set[str]:
-    """Get document_type_keys from the Subject's active Requirement Profile."""
     rows = (
         await session.execute(
             text("""
@@ -798,16 +787,10 @@ async def _form_candidate_set(
     session: AsyncSession,
     tenant_id: str,
 ) -> list[dict[str, Any]]:
-    """
-    Implements DI_CLASSIFICATION_v2.2.md §2 candidate-set algorithm steps 1-4.
-
-    Returns list of dicts: {document_type_id, document_type_key, profile_id, scope_tenant_id}
-    """
     rows = (
         await session.execute(
             text("""
                 WITH effective_types AS (
-                    -- Step 1+2: visible ACTIVE types; Tenant shadows global on same key
                     SELECT DISTINCT ON (dt.document_type_key)
                         dt.document_type_id,
                         dt.document_type_key,
@@ -819,7 +802,6 @@ async def _form_candidate_set(
                              CASE WHEN dt.owner_tenant_id = :tid THEN 0 ELSE 1 END
                 ),
                 with_profile AS (
-                    -- Step 3: resolve PUBLISHED Extraction Profile (Tenant > global)
                     SELECT DISTINCT ON (et.document_type_id)
                         et.document_type_id,
                         et.document_type_key,
@@ -833,7 +815,6 @@ async def _form_candidate_set(
                     ORDER BY et.document_type_id,
                              CASE WHEN ep.scope_tenant_id = :tid THEN 0 ELSE 1 END
                 )
-                -- Step 4: only types with a published profile remain
                 SELECT document_type_id, document_type_key, profile_id
                 FROM with_profile
                 ORDER BY document_type_key
@@ -849,10 +830,6 @@ def _build_candidate_snapshot(
     req_keys: set[str],
     hint_key: str | None,
 ) -> list[dict[str, Any]]:
-    """
-    Build the JSON snapshot persisted on processing_runs.classification_candidate_set.
-    Order per DI_CLASSIFICATION_v2.2 §2 step 9: hint first, then requirement, then rest.
-    """
     snapshot: list[dict[str, Any]] = []
     for c in candidates:
         snapshot.append({
@@ -862,7 +839,6 @@ def _build_candidate_snapshot(
             "isRequirementExpected": c["document_type_key"] in req_keys,
             "isCallerHint": c["document_type_key"] == hint_key,
         })
-    # Sort: hint first, then req expected, then alpha
     snapshot.sort(key=lambda e: (
         0 if e["isCallerHint"] else (1 if e["isRequirementExpected"] else 2),
         e["documentTypeKey"],
@@ -875,11 +851,6 @@ def _accept_classification(
     candidates: list[dict[str, Any]],
     acceptance_score: Decimal,
 ) -> dict[str, Any] | None:
-    """
-    DI_CLASSIFICATION_v2.2 §2 step 11:
-    Accept exactly one candidate above acceptance_score.
-    Returns the matching candidate dict from candidates, or None.
-    """
     candidate_key_map = {c["document_type_key"]: c for c in candidates}
     winners = [
         cl for cl in classifications
@@ -934,7 +905,6 @@ async def _load_original_artifact(
     tenant_id: str,
     document_id: uuid.UUID,
 ) -> tuple[bytes, str]:
-    """Load the ORIGINAL artifact bytes + MIME type from storage."""
     row = (
         await session.execute(
             text("""
@@ -957,7 +927,6 @@ async def _load_original_artifact(
     logical_key, mime_type = row[0], row[1]
     mime_type = mime_type or "application/octet-stream"
 
-    # Load bytes from storage
     from verigence.di.storage.adapter import get_storage_adapter
     storage = get_storage_adapter()
     try:
@@ -972,7 +941,6 @@ async def _load_profile_fields(
     session: AsyncSession,
     profile_id: uuid.UUID,
 ) -> list[dict[str, Any]]:
-    """Load enabled profile fields with provider extraction keys and fact roles."""
     rows = (
         await session.execute(
             text("""
@@ -1002,7 +970,6 @@ async def _load_profile_fields(
 
 
 def _provider_field_key(profile_field: dict[str, Any]) -> str:
-    """Return the provider-facing key while preserving legacy profiles."""
     extraction_key = profile_field.get("extraction_key")
     if isinstance(extraction_key, str) and extraction_key.strip():
         return extraction_key.strip()
@@ -1010,7 +977,6 @@ def _provider_field_key(profile_field: dict[str, Any]) -> str:
 
 
 def _search_index_key(profile_field: dict[str, Any]) -> str:
-    """Use role-qualified keys so role-distinct canonicals never overwrite."""
     canonical_key = str(profile_field["canonical_field_key"])
     role = str(profile_field.get("fact_role_override") or "UNSPECIFIED")
     if role == "UNSPECIFIED":
@@ -1023,11 +989,6 @@ async def _get_physical_form_type(
     tenant_id: str,
     document_type_id: uuid.UUID,
 ) -> str:
-    """Fetch physical_form_type from tenant_document_types for the accepted type.
-
-    D22: passed to ai_adapter.extract() for schema registry routing.
-    Falls back to 'PRINTABLE' if the row is not found.
-    """
     row = (
         await session.execute(
             text("""
@@ -1158,7 +1119,6 @@ async def _ensure_system_actor(
     tenant_id: str,
     actor_id: str,
 ) -> None:
-    """Insert a SYSTEM actor row if it does not exist yet (idempotent)."""
     now = datetime.now(UTC)
     await session.execute(
         text("""
