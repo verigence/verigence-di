@@ -81,10 +81,10 @@ async def _main() -> None:
 
     if legacy_worker is not None:
         legacy_worker.start()
-    for worker in capture_v2_workers:
-        worker.start()
-    for worker in v2_processing_workers:
-        worker.start()
+    for capture_worker in capture_v2_workers:
+        capture_worker.start()
+    for processing_worker in v2_processing_workers:
+        processing_worker.start()
 
     scheduler_started = False
     try:
@@ -118,8 +118,8 @@ async def _main() -> None:
     finally:
         logger.info("di_worker_stopping", worker_mode=mode.value)
         await asyncio.gather(
-            *(worker.stop() for worker in capture_v2_workers),
-            *(worker.stop() for worker in v2_processing_workers),
+            *(capture_worker.stop() for capture_worker in capture_v2_workers),
+            *(processing_worker.stop() for processing_worker in v2_processing_workers),
         )
         if legacy_worker is not None:
             await legacy_worker.stop()
