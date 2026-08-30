@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service di-worker --json >/dev/null
-          railway variable list --service di-worker --environment dev --json >/tmp/worker-vars.json
+          railway variable list --service Postgres --environment dev --json >/tmp/postgres-vars.json
 
       - name: Inspect Booking Form profile and recent extraction facts
         shell: bash
@@ -41,11 +41,15 @@ jobs:
           DB_URL="$(python - <<'PY'
           import json
           from pathlib import Path
-          v=json.loads(Path('/tmp/worker-vars.json').read_text())
-          print(str(v.get('DI_DATABASE_URL') or ''))
+          v=json.loads(Path('/tmp/postgres-vars.json').read_text())
+          for key in ('DATABASE_PUBLIC_URL','POSTGRES_PUBLIC_URL','DATABASE_URL'):
+              value=str(v.get(key) or '').strip()
+              if value and 'railway.internal' not in value:
+                  print(value)
+                  break
           PY
           )"
-          if [[ -z "$DB_URL" ]]; then echo 'DI_DATABASE_URL missing'; exit 1; fi
+          if [[ -z "$DB_URL" ]]; then echo 'Public Postgres URL missing'; exit 1; fi
           echo "::add-mask::$DB_URL"
           export DI_DATABASE_URL="$DB_URL"
           python - <<'PY' | tee docs/runtime/booking-form-field-diagnostic.txt
