@@ -24,6 +24,14 @@ class StorageProvider(str, Enum):
     R2 = "r2"
 
 
+class WorkerMode(str, Enum):
+    """Runtime topology for the standalone DI worker process."""
+
+    COMBINED = "combined"
+    LEGACY = "legacy"
+    V2 = "v2"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DI_",
@@ -71,6 +79,13 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: int = 30
     worker_enabled: bool = True
     worker_id: str = ""   # auto-generated from hostname+PID when empty
+    # combined preserves the historical single-process topology for local/CI.
+    # Railway DEV/PROD explicitly split legacy and V2 workloads into services.
+    worker_mode: WorkerMode = WorkerMode.COMBINED
+    # Bounded V2 pools. These are per process/replica and intentionally separate
+    # from the legacy/V1 lane so V1 behaviour can remain sequential.
+    v2_classification_concurrency: int = Field(default=6, ge=1, le=32)
+    v2_extraction_concurrency: int = Field(default=4, ge=1, le=32)
     # Direct Neon endpoint URL for the dedicated LISTEN connection.
     # Must NOT use the PgBouncer pooler endpoint — LISTEN/NOTIFY requires a
     # persistent direct connection (Neon: ep-xxx.region.neon.tech, no -pooler.).
