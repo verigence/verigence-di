@@ -46,8 +46,7 @@ def upgrade() -> None:
                       )
                     ORDER BY ef.created_at_utc DESC, ef.extracted_fact_id DESC
                     LIMIT 1
-                ),
-                updated_at_utc = now()
+                )
             WHERE dfv.is_current = true
               AND dfv.value_source = 'MACHINE'
               AND dfv.current_value IS NULL
