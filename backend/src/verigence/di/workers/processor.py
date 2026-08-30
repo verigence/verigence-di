@@ -1,9 +1,13 @@
-"""workers/processor.py — Async DI worker loop.
+"""workers/processor.py — Async DI worker loops.
 
-In addition to document processing, the worker delivers the lightweight UC03
-Booking requirementRef <-> documentId callback for accepted direct-PC uploads.
-The callback state lives on the Document, is retried durably, and is independent
-of extraction completion.
+The legacy/V1 processing path remains sequential and unchanged in behaviour.
+Document Capture V2 processing jobs are routed to a bounded worker pool so
+extraction can start immediately after the hard classification gate and multiple
+Booking documents can be extracted concurrently.
+
+Both paths execute the same durable processing pipeline.  V2 only wraps the
+configured adapter so the already-accepted byte-based V2 classification is reused
+locally; extraction is delegated unchanged to the configured provider adapter.
 """
 from __future__ import annotations
 
@@ -13,12 +17,14 @@ import os
 import socket
 import time
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from verigence.di.document_ai.adapter import get_document_ai_adapter
+from verigence.di.document_ai.adapter import DocumentAIAdapter, get_document_ai_adapter
+from verigence.di.document_ai.v2_preclassified_adapter import V2PreclassifiedAdapter
 from verigence.di.integrations.audit_core import get_audit_core_link_client
 from verigence.di.repositories.audit_links import (
     claim_pending_audit_link,
@@ -26,7 +32,8 @@ from verigence.di.repositories.audit_links import (
 )
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
-    claim_next_job,
+    claim_next_non_v2_job,
+    claim_next_v2_job,
     complete_job,
     fail_job,
     retry_job,
@@ -37,14 +44,16 @@ from verigence.di.workers.job_runner import run_processing_job
 logger = structlog.get_logger(__name__)
 
 _NOTIFY_CHANNEL = "di_processing_jobs"
+_V2_PROCESSING_CONCURRENCY = 4
+_V2_FALLBACK_POLL_SECONDS = 0.5
 
 
-def _default_worker_id() -> str:
+def _default_worker_id(prefix: str = "processing") -> str:
     try:
         hostname = socket.gethostname()
     except Exception:
         hostname = "unknown"
-    return f"{hostname}.{os.getpid()}"
+    return f"{prefix}.{hostname}.{os.getpid()}"
 
 
 def _asyncpg_url(url: str) -> str:
@@ -55,10 +64,12 @@ def _asyncpg_url(url: str) -> str:
     )
 
 
-class ProcessingWorker:
-    """Long-lived worker for Audit-link delivery plus document processing."""
+class _NotifyWorker:
+    """Common LISTEN/NOTIFY lifecycle for processing workers."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, task_name: str, worker_prefix: str) -> None:
+        self._task_name = task_name
+        self._worker_prefix = worker_prefix
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
@@ -67,8 +78,8 @@ class ProcessingWorker:
     def start(self) -> None:
         self._stop_event.clear()
         self._notify_event.clear()
-        self._task = asyncio.create_task(self._run(), name="processing-worker")
-        logger.info("processing_worker_started")
+        self._task = asyncio.create_task(self._run(), name=self._task_name)
+        logger.info(f"{self._task_name}_started")
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -82,7 +93,7 @@ class ProcessingWorker:
             with contextlib.suppress(Exception):
                 await self._notify_conn.close()
             self._notify_conn = None
-        logger.info("processing_worker_stopped")
+        logger.info(f"{self._task_name}_stopped")
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
         try:
@@ -105,15 +116,30 @@ class ProcessingWorker:
             conn = await asyncpg.connect(_asyncpg_url(notify_db_url))
             await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
             self._notify_conn = conn
-            logger.info("notify_listener_started", channel=_NOTIFY_CHANNEL)
+            logger.info(
+                "notify_listener_started",
+                channel=_NOTIFY_CHANNEL,
+                worker=self._task_name,
+            )
             return True
         except Exception as exc:
             logger.warning(
                 "notify_listener_failed",
                 reason=str(exc),
                 fallback="poll_only",
+                worker=self._task_name,
             )
             return False
+
+    async def _run(self) -> None:  # pragma: no cover - abstract runtime loop
+        raise NotImplementedError
+
+
+class ProcessingWorker(_NotifyWorker):
+    """Sequential legacy/V1 worker plus Audit-link delivery."""
+
+    def __init__(self) -> None:
+        super().__init__(task_name="processing-worker", worker_prefix="processing")
 
     async def _run(self) -> None:
         settings = get_settings()
@@ -124,7 +150,7 @@ class ProcessingWorker:
         engine = create_async_engine(str(settings.database_url), echo=False)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         ai_adapter = get_document_ai_adapter()
-        log = logger.bind(worker_id=worker_id)
+        log = logger.bind(worker_id=worker_id, processing_lane="legacy")
 
         notify_active = False
         if notify_db_url.strip():
@@ -145,8 +171,8 @@ class ProcessingWorker:
         try:
             while not self._stop_event.is_set():
                 try:
-                    # Link delivery is intentionally independent of extraction. One
-                    # pending link is delivered per loop to keep DB/API load bounded.
+                    # Link delivery remains independent of extraction. One pending
+                    # link per loop preserves the existing V1 behaviour.
                     did_work = await self._process_pending_audit_link(
                         session_factory=session_factory,
                         log=log,
@@ -227,90 +253,206 @@ class ProcessingWorker:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        ai_adapter: Any,
+        ai_adapter: DocumentAIAdapter,
         log: Any,
     ) -> bool:
         async with session_factory() as session:
             async with session.begin():
-                job = await claim_next_job(session, worker_id=worker_id)
-
+                job = await claim_next_non_v2_job(session, worker_id=worker_id)
             if job is None:
                 return False
 
-        tenant_id: str = job["tenant_id"]
-        job_id: uuid.UUID = job["processing_job_id"]
-        document_id: uuid.UUID = job["document_id"]
-        correlation_id: str = job["correlation_id"]
-        job_type: str = job["job_type"]
-
-        job_log = log.bind(
-            tenant_id=tenant_id,
-            document_id=str(document_id),
-            processing_job_id=str(job_id),
-            correlation_id=correlation_id,
-            job_type=job_type,
+        await _execute_claimed_job(
+            session_factory=session_factory,
+            job=job,
+            ai_adapter=ai_adapter,
+            log=log,
         )
-        job_log.info("job_claimed")
+        return True
 
-        _job_start = time.monotonic()
-        async with session_factory() as session:
-            try:
-                async with session.begin():
-                    result = await run_processing_job(
-                        session=session,
-                        tenant_id=tenant_id,
-                        document_id=document_id,
-                        processing_job_id=job_id,
-                        job_type=job_type,
-                        correlation_id=correlation_id,
-                        ai_adapter=ai_adapter,
-                    )
 
-                if result.success:
-                    async with session_factory() as s2, s2.begin():
-                        await complete_job(
-                            s2,
-                            tenant_id=tenant_id,
-                            processing_job_id=job_id,
-                            success=True,
-                        )
-                    _total_ms = round((time.monotonic() - _job_start) * 1000, 1)
-                    job_log.info(
-                        "job_completed",
-                        confidence_score=str(result.confidence_score),
-                        human_verification_status=result.human_verification_status,
-                        total_duration_ms=_total_ms,
-                    )
-                else:
-                    await _handle_failure(
+class V2ProcessingWorker(_NotifyWorker):
+    """One lane of the bounded V2 extraction pool.
+
+    A classified V2 document has already passed the Step-1 hard gate.  This lane
+    claims only those jobs and reuses that accepted classification, so no second
+    provider classification call is made.  The unchanged processing pipeline then
+    performs extraction, normalization, validation, lineage and scoring.
+    """
+
+    def __init__(self, slot: int) -> None:
+        self._slot = slot
+        super().__init__(
+            task_name=f"v2-processing-worker-{slot}",
+            worker_prefix=f"v2-processing-{slot}",
+        )
+
+    async def _run(self) -> None:
+        settings = get_settings()
+        worker_id = _default_worker_id(self._worker_prefix)
+        notify_db_url: str = getattr(settings, "worker_notify_db_url", "") or ""
+        engine = create_async_engine(str(settings.database_url), echo=False)
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        delegate = get_document_ai_adapter()
+        log = logger.bind(
+            worker_id=worker_id,
+            processing_lane="capture_v2",
+            pool_slot=self._slot,
+        )
+
+        notify_active = False
+        if notify_db_url.strip():
+            notify_active = await self._open_notify_conn(notify_db_url)
+        if not notify_active:
+            log.info(
+                "v2_notify_listener_fallback",
+                poll_interval_seconds=_V2_FALLBACK_POLL_SECONDS,
+            )
+
+        log.info(
+            "v2_processing_worker_loop_started",
+            notify_active=notify_active,
+            fallback_poll_seconds=_V2_FALLBACK_POLL_SECONDS,
+        )
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    did_work = await self._process_one(
                         session_factory=session_factory,
-                        tenant_id=tenant_id,
-                        job_id=job_id,
-                        document_id=document_id,
-                        processing_run_id=result.processing_run_id,
-                        error_code=result.error_code,
-                        error_detail=result.error_detail,
-                        retryable=result.retryable,
-                        attempt_no=job["attempt_no"],
-                        job_log=job_log,
+                        worker_id=worker_id,
+                        delegate=delegate,
+                        log=log,
                     )
+                except Exception as exc:
+                    log.exception("v2_processing_worker_loop_error", error=str(exc))
+                    did_work = False
 
-            except Exception as exc:
-                job_log.exception("job_runner_unexpected_escape", error=str(exc))
+                if not did_work:
+                    self._notify_event.clear()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            asyncio.shield(self._notify_event.wait()),
+                            timeout=_V2_FALLBACK_POLL_SECONDS,
+                        )
+        finally:
+            await engine.dispose()
+
+    async def _process_one(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        worker_id: str,
+        delegate: DocumentAIAdapter,
+        log: Any,
+    ) -> bool:
+        async with session_factory() as session:
+            async with session.begin():
+                job = await claim_next_v2_job(session, worker_id=worker_id)
+            if job is None:
+                return False
+
+        document_type_key = str(job["capture_v2_document_type_key"])
+        raw_confidence = job["capture_v2_classification_confidence"]
+        classification_confidence = (
+            Decimal(str(raw_confidence)) if raw_confidence is not None else Decimal("0")
+        )
+        adapter = V2PreclassifiedAdapter(
+            delegate,
+            document_type_key=document_type_key,
+            confidence=classification_confidence,
+        )
+        await _execute_claimed_job(
+            session_factory=session_factory,
+            job=job,
+            ai_adapter=adapter,
+            log=log.bind(
+                capture_v2_document_type_key=document_type_key,
+                capture_v2_classification_confidence=str(classification_confidence),
+                classification_reused=True,
+            ),
+        )
+        return True
+
+
+async def _execute_claimed_job(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    job: dict[str, Any],
+    ai_adapter: DocumentAIAdapter,
+    log: Any,
+) -> None:
+    tenant_id: str = str(job["tenant_id"])
+    job_id: uuid.UUID = job["processing_job_id"]
+    document_id: uuid.UUID = job["document_id"]
+    correlation_id: str = str(job["correlation_id"])
+    job_type: str = str(job["job_type"])
+
+    job_log = log.bind(
+        tenant_id=tenant_id,
+        document_id=str(document_id),
+        processing_job_id=str(job_id),
+        correlation_id=correlation_id,
+        job_type=job_type,
+    )
+    job_log.info("job_claimed")
+
+    job_start = time.monotonic()
+    async with session_factory() as session:
+        try:
+            async with session.begin():
+                result = await run_processing_job(
+                    session=session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    processing_job_id=job_id,
+                    job_type=job_type,
+                    correlation_id=correlation_id,
+                    ai_adapter=ai_adapter,
+                )
+
+            if result.success:
+                async with session_factory() as s2, s2.begin():
+                    await complete_job(
+                        s2,
+                        tenant_id=tenant_id,
+                        processing_job_id=job_id,
+                        success=True,
+                    )
+                total_ms = round((time.monotonic() - job_start) * 1000, 1)
+                job_log.info(
+                    "job_completed",
+                    confidence_score=str(result.confidence_score),
+                    human_verification_status=result.human_verification_status,
+                    total_duration_ms=total_ms,
+                )
+            else:
                 await _handle_failure(
                     session_factory=session_factory,
                     tenant_id=tenant_id,
                     job_id=job_id,
                     document_id=document_id,
-                    processing_run_id=None,
-                    error_code="WORKER_INTERNAL_ERROR",
-                    error_detail=str(exc),
-                    retryable=True,
-                    attempt_no=job["attempt_no"],
+                    processing_run_id=result.processing_run_id,
+                    error_code=result.error_code,
+                    error_detail=result.error_detail,
+                    retryable=result.retryable,
+                    attempt_no=int(job["attempt_no"]),
                     job_log=job_log,
                 )
 
-        return True
+        except Exception as exc:
+            job_log.exception("job_runner_unexpected_escape", error=str(exc))
+            await _handle_failure(
+                session_factory=session_factory,
+                tenant_id=tenant_id,
+                job_id=job_id,
+                document_id=document_id,
+                processing_run_id=None,
+                error_code="WORKER_INTERNAL_ERROR",
+                error_detail=str(exc),
+                retryable=True,
+                attempt_no=int(job["attempt_no"]),
+                job_log=job_log,
+            )
 
 
 async def _handle_failure(
@@ -401,8 +543,32 @@ async def _handle_failure(
     )
 
 
-_worker = ProcessingWorker()
+class ProcessingWorkerGroup:
+    """One legacy lane plus a bounded V2 extraction pool."""
+
+    def __init__(self, v2_concurrency: int = _V2_PROCESSING_CONCURRENCY) -> None:
+        self._legacy = ProcessingWorker()
+        self._v2 = [V2ProcessingWorker(slot + 1) for slot in range(v2_concurrency)]
+
+    def start(self) -> None:
+        self._legacy.start()
+        for worker in self._v2:
+            worker.start()
+        logger.info(
+            "processing_worker_group_started",
+            v2_concurrency=len(self._v2),
+        )
+
+    async def stop(self) -> None:
+        await asyncio.gather(
+            self._legacy.stop(),
+            *(worker.stop() for worker in self._v2),
+        )
+        logger.info("processing_worker_group_stopped")
 
 
-def get_worker() -> ProcessingWorker:
+_worker = ProcessingWorkerGroup()
+
+
+def get_worker() -> ProcessingWorkerGroup:
     return _worker

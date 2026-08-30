@@ -30,9 +30,10 @@ C2 Delivery                        Delivery extraction/profile work
 C3 Audit / Review / Hardening      provenance/contract hardening only if required
 ```
 
-## DI working artifact
+## DI working artifacts
 
 - [`UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md`](./UC03_EXTRACTION_SOURCE_MAPPING_v0.1.md) — maps all 57 source fields marked Extracted to candidate evidence sources and classifies each mapping as `SUPPORTED`, `PROVISIONAL`, or `TBD`.
+- [`UC03_V2_FAST_BOOKING_SEQUENCE_2026-08-30.md`](./UC03_V2_FAST_BOOKING_SEQUENCE_2026-08-30.md) — freezes the V2 Booking performance sequence: classification is the Step-1 hard gate, extraction starts immediately in a bounded V2 pool, and V1 APIs/adapters remain unchanged.
 
 A `TBD` field is not authorized for a production extraction profile until its source is reconciled.
 

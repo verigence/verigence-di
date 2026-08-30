@@ -22,9 +22,12 @@ async def _main() -> None:
     from verigence.di.document_ai.v2_classifier import close_v2_classifier_client
     from verigence.di.scheduler.beat import EODRetryScheduler
     from verigence.di.workers.capture_v2_classifier import CaptureV2ClassificationWorker
-    from verigence.di.workers.processor import ProcessingWorker
+    from verigence.di.workers.processor import get_worker
 
-    worker = ProcessingWorker()
+    # get_worker() now owns one unchanged sequential legacy/V1 processing lane and
+    # a bounded V2 extraction pool.  The V2 pool reuses the hard-gate capture
+    # classification and starts extraction without waiting behind unrelated jobs.
+    worker = get_worker()
     capture_v2_workers = [
         CaptureV2ClassificationWorker() for _ in range(_CAPTURE_V2_CONCURRENCY)
     ]
@@ -57,6 +60,7 @@ async def _main() -> None:
         print("DI_WORKER_STARTED=PASS", flush=True)
         print("DI_CAPTURE_V2_CLASSIFIER_STARTED=PASS", flush=True)
         print(f"DI_CAPTURE_V2_CLASSIFIER_CONCURRENCY={_CAPTURE_V2_CONCURRENCY}", flush=True)
+        print("DI_V2_PROCESSING_POOL_STARTED=PASS", flush=True)
         print("DI_EOD_SCHEDULER_STARTED=PASS", flush=True)
 
         await stop_event.wait()

@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _MAX_ERROR_DETAIL = 2000
-_MAX_ERROR_CODE   = 128
+_MAX_ERROR_CODE = 128
 
 
 def _cap(value: str | None, limit: int) -> str | None:
@@ -52,28 +52,54 @@ async def create_initial_job(
     return job_id
 
 
-async def claim_next_job(
+async def _claim_next_job(
     session: AsyncSession,
     *,
     worker_id: str,
+    capture_v2_mode: str,
 ) -> dict | None:  # type: ignore[type-arg]
-    """Claim the next PENDING due job using FOR UPDATE SKIP LOCKED.
+    """Claim one due processing job with optional V2 routing.
 
-    Returns the claimed job dict or None if no jobs are available.
+    ``capture_v2_mode`` is one of ``ANY``, ``ONLY`` or ``EXCLUDE``.  V2 routing
+    is based on the durable Document Capture V2 row, not on a caller-provided
+    flag.  This lets the normal worker remain sequential for legacy/V1 work while
+    a bounded V2 worker pool can start extraction immediately after classification.
     """
+    if capture_v2_mode not in {"ANY", "ONLY", "EXCLUDE"}:
+        raise ValueError("capture_v2_mode must be ANY, ONLY or EXCLUDE")
+
+    if capture_v2_mode == "ONLY":
+        mode_clause = (
+            "AND u.document_id IS NOT NULL "
+            "AND u.state = 'CLASSIFIED' "
+            "AND u.classified_document_type_key IS NOT NULL"
+        )
+    elif capture_v2_mode == "EXCLUDE":
+        mode_clause = "AND u.document_id IS NULL"
+    else:
+        mode_clause = ""
+
     now = datetime.now(UTC)
     row = (
         await session.execute(
-            text("""
-                SELECT tenant_id, processing_job_id, document_id, correlation_id,
-                       job_type, attempt_no
-                FROM docintel.processing_jobs
-                WHERE job_status = 'PENDING'
-                  AND due_at_utc <= :now
-                ORDER BY due_at_utc
+            text(
+                f"""
+                SELECT pj.tenant_id, pj.processing_job_id, pj.document_id,
+                       pj.correlation_id, pj.job_type, pj.attempt_no,
+                       u.classified_document_type_key AS capture_v2_document_type_key,
+                       u.classification_confidence AS capture_v2_classification_confidence
+                FROM docintel.processing_jobs pj
+                LEFT JOIN docintel.document_capture_v2_uploads u
+                  ON u.tenant_id = pj.tenant_id
+                 AND u.document_id = pj.document_id
+                WHERE pj.job_status = 'PENDING'
+                  AND pj.due_at_utc <= :now
+                  {mode_clause}
+                ORDER BY pj.due_at_utc
                 LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            """),
+                FOR UPDATE OF pj SKIP LOCKED
+                """
+            ),
             {"now": now},
         )
     ).mappings().one_or_none()
@@ -106,7 +132,50 @@ async def claim_next_job(
         "correlation_id": row["correlation_id"],
         "job_type": row["job_type"],
         "attempt_no": row["attempt_no"],
+        "capture_v2_document_type_key": row["capture_v2_document_type_key"],
+        "capture_v2_classification_confidence": row[
+            "capture_v2_classification_confidence"
+        ],
     }
+
+
+async def claim_next_job(
+    session: AsyncSession,
+    *,
+    worker_id: str,
+) -> dict | None:  # type: ignore[type-arg]
+    """Backward-compatible claim of any PENDING due processing job."""
+    return await _claim_next_job(
+        session,
+        worker_id=worker_id,
+        capture_v2_mode="ANY",
+    )
+
+
+async def claim_next_non_v2_job(
+    session: AsyncSession,
+    *,
+    worker_id: str,
+) -> dict | None:  # type: ignore[type-arg]
+    """Claim only legacy/V1 jobs; V2 jobs are reserved for the fast V2 pool."""
+    return await _claim_next_job(
+        session,
+        worker_id=worker_id,
+        capture_v2_mode="EXCLUDE",
+    )
+
+
+async def claim_next_v2_job(
+    session: AsyncSession,
+    *,
+    worker_id: str,
+) -> dict | None:  # type: ignore[type-arg]
+    """Claim a classified Document Capture V2 processing job."""
+    return await _claim_next_job(
+        session,
+        worker_id=worker_id,
+        capture_v2_mode="ONLY",
+    )
 
 
 async def complete_job(
@@ -156,7 +225,7 @@ async def retry_job(
     The EOD Retry Scheduler will later insert an EOD_RETRY job (attempt_no=2).
     """
     now = datetime.now(UTC)
-    safe_code   = _cap(error_code,   _MAX_ERROR_CODE)
+    safe_code = _cap(error_code, _MAX_ERROR_CODE)
     safe_detail = _cap(error_detail, _MAX_ERROR_DETAIL)
 
     await session.execute(
@@ -215,7 +284,7 @@ async def fail_job(
     Called by the worker after a NON_RETRYABLE processing failure.
     """
     now = datetime.now(UTC)
-    safe_code   = _cap(error_code,   _MAX_ERROR_CODE)
+    safe_code = _cap(error_code, _MAX_ERROR_CODE)
     safe_detail = _cap(error_detail, _MAX_ERROR_DETAIL)
 
     await session.execute(
