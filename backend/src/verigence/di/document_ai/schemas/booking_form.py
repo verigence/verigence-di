@@ -12,7 +12,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 BOOKING_FORM_SCHEMA = SchemaDefinition(
     document_type_key="booking_form",
     display_name="Booking Form",
-    schema_version="1.2",
+    schema_version="1.3",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=True, description="Name of the dealership exactly as visible"),
         FieldSpec(key="dealer_branch", field_type="string", required=False, description="Dealer branch/outlet/location exactly as visible"),
@@ -25,6 +25,7 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         FieldSpec(key="vehicle_model", field_type="string", required=True, description="Booked vehicle model exactly as visible"),
         FieldSpec(key="vehicle_variant", field_type="string", required=True, description="Booked vehicle variant/trim exactly as visible"),
         FieldSpec(key="vehicle_color", field_type="string", required=True, description="Booked/preferred vehicle colour exactly as visible"),
+        FieldSpec(key="sku_code", field_type="string", required=False, description="Vehicle/product/SKU code only when explicitly printed or written on the Booking Form; never infer it from model, variant, price, or general knowledge"),
         FieldSpec(key="sales_person", field_type="string", required=False, description="Sales executive/consultant name if explicitly visible"),
         FieldSpec(key="ex_showroom_price", field_type="number", required=False, description="Ex-showroom price only when explicitly printed/written", normalization="indian_currency"),
         FieldSpec(key="insurance_amount", field_type="number", required=False, description="Insurance charge only when explicitly printed/written", normalization="indian_currency"),
@@ -53,6 +54,7 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         "Currency values may use Indian numbering (for example 8,58,600); normalize only the formatting of a value that is actually visible.",
         "total_price must be extracted only from an explicitly shown grand-total/on-road-total value. Do not sum component charges.",
         "balance_amount must be extracted only when explicitly shown. Do not subtract booking amount from total price.",
+        "sku_code must be extracted only when an explicit SKU/product/vehicle code is visible. Never derive it from model, variant, colour, or price.",
         "Preserve identifiers exactly as visible; do not repair ambiguous digits or letters.",
     ],
 )
