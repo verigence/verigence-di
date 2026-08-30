@@ -52,7 +52,7 @@ class NormalizedFieldOutput:
     """Result of running normalization for one extracted fact."""
     extracted_fact_id: uuid.UUID
     canonical_field_id: uuid.UUID
-    normalized_value: Any        # JSON-serialisable; None if not normalizable
+    normalized_value: Any
     normalization_ok: bool
     normalization_message: str | None = None
 
@@ -92,8 +92,14 @@ async def normalize_and_validate(
 ) -> RunnerOutput:
     """Run normalization (step 11) then validation (step 12) for all extracted fields.
 
+    A deterministic normalization failure must never erase a real machine
+    extraction. The original raw value remains the consumer-visible fallback while
+    ``normalization_ok=False`` forces human review. This keeps DI lossless: a FOUND
+    value can be reviewed even when a formatter/parser does not understand it.
+
     Persists:
-    - Updated ``normalized_value`` on each ``extracted_facts`` row.
+    - Updated ``normalized_value`` on each ``extracted_facts`` row. On a
+      normalization failure this contains the original raw extraction, not null.
     - One ``validation_results`` row per rule per field.
 
     Returns RunnerOutput for the caller to use in confidence scoring.
@@ -102,9 +108,7 @@ async def normalize_and_validate(
     if not extracted_fields:
         return RunnerOutput()
 
-    # ── Load normalization rule configs for this profile ──────────────────────
     norm_configs = await _load_normalizer_configs(session, profile_id)
-    # ── Load validation rule configs for this profile ─────────────────────────
     val_configs = await _load_validator_configs(session, profile_id)
 
     output = RunnerOutput()
@@ -113,7 +117,6 @@ async def normalize_and_validate(
     for ef in extracted_fields:
         fid = ef.profile_field_id
 
-        # ── Step 11: normalize ────────────────────────────────────────────────
         norm_result = _run_normalizers(
             raw=ef.raw_value_text,
             normalizer_configs=norm_configs.get(fid, []),
@@ -126,7 +129,6 @@ async def normalize_and_validate(
             normalization_message=norm_result.message,
         ))
 
-        # Persist normalized_value back onto the extracted_fact row
         await session.execute(
             text("""
                 UPDATE docintel.extracted_facts
@@ -141,7 +143,6 @@ async def normalize_and_validate(
             },
         )
 
-        # ── Step 12: validate ─────────────────────────────────────────────────
         field_val_output = FieldValidationOutput(
             extracted_fact_id=ef.extracted_fact_id,
             canonical_field_id=ef.canonical_field_id,
@@ -161,11 +162,10 @@ async def normalize_and_validate(
                     message=f"Validation implementation {impl_key!r} not registered",
                 )
             else:
-                # Override severity from profile config
                 params_with_severity = {**params, "severity": severity}
                 try:
                     vr = val_fn(norm_result.normalized_value, ef.raw_value_text, params_with_severity)
-                    vr.rule_key = rule_key   # always use the catalog rule_key, not impl_key
+                    vr.rule_key = rule_key
                 except Exception as exc:
                     vr = ValidatorRuleResult(
                         rule_key=rule_key,
@@ -176,7 +176,6 @@ async def normalize_and_validate(
 
             field_val_output.results.append(vr)
 
-            # Persist validation_result row
             await session.execute(
                 text("""
                     INSERT INTO docintel.validation_results
@@ -298,21 +297,24 @@ async def _load_validator_configs(
     return result
 
 
+def _normalization_failure(raw: str | None, message: str | None) -> NormalizerResult:
+    """Return a review-required normalization failure without losing extraction."""
+    return NormalizerResult(ok=False, normalized_value=raw, message=message)
+
+
 def _run_normalizers(
     raw: str | None,
     normalizer_configs: list[dict[str, Any]],
 ) -> NormalizerResult:
-    """Run ordered normalizers in a pipeline.
+    """Run ordered normalizers in a lossless pipeline.
 
     Each normalizer's normalized value is serialized deterministically when it
-    must become the text input of a subsequent normalizer.  The final return
-    value, however, remains the *typed* output produced by the last normalizer.
-    This is important for Schema V2 repeating arrays/objects: JSONB must receive
-    an array/object, not a string representation of one.
+    must become the text input of a subsequent normalizer. The final return value
+    remains the typed output produced by the last successful normalizer.
 
-    If no normalizers are configured, preserve the existing behaviour and return
-    raw_value_text unchanged.  If any normalizer returns ok=False, the pipeline
-    stops and returns that result.
+    If a configured normalizer is missing, raises, or rejects the value, the
+    original raw extraction is returned as the fallback with ``ok=False``. The
+    worker therefore persists a reviewable value instead of ``current_value=null``.
     """
     if not normalizer_configs:
         return NormalizerResult(ok=True, normalized_value=raw)
@@ -326,23 +328,21 @@ def _run_normalizers(
 
         norm_fn = get_normalizer(impl_key)
         if norm_fn is None:
-            return NormalizerResult(
-                ok=False,
-                normalized_value=None,
-                message=f"Normalizer {impl_key!r} not registered",
+            return _normalization_failure(
+                raw,
+                f"Normalizer {impl_key!r} not registered",
             )
 
         try:
             result = norm_fn(current_value, params)
         except Exception as exc:
-            return NormalizerResult(
-                ok=False,
-                normalized_value=None,
-                message=f"Normalizer {impl_key!r} raised: {exc}",
+            return _normalization_failure(
+                raw,
+                f"Normalizer {impl_key!r} raised: {exc}",
             )
 
         if not result.ok:
-            return result
+            return _normalization_failure(raw, result.message)
 
         final_result = result
         value = result.normalized_value
