@@ -6,8 +6,9 @@ whose semantic key is commercial, that machine fact remains available to the
 audit-consumption stream regardless of document type. Audit Core remains the
 business-logic owner and decides how (or whether) the fact is used.
 
-Identity relationship fields are publication-only evidence facts. Their presence
-here does not make them authoritative Customer attributes in Audit Core.
+Identity relationship fields are publication-only evidence facts. PAN and Aadhaar
+use source-specific keys so two different printed relationships cannot be
+accidentally merged into one resolved attribute.
 """
 from __future__ import annotations
 
@@ -39,16 +40,16 @@ UC03_BOOKING_SUPPORTED_FIELDS: dict[str, frozenset[str]] = {
         {
             "pan_number",
             "pan_name",
-            "father_name",
-            "relationship_type",
-            "relationship_name",
+            "pan_father_name",
+            "pan_relationship_type",
+            "pan_relationship_name",
         }
     ),
     "aadhaar": frozenset(
         {
             "aadhaar_name",
-            "relationship_type",
-            "relationship_name",
+            "aadhaar_relationship_type",
+            "aadhaar_relationship_name",
         }
     ),
 }
