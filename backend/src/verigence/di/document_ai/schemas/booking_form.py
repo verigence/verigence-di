@@ -14,7 +14,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 BOOKING_FORM_SCHEMA = SchemaDefinition(
     document_type_key="booking_form",
     display_name="Booking Form",
-    schema_version="1.4",
+    schema_version="1.5",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=True, description="Name of the dealership exactly as visible"),
         FieldSpec(key="dealer_branch", field_type="string", required=False, description="Dealer branch/outlet/location exactly as visible"),
@@ -41,10 +41,27 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         FieldSpec(key="road_tax_registration", field_type="number", required=False, description="Legacy combined road-tax/registration charge only when the document itself presents a combined amount; do not sum separate registration and road-tax values", normalization="indian_currency"),
         FieldSpec(key="tcs_amount", field_type="number", required=False, description="Tax Collected at Source (TCS) amount only when explicitly shown", normalization="indian_currency"),
         FieldSpec(key="rsa_amount", field_type="number", required=False, description="Roadside Assistance (RSA) amount only when explicitly shown", normalization="indian_currency"),
-        FieldSpec(key="additional_warranty_amount", field_type="number", required=False, description="Additional/extended warranty amount only when explicitly shown", normalization="indian_currency"),
-        FieldSpec(key="accessories_cost", field_type="number", required=False, description="Accessories charge only when explicitly printed/written", normalization="indian_currency"),
-        FieldSpec(key="other_charges", field_type="number", required=False, description="Other charge only when explicitly printed/written; do not include separately labelled TCS, RSA, warranty, registration, road tax, insurance, discount, or bonus amounts", normalization="indian_currency"),
-        FieldSpec(key="discount_amount", field_type="number", required=False, description="Discount amount only when explicitly shown; do not calculate it from list and net prices", normalization="indian_currency"),
+        FieldSpec(key="additional_warranty_amount", field_type="number", required=False, description="Additional warranty amount only when explicitly shown", normalization="indian_currency"),
+        FieldSpec(key="extended_warranty_amount", field_type="number", required=False, description="Extended Warranty/EW amount only when explicitly shown as a separate charge", normalization="indian_currency"),
+        FieldSpec(key="accessories_cost", field_type="number", required=False, description="Total/combined accessories charge only when explicitly printed/written", normalization="indian_currency"),
+        FieldSpec(key="essential_kit_amount", field_type="number", required=False, description="Essential Kit/accessory kit amount only when explicitly shown as a separate line", normalization="indian_currency"),
+        FieldSpec(key="genuine_accessories_amount", field_type="number", required=False, description="Genuine accessories amount only when explicitly shown as a separate line", normalization="indian_currency"),
+        FieldSpec(key="non_genuine_accessories_amount", field_type="number", required=False, description="Non-genuine/non-OEM accessories amount only when explicitly shown as a separate line", normalization="indian_currency"),
+        FieldSpec(key="fastag_amount", field_type="number", required=False, description="FASTag/Fast Tag charge only when explicitly shown", normalization="indian_currency"),
+        FieldSpec(key="green_tax_amount", field_type="number", required=False, description="Green tax/green cess amount only when explicitly shown", normalization="indian_currency"),
+        FieldSpec(key="service_package_amount", field_type="number", required=False, description="Service package/service plan/maintenance package amount only when explicitly shown", normalization="indian_currency"),
+        FieldSpec(key="other_charges", field_type="number", required=False, description="Other charge only when explicitly printed/written; do not include separately labelled TCS, RSA, warranty, FASTag, green tax, service package, registration, road tax, insurance, accessories, discount, or bonus amounts", normalization="indian_currency"),
+        FieldSpec(key="discount_amount", field_type="number", required=False, description="Total/lump-sum discount or scheme amount only when explicitly shown; do not calculate it and do not allocate it across discount types", normalization="indian_currency"),
+        FieldSpec(key="sales_discount_amount", field_type="number", required=False, description="Sales discount amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="buffer_discount_amount", field_type="number", required=False, description="Buffer discount amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="exchange_discount_amount", field_type="number", required=False, description="Exchange discount/benefit amount only when explicitly labelled/shown; keep separate from exchange vehicle value", normalization="indian_currency"),
+        FieldSpec(key="corporate_discount_amount", field_type="number", required=False, description="Corporate discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="loyalty_discount_amount", field_type="number", required=False, description="Loyalty discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="inhouse_insurance_discount_amount", field_type="number", required=False, description="In-house insurance discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="mr_discount_amount", field_type="number", required=False, description="MR discount/benefit amount only when the document explicitly uses the MR label", normalization="indian_currency"),
+        FieldSpec(key="oem_referral_discount_amount", field_type="number", required=False, description="OEM referral discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="other_discount_amount", field_type="number", required=False, description="Other specifically labelled discount amount only when explicitly shown; do not use this for an unlabelled total discount", normalization="indian_currency"),
+        FieldSpec(key="free_accessory_discount_amount", field_type="number", required=False, description="Free accessory/accessory benefit discount amount only when explicitly shown as a monetary value", normalization="indian_currency"),
         FieldSpec(key="bonus_amount", field_type="number", required=False, description="Bonus amount only when explicitly shown", normalization="indian_currency"),
         FieldSpec(key="total_price", field_type="number", required=True, description="Grand total/on-road price only when explicitly shown; never calculate a missing total", normalization="indian_currency"),
         FieldSpec(key="net_amount", field_type="number", required=False, description="Net amount/net deal only when explicitly shown; never calculate it from total, discounts, bonus, or payments", normalization="indian_currency"),
@@ -64,7 +81,8 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         "- Never use general knowledge to fill a blank.\n"
         "- If a value is absent, obscured, or uncertain, return null with low confidence.\n"
         "- Handwritten filled values take precedence over blank printed placeholders.\n"
-        "- Keep separately labelled commercial components separate; do not fold one field into another.\n\n"
+        "- Keep separately labelled commercial components separate; do not fold one field into another.\n"
+        "- Never split a lump-sum discount/scheme or total accessories amount into component values unless the document itself shows those component amounts.\n\n"
         "Return ONLY valid JSON using the requested field structure."
     ),
     prompt_notes=[
@@ -73,7 +91,10 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         "exchange_applicable is based only on an explicit Yes/No, checkbox, tick, or equivalent selection. The existence of exchange_value must not be used to infer it.",
         "total_price must be extracted only from an explicitly shown grand-total/on-road-total value. Do not sum component charges.",
         "net_amount, discount_amount, bonus_amount, and balance_amount must be extracted only when explicitly shown. Do not derive one from the others.",
-        "other_charges must not absorb a separately labelled TCS, RSA, additional warranty, registration, road tax, insurance, discount, or bonus amount.",
+        "discount_amount is the explicitly printed aggregate/lump-sum discount. Sales, Buffer, Exchange, Corporate, Loyalty, In-house Insurance, MR, OEM Referral, Other and Free Accessory discounts are populated independently only when the form explicitly shows their individual monetary values. Never allocate a lump-sum scheme across them.",
+        "accessories_cost is the explicitly printed total/combined accessories amount. essential_kit_amount, genuine_accessories_amount and non_genuine_accessories_amount are populated only when those components are separately visible; never split a total accessories amount.",
+        "FASTag, Extended Warranty/EW, Green Tax and Service Package are kept as distinct commercial components whenever the form explicitly shows them.",
+        "other_charges must not absorb a separately labelled TCS, RSA, warranty, FASTag, green tax, service package, registration, road tax, insurance, accessories, discount, or bonus amount.",
         "expected_delivery is the backward-compatible raw field. expected_delivery_date is populated only when a complete calendar date is explicitly visible; never manufacture a date from a timeframe.",
         "sku_code must be extracted only when an explicit SKU/product/vehicle code is visible. Never derive it from model, variant, colour, or price.",
         "Preserve identifiers exactly as visible; do not repair ambiguous digits or letters.",
