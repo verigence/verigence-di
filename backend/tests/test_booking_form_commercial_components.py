@@ -35,4 +35,4 @@ def test_booking_form_keeps_aggregate_fields_for_exact_document_totals() -> None
 
 def test_component_fields_are_optional_and_never_required_inference() -> None:
     fields = {field.key: field for field in BOOKING_FORM_SCHEMA.fields}
-    assert all(fields[key].required is False for key in EXPECTED_COMMERCIAL_COMPONENT_FIELDS)
+    assert all(not fields[key].required for key in EXPECTED_COMMERCIAL_COMPONENT_FIELDS)
