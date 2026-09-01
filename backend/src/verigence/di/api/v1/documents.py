@@ -154,6 +154,12 @@ async def upload_subject_document(
         )
 
     pub_processing = public_processing_status(doc.get("processing_status"), rejected)
+    logger.info(
+        "di_document_uploaded",
+        tenant_id=actor.tenant_id,
+        document_id=str(doc["document_id"]),
+        document_type_key=documentTypeKey,
+    )
     return ApiResponse(
         errorCode=_EC_SUCCESS,
         errorMessage="File Uploaded Successfully",
@@ -333,6 +339,13 @@ async def delete_subject_document(
             storage=storage,
         )
         await session.commit()
+
+    logger.info(
+        "di_document_deleted",
+        tenant_id=actor.tenant_id,
+        document_id=str(documentId),
+        subject_id=str(subjectId),
+    )
 
 
 @router.get(
