@@ -187,6 +187,7 @@ def create_app() -> FastAPI:
             detail=str(exc.errors()),
             correlation_id=correlation_id,
         )
+        logger.warning("di_validation_error", http_status=400, correlation_id=correlation_id)
         return JSONResponse(
             status_code=400,
             content=body,
@@ -210,6 +211,13 @@ def create_app() -> FastAPI:
                 detail=str(exc.detail),
                 correlation_id=correlation_id,
             )
+        logger.warning(
+            "di_business_error",
+            error_code=body.get("code") if isinstance(body, dict) else None,
+            error_category=body.get("category") if isinstance(body, dict) else None,
+            http_status=exc.status_code,
+            correlation_id=correlation_id,
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content=body,
