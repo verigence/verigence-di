@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     log_axiom: bool = False            # Deprecated: Axiom drain removed. Parsed for env-var compat only.
     axiom_token: str = ""              # Deprecated: Axiom drain removed. Parsed for env-var compat only.
     axiom_dataset: str = "verigence-di"  # Deprecated: Axiom drain removed. Parsed for env-var compat only.
+    success_events_enabled: bool = True
 
     # Database
     database_url: str  # postgresql+asyncpg://...
