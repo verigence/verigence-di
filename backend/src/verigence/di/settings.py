@@ -47,9 +47,9 @@ class Settings(BaseSettings):
     # Logging — D27
     log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
     log_stdout: bool = True            # emit structured logs to stdout
-    log_axiom: bool = False            # emit logs to Axiom (async, fire-and-forget)
-    axiom_token: str = ""              # Axiom API token (required if log_axiom=true)
-    axiom_dataset: str = "verigence-di"  # Axiom dataset name
+    log_axiom: bool = False            # Deprecated: Axiom drain removed. Parsed for env-var compat only.
+    axiom_token: str = ""              # Deprecated: Axiom drain removed. Parsed for env-var compat only.
+    axiom_dataset: str = "verigence-di"  # Deprecated: Axiom drain removed. Parsed for env-var compat only.
 
     # Database
     database_url: str  # postgresql+asyncpg://...
