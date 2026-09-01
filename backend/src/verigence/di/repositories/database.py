@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -23,10 +24,24 @@ def _make_engine():  # type: ignore[no-untyped-def]
     settings = get_settings()
     return create_async_engine(
         settings.database_url,
-        pool_pre_ping=True,
         pool_size=5,
-        max_overflow=10,
-        echo=not settings.is_production,
+        max_overflow=5,
+        pool_timeout=10,
+        pool_recycle=300,        # Neon drops idle connections after ~5 min
+        pool_pre_ping=True,      # survives Neon autosuspend / cold start
+        connect_args={
+            "statement_cache_size": 0,            # asyncpg: disable server-side prepared stmts
+            "prepared_statement_cache_size": 0,   # SQLAlchemy asyncpg dialect layer
+            "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",  # unique names under PgBouncer
+            "server_settings": {
+                "statement_timeout": "8000",
+                "idle_in_transaction_session_timeout": "10000",
+                "jit": "off",
+                "application_name": "verigence-di",
+                "search_path": "docintel,public",
+            },
+        },
+        echo=False,  # never echo in production — use structlog
     )
 
 

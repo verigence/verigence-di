@@ -15,7 +15,7 @@ extract() flow:
   1. get_schema(document_type_key) → SchemaDefinition
   2. Build prompt from schema fields + system_prompt + prompt_notes
   3. Send document bytes (image or PDF) + prompt to Gemini REST API (httpx)
-  4. Parse and validate JSON response
+  4. Parse and validate JSON response; check finish_reason for MAX_TOKENS
   5. On parse failure: retry once; on second failure return NOT_FOUND for all
      fields (document reaches NEEDS_REVIEW, pipeline does not crash)
   6. Map confidence: "high"→92.00, "medium"→70.00, "low"→40.00
@@ -28,6 +28,14 @@ Confidence mapping (D21):
   absent   → FoundStatus.NOT_FOUND, confidence=None
 
 Uses direct REST API (httpx) — no google.generativeai SDK dependency.
+
+Performance notes:
+  - A single module-level httpx.AsyncClient is reused across all calls so TLS
+    is only negotiated once per process lifetime (§2.1).
+  - thinking_level is set to MINIMAL explicitly. Gemini 3.x defaults to HIGH;
+    for structured extraction this adds seconds of unnecessary latency (§5.1).
+  - Model version is pinned to an exact string, never an alias (§5.1).
+  - finish_reason is checked on every response; MAX_TOKENS is a hard failure.
 """
 from __future__ import annotations
 
@@ -60,12 +68,41 @@ _CONFIDENCE_MAP: dict[str, Decimal] = {
     "low":    Decimal("40.00"),
 }
 
-# Gemini REST API endpoint — gemini-3-flash-preview used for this key
-_GEMINI_MODEL = "gemini-3-flash-preview"
+# ── Model configuration ───────────────────────────────────────────────────────
+# Pin the EXACT model version string — never use an alias such as
+# "gemini-3-flash-preview". When Google pushes a new model behind an alias
+# the accuracy can change silently. Record this string on every extraction row.
+# See §5.1 of the engineering standards.
+_GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
 _GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{_GEMINI_MODEL}:generateContent"
 )
+
+# ── Module-level reusable HTTP client ─────────────────────────────────────────
+# Created once per process; never instantiated inside a request or extraction
+# call. This prevents TLS re-handshake per call and socket leaks (§2.1).
+# The API key is injected at call time via query param — no auth on the client.
+_gemini_http_client: httpx.AsyncClient | None = None
+
+
+def get_gemini_http_client() -> httpx.AsyncClient:
+    """Return the module-level client, creating it lazily on first call."""
+    global _gemini_http_client
+    if _gemini_http_client is None:
+        _gemini_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _gemini_http_client
+
+
+async def close_gemini_http_client() -> None:
+    """Call from application lifespan shutdown to drain connections."""
+    global _gemini_http_client
+    if _gemini_http_client is not None:
+        await _gemini_http_client.aclose()
+        _gemini_http_client = None
 
 
 class GeminiDocumentAIAdapter(DocumentAIAdapter):
@@ -127,7 +164,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         physical_form_type: str = "PRINTABLE",
         document_type_key: str | None = None,
     ) -> AIInvocationResult:
-        """Extract fields via Gemini 2.5 Flash using schema registry.
+        """Extract fields via Gemini using schema registry.
 
         Looks up the SchemaDefinition for document_type_key, builds a
         schema-driven prompt, calls Gemini REST API, validates the response.
@@ -136,6 +173,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         import time as _t
         log = logger.bind(
             adapter=self.adapter_key,
+            gemini_model=_GEMINI_MODEL,
             document_type_key=document_type_key,
             physical_form_type=physical_form_type,
             correlation_id=correlation_id,
@@ -152,7 +190,6 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             "gemini_request",
             document_type_key=document_type_key,
             physical_form_type=physical_form_type,
-            gemini_model=_GEMINI_MODEL,
             file_bytes=len(artifact_bytes),
             file_mime=mime_type,
             schema_field_count=len(fields),
@@ -209,7 +246,6 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                 log.error(
                     "gemini_api_error",
                     document_type_key=document_type_key,
-                    gemini_model=_GEMINI_MODEL,
                     http_status=_http_status,
                     exc_type=type(exc).__name__,
                     exc_msg=last_error,
@@ -239,7 +275,6 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         log.info(
             "gemini_response",
             document_type_key=document_type_key,
-            gemini_model=_GEMINI_MODEL,
             http_status=_http_status,
             duration_ms=_duration_ms,
             prompt_tokens=_prompt_tokens,
@@ -253,7 +288,6 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             log.warning(
                 "gemini_all_fields_null",
                 document_type_key=document_type_key,
-                gemini_model=_GEMINI_MODEL,
                 duration_ms=_duration_ms,
                 likely_cause="empty_response" if not raw_response else "parse_failed_or_all_low",
             )
@@ -377,6 +411,12 @@ def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict:
             "temperature": 0,
             "responseMimeType": "application/json",
         },
+        # thinking_level MINIMAL: structured extraction does not benefit from deep
+        # reasoning; HIGH (the default) adds seconds of latency for no accuracy gain
+        # on this task class. Benchmark before changing. See §5.1 of eng standards.
+        "thinkingConfig": {
+            "thinkingBudget": 0,
+        },
     }
 
 
@@ -388,16 +428,17 @@ async def _call_gemini_instrumented(
 ) -> Tuple[str, int, int, int]:
     """Send document bytes + prompt to Gemini. Returns (text, http_status, prompt_tokens, response_tokens).
 
-    Uses httpx directly — no google.generativeai SDK dependency.
+    Uses the module-level reusable httpx.AsyncClient — no per-call TLS handshake.
+    Checks finish_reason: MAX_TOKENS is a hard failure (§5.4).
     """
     payload = _build_payload(artifact_bytes, mime_type, prompt)
+    client = get_gemini_http_client()
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            _GEMINI_API_URL,
-            params={"key": api_key},
-            json=payload,
-        )
+    resp = await client.post(
+        _GEMINI_API_URL,
+        params={"key": api_key},
+        json=payload,
+    )
 
     http_status = resp.status_code
     if http_status != 200:
@@ -411,9 +452,27 @@ async def _call_gemini_instrumented(
     response_tokens = usage.get("candidatesTokenCount", 0)
 
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        candidate = data["candidates"][0]
     except (KeyError, IndexError) as exc:
         raise ValueError(f"Unexpected Gemini response shape: {data}") from exc
+
+    # §5.4: always check finish_reason. MAX_TOKENS means the JSON is truncated;
+    # saving that as a complete extraction is a silent correctness defect.
+    finish_reason = candidate.get("finishReason", "")
+    if finish_reason == "MAX_TOKENS":
+        raise ValueError(
+            f"Gemini response truncated (finish_reason=MAX_TOKENS). "
+            f"Increase max_output_tokens or reduce schema size. "
+            f"prompt_tokens={prompt_tokens}, response_tokens={response_tokens}"
+        )
+    if finish_reason not in ("STOP", "", None):
+        # SAFETY, RECITATION, etc. — treat as extraction failure
+        raise ValueError(f"Gemini non-STOP finish_reason={finish_reason!r}")
+
+    try:
+        text = candidate["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as exc:
+        raise ValueError(f"Unexpected Gemini candidate shape: {candidate}") from exc
 
     return text, http_status, prompt_tokens, response_tokens
 
