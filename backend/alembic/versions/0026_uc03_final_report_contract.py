@@ -384,6 +384,49 @@ def _clone_and_extend_published_profile(
         {"profile_id": profile_id, "previous_profile_id": previous_profile_id},
     )
 
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO docintel.profile_field_normalizers (
+                profile_field_normalizer_id, profile_field_id,
+                sequence_no, rule_key, parameters
+            )
+            SELECT gen_random_uuid(), new_epf.profile_field_id,
+                   pfn.sequence_no, pfn.rule_key, pfn.parameters
+            FROM docintel.profile_field_normalizers pfn
+            JOIN docintel.extraction_profile_fields old_epf
+              ON old_epf.profile_field_id=pfn.profile_field_id
+            JOIN docintel.extraction_profile_fields new_epf
+              ON new_epf.profile_id=:profile_id
+             AND new_epf.canonical_field_id=old_epf.canonical_field_id
+            WHERE old_epf.profile_id=:previous_profile_id
+            ORDER BY old_epf.profile_field_id, pfn.sequence_no
+            """
+        ),
+        {"profile_id": profile_id, "previous_profile_id": previous_profile_id},
+    )
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO docintel.profile_field_validators (
+                profile_field_validator_id, profile_field_id,
+                sequence_no, rule_key, parameters, severity
+            )
+            SELECT gen_random_uuid(), new_epf.profile_field_id,
+                   pfv.sequence_no, pfv.rule_key, pfv.parameters, pfv.severity
+            FROM docintel.profile_field_validators pfv
+            JOIN docintel.extraction_profile_fields old_epf
+              ON old_epf.profile_field_id=pfv.profile_field_id
+            JOIN docintel.extraction_profile_fields new_epf
+              ON new_epf.profile_id=:profile_id
+             AND new_epf.canonical_field_id=old_epf.canonical_field_id
+            WHERE old_epf.profile_id=:previous_profile_id
+            ORDER BY old_epf.profile_field_id, pfv.sequence_no
+            """
+        ),
+        {"profile_id": profile_id, "previous_profile_id": previous_profile_id},
+    )
+
     for field in additions:
         _add_profile_field(conn, profile_id=profile_id, field=field)
 
