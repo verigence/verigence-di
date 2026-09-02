@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +64,21 @@ def test_every_invoice_schema_exposes_the_consolidated_vehicle_superset() -> Non
     for key in keys:
         fields = {field.key for field in get_schema(key).fields}
         assert required <= fields, key
+
+
+@pytest.mark.no_docker
+def test_package1_migration_preserves_cloned_profile_rules() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "0026_uc03_final_report_contract.py"
+    ).read_text(encoding="utf-8")
+    compact = source.replace(" ", "")
+
+    assert "profile_field_normalizers" in source
+    assert "profile_field_validators" in source
+    assert "new_epf.canonical_field_id=old_epf.canonical_field_id" in compact
 
 
 async def _published_field_keys(db_session: AsyncSession, document_type_key: str) -> set[str]:
