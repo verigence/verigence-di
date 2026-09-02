@@ -1,6 +1,9 @@
 """Gate Pass extraction schema for UC03 Delivery evidence."""
 
-from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
+from verigence.di.document_ai.schemas.base import (
+    FieldSpec,
+    SchemaDefinition,
+)
 
 
 GATE_PASS_SCHEMA = SchemaDefinition(
