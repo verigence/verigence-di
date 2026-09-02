@@ -27,6 +27,46 @@ def test_all_invoice_document_keys_have_matching_registered_schema() -> None:
         assert "line_items" in _field_map(document_type_key)
 
 
+def test_every_invoice_has_common_vehicle_and_audit_evidence_superset() -> None:
+    expected = {
+        "invoice_heading_as_printed",
+        "invoice_number",
+        "invoice_date",
+        "buyer_gstin",
+        "buyer_gstin_status",
+        "financed_by",
+        "grand_total_amount",
+        "vehicle_description_raw",
+        "sku_code",
+        "model_name_raw",
+        "variant_raw",
+        "vin_number",
+        "chassis_number",
+        "engine_number",
+        "key_number",
+        "vehicle_color",
+        "vehicle_registration_number",
+        "vehicle_hsn_code",
+    }
+    for document_type_key in INVOICE_DOCUMENT_TYPE_KEYS:
+        assert expected <= _field_map(document_type_key).keys()
+
+
+def test_generic_invoice_preserves_vehicle_fields_without_subtype_reclassification() -> None:
+    fields = _field_map(GENERIC_INVOICE_TYPE_KEY)
+    for key in (
+        "model_name_raw",
+        "variant_raw",
+        "vin_number",
+        "chassis_number",
+        "engine_number",
+        "key_number",
+        "vehicle_color",
+        "vehicle_hsn_code",
+    ):
+        assert key in fields
+
+
 def test_vehicle_invoice_has_vehicle_identity_but_no_master_inference_field() -> None:
     fields = _field_map("customer_invoice_dms")
     assert "vehicle_description_raw" in fields
@@ -35,6 +75,17 @@ def test_vehicle_invoice_has_vehicle_identity_but_no_master_inference_field() ->
     assert "chassis_number" in fields
     assert "engine_number" in fields
     assert "ex_showroom_price" not in fields
+
+
+def test_buyer_gstin_status_is_explicit_and_does_not_replace_gstin() -> None:
+    fields = _field_map(GENERIC_INVOICE_TYPE_KEY)
+    assert fields["buyer_gstin_status"].enum == [
+        "REGISTERED",
+        "UNREGISTERED",
+        "NOT_STATED",
+        "UNKNOWN",
+    ]
+    assert "null when the document says unregistered" in fields["buyer_gstin"].description
 
 
 def test_invoice_amount_fields_preserve_decimal_source_precision() -> None:
