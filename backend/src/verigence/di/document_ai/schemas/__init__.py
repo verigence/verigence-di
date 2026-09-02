@@ -22,6 +22,7 @@ from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
+from verigence.di.document_ai.schemas.gate_pass import GATE_PASS_SCHEMA
 from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
 from verigence.di.document_ai.schemas.invoice import (
@@ -57,6 +58,7 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "insurance_cover": INSURANCE_COVER_SCHEMA,
     "pan_card": PAN_CARD_SCHEMA,
     "aadhaar": AADHAAR_SCHEMA,
+    "gate_pass": GATE_PASS_SCHEMA,
     # Schema V2 Wave 1. The DB migration/profile publication is deliberately
     # separate so registry code can be reviewed and tested before activation.
     "gst_certificate": GST_CERTIFICATE_SCHEMA,
@@ -64,8 +66,8 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "bank_approval_letter": BANK_APPROVAL_LETTER_SCHEMA,
     "valuation_report": VALUATION_REPORT_SCHEMA,
     # Generalized invoice intelligence. Existing business requirement keys remain
-    # stable; all are backed by one common invoice schema factory with small
-    # purpose-specific extensions.
+    # stable; all are backed by one common invoice evidence superset with only
+    # genuinely service-specific additions.
     "wholesale_invoice": WHOLESALE_INVOICE_SCHEMA,
     "customer_invoice_dms": CUSTOMER_INVOICE_DMS_SCHEMA,
     "tax_invoice_tally": TAX_INVOICE_TALLY_SCHEMA,
