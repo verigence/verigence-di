@@ -498,6 +498,19 @@ def _publish_gate_pass(conn: Any) -> None:
         sa.text(
             """
             UPDATE docintel.extraction_profiles
+            SET status='RETIRED', updated_at_utc=now()
+            WHERE document_type_id=:document_type_id
+              AND scope_tenant_id IS NULL
+              AND status='PUBLISHED'
+              AND profile_id<>:profile_id
+            """
+        ),
+        {"document_type_id": document_type_id, "profile_id": profile_id},
+    )
+    conn.execute(
+        sa.text(
+            """
+            UPDATE docintel.extraction_profiles
             SET status='PUBLISHED', published_by_actor_id=:actor,
                 published_at_utc=now(), updated_at_utc=now()
             WHERE profile_id=:profile_id AND status='DRAFT'
