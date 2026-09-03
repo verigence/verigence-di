@@ -106,14 +106,9 @@ async def _published_field_keys(db_session: AsyncSession, document_type_key: str
 
 
 @pytest.mark.asyncio
-async def test_package1_migration_is_head_and_profiles_are_published(
+async def test_package1_profiles_remain_published_after_later_migrations(
     db_session: AsyncSession,
 ) -> None:
-    version = (
-        await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
-    ).scalar_one()
-    assert version == "0026"
-
     published = await db_session.execute(
         text(
             """
