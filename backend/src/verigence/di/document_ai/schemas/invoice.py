@@ -1,8 +1,9 @@
 """Generalized invoice extraction schemas.
 
-Existing business document keys remain stable. Each key gets a small schema built from
-one common invoice envelope plus only the extension needed for that invoice purpose.
-This keeps Gemini prompts compact while preserving source/purpose differentiation.
+Existing business document keys remain stable. Every invoice key gets one lossless common
+commercial + vehicle evidence superset, with only genuinely service-specific fields added
+where needed. This lets DI classify conservatively as a generic invoice without dropping
+useful vehicle or commercial facts.
 """
 from __future__ import annotations
 
@@ -44,6 +45,12 @@ _ISSUER_ROLES = [
     "OTHER",
     "UNKNOWN",
 ]
+_BUYER_GSTIN_STATUSES = [
+    "REGISTERED",
+    "UNREGISTERED",
+    "NOT_STATED",
+    "UNKNOWN",
+]
 
 
 def _common_fields() -> list[FieldSpec]:
@@ -61,6 +68,12 @@ def _common_fields() -> list[FieldSpec]:
             True,
             "Legal/business nature explicitly stated or reliably evidenced by the document.",
             enum=_INVOICE_NATURES,
+        ),
+        FieldSpec(
+            "invoice_heading_as_printed",
+            "string",
+            False,
+            "Invoice heading/title exactly as printed, for example TAX INVOICE or Retail Invoice.",
         ),
         FieldSpec(
             "source_system",
@@ -109,7 +122,14 @@ def _common_fields() -> list[FieldSpec]:
             False,
             "Buyer/customer ID only when explicitly printed.",
         ),
-        FieldSpec("buyer_gstin", "string", False, "Buyer/customer GSTIN exactly as printed."),
+        FieldSpec("buyer_gstin", "string", False, "Buyer/customer GSTIN exactly as printed; null when the document says unregistered."),
+        FieldSpec(
+            "buyer_gstin_status",
+            "string",
+            False,
+            "Buyer GST registration status only from explicit document evidence; do not infer from a missing GSTIN.",
+            enum=_BUYER_GSTIN_STATUSES,
+        ),
         FieldSpec(
             "buyer_address",
             "string",
@@ -120,7 +140,7 @@ def _common_fields() -> list[FieldSpec]:
             "financed_by",
             "string",
             False,
-            "Financier/hypothecation institution exactly as printed.",
+            "Financier/hypothecation/loan institution exactly as printed.",
         ),
         FieldSpec(
             "gross_amount_before_discount",
@@ -197,7 +217,7 @@ def _vehicle_fields() -> list[FieldSpec]:
             "vehicle_description_raw",
             "string",
             False,
-            "Complete vehicle description exactly as printed.",
+            "Complete vehicle description exactly as printed when present on any invoice.",
         ),
         FieldSpec(
             "sku_code",
@@ -265,18 +285,6 @@ def _service_fields() -> list[FieldSpec]:
             False,
             "Coverage/service tenure in months only when explicitly printed.",
         ),
-        FieldSpec(
-            "vin_number",
-            "string",
-            False,
-            "Linked vehicle VIN only when explicitly printed.",
-        ),
-        FieldSpec(
-            "vehicle_registration_number",
-            "string",
-            False,
-            "Linked registration number only when printed.",
-        ),
     ]
 
 
@@ -288,45 +296,27 @@ def _build_schema(
     expected_source: str | None,
     extension: str,
 ) -> SchemaDefinition:
-    fields = _common_fields()
-    if extension == "vehicle":
-        fields += _vehicle_fields()
-    elif extension == "service":
+    # Every invoice gets the same lossless commercial + vehicle evidence superset.
+    # Specific invoice keys remain classification/context hints, not extraction ceilings.
+    fields = _common_fields() + _vehicle_fields()
+    if extension == "service":
         fields += _service_fields()
-    elif extension == "generic":
-        fields += [
-            FieldSpec(
-                "vehicle_description_raw",
-                "string",
-                False,
-                "Vehicle description when this invoice concerns a vehicle.",
-            ),
-            FieldSpec(
-                "sku_code",
-                "string",
-                False,
-                "Explicit SKU/product code only when printed; never infer it.",
-            ),
-            FieldSpec("vin_number", "string", False, "VIN only when printed."),
-            FieldSpec("chassis_number", "string", False, "Chassis number only when printed."),
-            FieldSpec("engine_number", "string", False, "Engine number only when printed."),
-            FieldSpec(
-                "vehicle_registration_number",
-                "string",
-                False,
-                "Registration number only when printed.",
-            ),
-        ]
 
     notes = [
         "Extract one invoice in one pass; do not request or assume a second classification pass.",
         (
-            "Do not equate an invoice heading with its business purpose. Determine purpose "
-            "from the goods/service actually invoiced."
+            "Do not equate an invoice heading with its business purpose. Preserve "
+            "invoice_heading_as_printed, and determine invoice_nature and invoice_purpose "
+            "separately from visible evidence."
         ),
         (
-            "Keep source_system UNKNOWN unless the document visibly or reliably identifies "
-            "DMS, Tally, dealer-generated, OEM, or third-party origin."
+            "Vehicle identifiers prove vehicle-related content; they do not prove the source "
+            "system. Keep source_system UNKNOWN unless the document visibly or reliably "
+            "identifies DMS, Tally, dealer-generated, OEM, or third-party origin."
+        ),
+        (
+            "If the buyer GST section explicitly says Unregistered, set buyer_gstin to null "
+            "and buyer_gstin_status to UNREGISTERED. Do not store 'Unregistered' as a GSTIN."
         ),
         (
             "Never calculate missing monetary values. Preserve each printed source amount "
