@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-
 BASELINE_BOOKING_DOCKET_FIELDS = {
     "dealer_name",
     "dealer_branch",
