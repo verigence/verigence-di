@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pytest import mark
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+import pytest
+import sqlalchemy
+import sqlalchemy.ext.asyncio
 
 
 BASELINE_BOOKING_DOCKET_FIELDS = {
@@ -30,7 +30,7 @@ PACKAGE2_FIELDS = {
 }
 
 
-@mark.no_docker
+@pytest.mark.no_docker
 def test_package2_migration_is_booking_docket_only_and_preserves_profile_rules() -> None:
     source = (
         Path(__file__).resolve().parents[1]
@@ -48,7 +48,7 @@ def test_package2_migration_is_booking_docket_only_and_preserves_profile_rules()
     assert "classifier" in source.lower()
 
 
-@mark.no_docker
+@pytest.mark.no_docker
 def test_package2_source_contract_is_explicit_and_fail_closed() -> None:
     source = (
         Path(__file__).resolve().parents[1]
@@ -68,10 +68,10 @@ def test_package2_source_contract_is_explicit_and_fail_closed() -> None:
 
 
 async def _published_booking_docket_fields(
-    db_session: AsyncSession,
+    db_session: sqlalchemy.ext.asyncio.AsyncSession,
 ) -> dict[str, tuple[str, str]]:
     rows = await db_session.execute(
-        text(
+        sqlalchemy.text(
             """
             SELECT COALESCE(epf.extraction_key, cf.field_key) AS field_key,
                    cf.data_type,
@@ -94,18 +94,20 @@ async def _published_booking_docket_fields(
     return {row[0]: (row[1], row[2]) for row in rows.all()}
 
 
-@mark.asyncio
+@pytest.mark.asyncio
 async def test_package2_migration_is_head_and_booking_docket_profile_is_published(
-    db_session: AsyncSession,
+    db_session: sqlalchemy.ext.asyncio.AsyncSession,
 ) -> None:
     version = (
-        await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
+        await db_session.execute(
+            sqlalchemy.text("SELECT version_num FROM docintel.alembic_version")
+        )
     ).scalar_one()
     assert version == "0027"
 
     published_count = (
         await db_session.execute(
-            text(
+            sqlalchemy.text(
                 """
                 SELECT COUNT(*)
                 FROM docintel.extraction_profiles ep
