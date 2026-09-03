@@ -36,6 +36,7 @@ from verigence.di.document_ai.schemas.invoice import (
     WHOLESALE_INVOICE_SCHEMA,
 )
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
+from verigence.di.document_ai.schemas.rto_challan import RTO_CHALLAN_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
 from verigence.di.document_ai.schemas.valuation_report import VALUATION_REPORT_SCHEMA
@@ -76,6 +77,7 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "ew_invoice": EW_INVOICE_SCHEMA,
     "rsa_invoice": RSA_INVOICE_SCHEMA,
     "invoice_generic": GENERIC_INVOICE_SCHEMA,
+    "rto_challan": RTO_CHALLAN_SCHEMA,
 }
 
 
