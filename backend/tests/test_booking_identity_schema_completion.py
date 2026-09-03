@@ -84,7 +84,7 @@ def test_pan_relationship_fields_are_source_specific_and_explicit_only() -> None
 
 
 def test_aadhaar_relationship_fields_are_source_specific_and_explicit_only() -> None:
-    assert AADHAAR_SCHEMA.schema_version == "1.1"
+    assert AADHAAR_SCHEMA.schema_version == "1.2"
     fields = _field_map(AADHAAR_SCHEMA)
     assert {
         "aadhaar_relationship_type",
