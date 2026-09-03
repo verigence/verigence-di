@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
+from pytest import mark
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +30,7 @@ PACKAGE2_FIELDS = {
 }
 
 
-@pytest.mark.no_docker
+@mark.no_docker
 def test_package2_migration_is_booking_docket_only_and_preserves_profile_rules() -> None:
     source = (
         Path(__file__).resolve().parents[1]
@@ -48,7 +48,7 @@ def test_package2_migration_is_booking_docket_only_and_preserves_profile_rules()
     assert "classifier" in source.lower()
 
 
-@pytest.mark.no_docker
+@mark.no_docker
 def test_package2_source_contract_is_explicit_and_fail_closed() -> None:
     source = (
         Path(__file__).resolve().parents[1]
@@ -94,7 +94,7 @@ async def _published_booking_docket_fields(
     return {row[0]: (row[1], row[2]) for row in rows.all()}
 
 
-@pytest.mark.asyncio
+@mark.asyncio
 async def test_package2_migration_is_head_and_booking_docket_profile_is_published(
     db_session: AsyncSession,
 ) -> None:
@@ -122,8 +122,8 @@ async def test_package2_migration_is_head_and_booking_docket_profile_is_publishe
     assert published_count == 1
 
     fields = await _published_booking_docket_fields(db_session)
-    assert BASELINE_BOOKING_DOCKET_FIELDS <= fields.keys()
-    assert PACKAGE2_FIELDS <= fields.keys()
+    assert fields.keys() >= BASELINE_BOOKING_DOCKET_FIELDS
+    assert fields.keys() >= PACKAGE2_FIELDS
 
     assert fields["deal_type"][0] == "STRING"
     assert fields["out_of_scope_reasons"][0] == "STRING"
