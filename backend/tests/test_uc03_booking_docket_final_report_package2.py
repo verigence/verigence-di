@@ -89,14 +89,9 @@ async def _published_booking_docket_fields(db_session):
 
 
 @pytest.mark.asyncio
-async def test_package2_migration_is_head_and_booking_docket_profile_is_published(
+async def test_package2_booking_docket_profile_remains_published_after_later_migrations(
     db_session,
 ) -> None:
-    version = (
-        await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
-    ).scalar_one()
-    assert version == "0027"
-
     published_count = (
         await db_session.execute(
             text(
