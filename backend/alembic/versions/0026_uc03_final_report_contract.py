@@ -490,7 +490,11 @@ def _publish_gate_pass(conn: Any) -> None:
             ) RETURNING profile_id
             """
         ),
-        {"document_type_id": document_type_id, "actor": _ACTOR},
+        {
+            "document_type_id": document_type_id,
+            "version_no": version_no,
+            "actor": _ACTOR,
+        },
     ).scalar_one()
     for field in _GATE_PASS_FIELDS:
         _add_profile_field(conn, profile_id=profile_id, field=field)
