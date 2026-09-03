@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from pathlib import Path
-from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -67,9 +64,7 @@ def test_package2_source_contract_is_explicit_and_fail_closed() -> None:
     assert "explicitly" in lowered
 
 
-async def _published_booking_docket_fields(
-    db_session: Any,
-) -> dict[str, tuple[str, str]]:
+async def _published_booking_docket_fields(db_session):
     rows = await db_session.execute(
         text(
             """
@@ -96,7 +91,7 @@ async def _published_booking_docket_fields(
 
 @pytest.mark.asyncio
 async def test_package2_migration_is_head_and_booking_docket_profile_is_published(
-    db_session: Any,
+    db_session,
 ) -> None:
     version = (
         await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
