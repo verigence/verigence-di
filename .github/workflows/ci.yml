@@ -93,18 +93,7 @@ jobs:
           DI_CLERK_PUBLISHABLE_KEY: "pk_test_mock"
           DI_CLERK_SECRET_KEY: "sk_test_mock"
           DI_CLERK_JWKS_URL: "http://localhost/mock-jwks"
-        shell: bash
-        run: |
-          set -o pipefail
-          pytest --tb=short 2>&1 | tee pytest.log
-
-      - name: Upload pytest diagnostic log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-log-${{ github.run_id }}
-          path: backend/pytest.log
-          if-no-files-found: error
+        run: pytest --tb=short
 
   frontend:
     name: Frontend — build check
