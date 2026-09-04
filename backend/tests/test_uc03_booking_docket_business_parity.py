@@ -73,17 +73,17 @@ async def test_booking_docket_published_profile_has_booking_form_business_parity
     booking_form = await _published_fields(db_session, "booking_form")
     booking_docket = await _published_fields(db_session, "booking_docket")
 
-    assert SCREENSHOT_REQUIRED_FIELDS <= booking_form
-    assert SCREENSHOT_REQUIRED_FIELDS <= booking_docket
-    assert booking_form <= booking_docket
+    assert booking_form >= SCREENSHOT_REQUIRED_FIELDS
+    assert booking_docket >= SCREENSHOT_REQUIRED_FIELDS
+    assert booking_docket >= booking_form
 
 
 @pytest.mark.asyncio
 async def test_booking_docket_keeps_docket_specific_fields_after_parity(db_session) -> None:
     booking_docket = await _published_fields(db_session, "booking_docket")
-    assert {
+    assert booking_docket >= {
         "deal_type",
         "out_of_scope_reasons",
         "dsa_commission_amount",
         "exchange_applicable",
-    } <= booking_docket
+    }
