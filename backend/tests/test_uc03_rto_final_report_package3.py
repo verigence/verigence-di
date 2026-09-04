@@ -61,13 +61,13 @@ def test_package3_migration_only_activates_existing_rto_challan_contract() -> No
 
 
 @pytest.mark.asyncio
-async def test_package3_is_head_and_rto_profile_is_published(
+async def test_package3_rto_profile_remains_published_at_current_head(
     db_session: AsyncSession,
 ) -> None:
     version = (
         await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
     ).scalar_one()
-    assert version == "0028"
+    assert version == "0029"
 
     published_count = (
         await db_session.execute(
