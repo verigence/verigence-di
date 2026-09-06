@@ -7,6 +7,7 @@ browser finalize call was lost.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ class V2UploadIntentCommand(BaseModel):
 
     phase: Literal["BOOKING", "DELIVERY"]
     candidateDocumentTypeKeys: list[str] = Field(min_length=1, max_length=64)
+    requirementRefsByDocumentTypeKey: dict[str, UUID] = Field(default_factory=dict)
     files: list[V2UploadIntentItem] = Field(min_length=1, max_length=20)
 
 
@@ -212,9 +214,28 @@ async def create_capture_upload_intents(
     command: V2UploadIntentCommand,
     principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
 ) -> V2UploadIntentResponse:
-    candidate_keys = list(dict.fromkeys(key.strip() for key in command.candidateDocumentTypeKeys if key.strip()))
+    candidate_keys = list(
+        dict.fromkeys(
+            key.strip() for key in command.candidateDocumentTypeKeys if key.strip()
+        )
+    )
     if not candidate_keys:
-        raise http_exception(ErrorCode.INVALID_REQUEST, detail="Candidate document types are required")
+        raise http_exception(
+            ErrorCode.INVALID_REQUEST, detail="Candidate document types are required"
+        )
+
+    requirement_refs = {
+        key.strip(): str(value)
+        for key, value in command.requirementRefsByDocumentTypeKey.items()
+        if key.strip()
+    }
+    unknown_requirement_keys = sorted(set(requirement_refs) - set(candidate_keys))
+    if unknown_requirement_keys:
+        raise http_exception(
+            ErrorCode.INVALID_REQUEST,
+            detail="Requirement-ref mapping contains a non-candidate document type.",
+        )
+    requirement_refs_json = json.dumps(requirement_refs, sort_keys=True)
 
     intents: list[V2UploadIntent] = []
     async with tenant_session(tenantId) as session:
@@ -224,18 +245,26 @@ async def create_capture_upload_intents(
             external_context_ref=externalContextRef,
         )
         if context is None:
-            raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND, detail="Audit storage context not found")
-        await provision_actor(session, tenantId, principal.service_id, actor_type="SERVICE")
+            raise http_exception(
+                ErrorCode.DOCUMENT_NOT_FOUND, detail="Audit storage context not found"
+            )
+        await provision_actor(
+            session, tenantId, principal.service_id, actor_type="SERVICE"
+        )
         retention = await get_active_retention_policy(session, tenant_id=tenantId)
         if retention is None:
-            raise http_exception(ErrorCode.INVALID_REQUEST, detail="Tenant has no active retention policy")
+            raise http_exception(
+                ErrorCode.INVALID_REQUEST,
+                detail="Tenant has no active retention policy",
+            )
 
         for item in command.files:
             existing = (
                 await session.execute(
                     text(
                         """
-                        SELECT document_id, logical_object_key
+                        SELECT document_id, logical_object_key,
+                               requirement_refs_by_document_type_key
                         FROM docintel.document_capture_v2_uploads
                         WHERE tenant_id=:tenant_id
                           AND external_context_ref=:external_context_ref
@@ -295,7 +324,9 @@ async def create_capture_upload_intents(
                     {
                         "tenant_id": tenantId,
                         "document_id": document_id,
-                        "storage_context_id": _context_uuid(context, "storage_context_id"),
+                        "storage_context_id": _context_uuid(
+                            context, "storage_context_id"
+                        ),
                     },
                 )
                 await session.execute(
@@ -305,30 +336,50 @@ async def create_capture_upload_intents(
                             tenant_id, document_id, audit_storage_context_id,
                             external_context_ref, phase, client_upload_id,
                             logical_object_key, original_filename, declared_mime_type,
-                            candidate_document_type_keys, state,
-                            created_at_utc, updated_at_utc
+                            candidate_document_type_keys,
+                            requirement_refs_by_document_type_key,
+                            state, created_at_utc, updated_at_utc
                         ) VALUES (
                             :tenant_id, :document_id, :storage_context_id,
                             :external_context_ref, :phase, :client_upload_id,
                             :logical_key, :filename, :content_type,
-                            CAST(:candidate_keys AS jsonb), 'RECEIVING', now(), now()
+                            CAST(:candidate_keys AS jsonb),
+                            CAST(:requirement_refs AS jsonb),
+                            'RECEIVING', now(), now()
                         )
                         """
                     ),
                     {
                         "tenant_id": tenantId,
                         "document_id": document_id,
-                        "storage_context_id": _context_uuid(context, "storage_context_id"),
+                        "storage_context_id": _context_uuid(
+                            context, "storage_context_id"
+                        ),
                         "external_context_ref": externalContextRef,
                         "phase": command.phase,
                         "client_upload_id": item.clientUploadId,
                         "logical_key": logical_key,
                         "filename": item.filename,
                         "content_type": item.contentType,
-                        "candidate_keys": __import__("json").dumps(candidate_keys),
+                        "candidate_keys": json.dumps(candidate_keys),
+                        "requirement_refs": requirement_refs_json,
                     },
                 )
             else:
+                existing_refs = {
+                    str(key): str(value)
+                    for key, value in dict(
+                        existing["requirement_refs_by_document_type_key"] or {}
+                    ).items()
+                }
+                if existing_refs != requirement_refs:
+                    raise http_exception(
+                        ErrorCode.CONFLICT,
+                        detail=(
+                            "The existing V2 upload intent was created with a "
+                            "different Audit Core requirement mapping."
+                        ),
+                    )
                 document_id = UUID(str(existing["document_id"]))
                 logical_key = str(existing["logical_object_key"])
 
@@ -342,7 +393,8 @@ async def create_capture_upload_intents(
                     documentId=document_id,
                     uploadUrl=signed.url,
                     uploadHeaders=signed.required_headers,
-                    expiresAtUtc=datetime.now(UTC) + timedelta(seconds=signed.expires_seconds),
+                    expiresAtUtc=datetime.now(UTC)
+                    + timedelta(seconds=signed.expires_seconds),
                 )
             )
         await session.commit()
@@ -379,7 +431,10 @@ async def _status_rows(
     document_id: UUID | None = None,
 ) -> Sequence[RowMapping]:
     async with tenant_session(tenant_id) as session:
-        clauses = ["u.tenant_id=:tenant_id", "u.external_context_ref=:external_context_ref"]
+        clauses = [
+            "u.tenant_id=:tenant_id",
+            "u.external_context_ref=:external_context_ref",
+        ]
         params: dict[str, object] = {
             "tenant_id": tenant_id,
             "external_context_ref": external_context_ref,
@@ -410,9 +465,15 @@ async def _status_rows(
         ).mappings().all()
 
 
-async def _public_status(tenant_id: str, row: RowMapping) -> V2CaptureDocumentStatus:
+async def _public_status(
+    tenant_id: str, row: RowMapping
+) -> V2CaptureDocumentStatus:
     content_url: str | None = None
-    if row["state"] in {"STORED", "CLASSIFYING", "CLASSIFIED", "UNKNOWN", "FAILED"} and row["content_state"] != "PURGED":
+    if (
+        row["state"]
+        in {"STORED", "CLASSIFYING", "CLASSIFIED", "UNKNOWN", "FAILED"}
+        and row["content_state"] != "PURGED"
+    ):
         try:
             content_url = await get_storage_adapter().get_presigned_url(
                 str(row["logical_object_key"]), 30 * 60
@@ -442,10 +503,11 @@ async def list_capture_documents(
 ) -> V2CaptureDocumentList:
     del principal
     rows = await _status_rows(tenantId, externalContextRef, phase)
-    # Lost browser finalize must not become a permanently stuck RECEIVING row.
     for row in rows:
         if row["state"] == "RECEIVING":
-            await _queue_if_object_exists(tenant_id=tenantId, document_id=row["document_id"])
+            await _queue_if_object_exists(
+                tenant_id=tenantId, document_id=row["document_id"]
+            )
     rows = await _status_rows(tenantId, externalContextRef, phase)
     return V2CaptureDocumentList(
         externalContextRef=externalContextRef,

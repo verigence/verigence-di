@@ -79,6 +79,7 @@ class CaptureV2ClassificationWorker:
     async def _open_notify(self, database_url: str) -> bool:
         try:
             import asyncpg
+
             conn = await asyncpg.connect(_asyncpg_url(database_url))
 
             def _on_notify(connection: object, pid: int, channel: str, payload: str) -> None:
@@ -192,7 +193,12 @@ class CaptureV2ClassificationWorker:
                 error=str(exc),
             )
 
-    async def _classify(self, tenant_id: str, document_id: uuid.UUID, job_id: uuid.UUID) -> None:
+    async def _classify(
+        self,
+        tenant_id: str,
+        document_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> None:
         storage = get_storage_adapter()
         async with tenant_session(tenant_id) as session:
             row = (
@@ -200,6 +206,7 @@ class CaptureV2ClassificationWorker:
                     text(
                         """
                         SELECT u.logical_object_key, u.candidate_document_type_keys,
+                               u.requirement_refs_by_document_type_key,
                                u.declared_mime_type, u.state,
                                d.original_filename, d.correlation_id
                         FROM docintel.document_capture_v2_uploads u
@@ -227,7 +234,9 @@ class CaptureV2ClassificationWorker:
         document_bytes = b"".join(
             [chunk async for chunk in storage.get_stream(str(row["logical_object_key"]))]
         )
-        detected_mime = _detect_mime(document_bytes, str(row["original_filename"] or ""))
+        detected_mime = _detect_mime(
+            document_bytes, str(row["original_filename"] or "")
+        )
         sha256_hex = hashlib.sha256(document_bytes).hexdigest()
 
         async with tenant_session(tenant_id) as session:
@@ -275,12 +284,17 @@ class CaptureV2ClassificationWorker:
                     job_id=job_id,
                     document_id=document_id,
                     code=validation.upload_issue_code or "UPLOAD_NOT_FIT",
-                    detail=validation.upload_issue_detail or "Uploaded document failed quality checks",
+                    detail=(
+                        validation.upload_issue_detail
+                        or "Uploaded document failed quality checks"
+                    ),
                 )
                 await session.commit()
                 return
 
-            candidate_keys = [str(value) for value in row["candidate_document_type_keys"]]
+            candidate_keys = [
+                str(value) for value in row["candidate_document_type_keys"]
+            ]
             candidates = (
                 await session.execute(
                     text(
@@ -313,7 +327,9 @@ class CaptureV2ClassificationWorker:
         result = await classify_document_v2(
             document_bytes=document_bytes,
             mime_type=validation.detected_mime or detected_mime,
-            candidates=[(r["document_type_key"], r["display_name"]) for r in candidates],
+            candidates=[
+                (r["document_type_key"], r["display_name"]) for r in candidates
+            ],
         )
         accepted = (
             result.document_type_key
@@ -387,6 +403,18 @@ class CaptureV2ClassificationWorker:
                 )
             ).mappings().one()
 
+            requirement_map = dict(
+                row["requirement_refs_by_document_type_key"] or {}
+            )
+            requirement_ref = requirement_map.get(accepted)
+            if requirement_ref is None:
+                logger.warning(
+                    "capture_v2_requirement_ref_missing",
+                    tenant_id=tenant_id,
+                    document_id=str(document_id),
+                    document_type_key=accepted,
+                )
+
             await session.execute(
                 text(
                     """
@@ -395,6 +423,17 @@ class CaptureV2ClassificationWorker:
                         document_type_hint_key=:document_type_key,
                         physical_form_type=:physical_form_type,
                         requires_processing=:requires_processing,
+                        audit_requirement_ref=COALESCE(
+                            :audit_requirement_ref, audit_requirement_ref
+                        ),
+                        audit_link_status=CASE
+                            WHEN :audit_requirement_ref IS NOT NULL THEN 'PENDING'
+                            ELSE audit_link_status
+                        END,
+                        audit_link_last_error=CASE
+                            WHEN :audit_requirement_ref IS NOT NULL THEN NULL
+                            ELSE audit_link_last_error
+                        END,
                         updated_at_utc=:now
                     WHERE tenant_id=:tenant_id AND document_id=:document_id
                     """
@@ -406,6 +445,9 @@ class CaptureV2ClassificationWorker:
                     "document_type_key": accepted,
                     "physical_form_type": type_row["physical_form_type"],
                     "requires_processing": type_row["requires_processing"],
+                    "audit_requirement_ref": (
+                        str(requirement_ref) if requirement_ref is not None else None
+                    ),
                     "now": now,
                 },
             )
@@ -448,8 +490,12 @@ class CaptureV2ClassificationWorker:
                 document_id=str(document_id),
                 classification_job_id=str(job_id),
                 document_type_key=accepted,
+                audit_requirement_ref=(
+                    str(requirement_ref) if requirement_ref is not None else None
+                ),
                 extraction_queued=bool(
-                    type_row["requires_processing"] and type_row["has_published_profile"]
+                    type_row["requires_processing"]
+                    and type_row["has_published_profile"]
                 ),
             )
 
