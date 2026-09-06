@@ -1,7 +1,7 @@
 """Register the debit_note and purchase_order global document types.
 
-Revision ID: 0031
-Revises: 0030
+Revision ID: 0032
+Revises: 0031
 Create Date: 2026-09-06
 
 Both are audit evidence sources the deterministic audit layer reconciles:
@@ -16,8 +16,8 @@ global ``document_types`` rows (per D20). Additive only.
 """
 from alembic import op
 
-revision = "0031"
-down_revision = "0030"
+revision = "0032"
+down_revision = "0031"
 branch_labels = None
 depends_on = None
 
