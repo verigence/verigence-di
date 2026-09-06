@@ -205,7 +205,12 @@ def _common_fields() -> list[FieldSpec]:
                 "JSON array of visible invoice line items. For each item preserve "
                 "description_raw and extract only explicitly printed item_code, hsn_sac, "
                 "quantity, unit_rate, gross_amount, discount_amount, taxable_amount, "
-                "tax_rate, tax_amount and net_amount."
+                "tax_rate, tax_amount and net_amount. Also classify each item into "
+                "line_category using the description text and any HSN/SAC code: one of "
+                "VEHICLE, ACCESSORY_GENUINE, ACCESSORY_NON_GENUINE, EXTENDED_WARRANTY, "
+                "RSA, INSURANCE, FASTAG, SERVICE_PACKAGE, TCS, DISCOUNT_LINE, TAX_LINE, "
+                "OTHER. Use OTHER when the item does not clearly fit; never guess a "
+                "specific category from the amount alone."
             ),
         ),
     ]
@@ -334,6 +339,13 @@ def _build_schema(
             "For line_items return a JSON array; do not merge separate printed items into one "
             "synthetic item."
         ),
+        (
+            "line_category on each line item is a classification hint for downstream "
+            "reconciliation, not a new amount. Base it on the printed description and HSN/SAC "
+            "code only; extended warranty / EW / warranty plan lines are EXTENDED_WARRANTY, "
+            "roadside assistance is RSA, a printed discount/scheme line is DISCOUNT_LINE, and a "
+            "standalone tax line is TAX_LINE. Use OTHER rather than forcing a category."
+        ),
     ]
     if expected_purpose:
         notes.append(
@@ -349,7 +361,7 @@ def _build_schema(
     return SchemaDefinition(
         document_type_key=document_type_key,
         display_name=display_name,
-        schema_version="1.0",
+        schema_version="1.1",
         fields=fields,
         system_prompt=(
             "You extract structured commercial evidence from automobile-dealership invoices "

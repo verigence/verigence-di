@@ -22,6 +22,7 @@ from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
 from verigence.di.document_ai.schemas.customer_ledger import CUSTOMER_LEDGER_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
+from verigence.di.document_ai.schemas.debit_note import DEBIT_NOTE_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.gate_pass import GATE_PASS_SCHEMA
 from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
@@ -37,6 +38,7 @@ from verigence.di.document_ai.schemas.invoice import (
     WHOLESALE_INVOICE_SCHEMA,
 )
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
+from verigence.di.document_ai.schemas.purchase_order import PURCHASE_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.rto_challan import RTO_CHALLAN_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
@@ -68,6 +70,8 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "bank_approval_letter": BANK_APPROVAL_LETTER_SCHEMA,
     "valuation_report": VALUATION_REPORT_SCHEMA,
     "customer_ledger": CUSTOMER_LEDGER_SCHEMA,
+    "debit_note": DEBIT_NOTE_SCHEMA,
+    "purchase_order": PURCHASE_ORDER_SCHEMA,
     # Generalized invoice intelligence. Existing business requirement keys remain
     # stable; all are backed by one common invoice evidence superset with only
     # genuinely service-specific additions.
