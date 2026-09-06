@@ -187,7 +187,15 @@ async def complete_job(
     error_code: str | None = None,
     error_detail: str | None = None,
 ) -> None:
-    """Mark a processing job COMPLETED or FAILED."""
+    """Mark a processing job complete and redeliver the Audit link after success.
+
+    The first Audit callback can happen immediately after upload so Audit Core can
+    establish durable evidence linkage while extraction is still running.  When
+    extraction succeeds, requeue that same durable callback. Audit Core then reads
+    the confirmed DI facts, copies every field to its Core audit store, and applies
+    the confidence-based PC review policy. Callback delivery remains retriable and
+    never sits on the extraction critical path.
+    """
     now = datetime.now(UTC)
     final_status = "COMPLETED" if success else "FAILED"
     await session.execute(
@@ -209,6 +217,29 @@ async def complete_job(
             "job_id": processing_job_id,
         },
     )
+
+    if success:
+        await session.execute(
+            text("""
+                UPDATE docintel.documents d
+                SET audit_link_status = 'PENDING',
+                    audit_link_last_attempt_at_utc = NULL,
+                    audit_link_acknowledged_at_utc = NULL,
+                    audit_link_last_error = NULL,
+                    updated_at_utc = :now
+                FROM docintel.processing_jobs pj
+                WHERE pj.tenant_id = :tenant_id
+                  AND pj.processing_job_id = :job_id
+                  AND d.tenant_id = pj.tenant_id
+                  AND d.document_id = pj.document_id
+                  AND d.audit_requirement_ref IS NOT NULL
+            """),
+            {
+                "now": now,
+                "tenant_id": tenant_id,
+                "job_id": processing_job_id,
+            },
+        )
 
 
 async def retry_job(
