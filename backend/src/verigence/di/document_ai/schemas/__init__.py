@@ -20,6 +20,7 @@ from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEM
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
+from verigence.di.document_ai.schemas.customer_ledger import CUSTOMER_LEDGER_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.gate_pass import GATE_PASS_SCHEMA
@@ -66,6 +67,7 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "corporate_id": CORPORATE_ID_SCHEMA,
     "bank_approval_letter": BANK_APPROVAL_LETTER_SCHEMA,
     "valuation_report": VALUATION_REPORT_SCHEMA,
+    "customer_ledger": CUSTOMER_LEDGER_SCHEMA,
     # Generalized invoice intelligence. Existing business requirement keys remain
     # stable; all are backed by one common invoice evidence superset with only
     # genuinely service-specific additions.
