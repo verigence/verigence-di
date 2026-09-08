@@ -17,10 +17,15 @@ from verigence.di.document_ai.schemas._fallback import FALLBACK_SCHEMA
 from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEMA
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
+from verigence.di.document_ai.schemas.dealer_accounts_statement import (
+    DEALER_ACCOUNTS_STATEMENT_SCHEMA,
+)
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
+from verigence.di.document_ai.schemas.invoice import INVOICE_SCHEMA
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
+from verigence.di.document_ai.schemas.rto_tax_receipt import RTO_TAX_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
 
@@ -54,6 +59,13 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "upi_transaction":        UPI_TRANSACTION_SCHEMA,
     "delivery_order_cover":   DELIVERY_ORDER_SCHEMA,
     "upi_screenshot":         UPI_SCREENSHOT_SCHEMA,
+    # ── Invoice / deal-sheet domain (new — migration 0009) ───────────────────
+    # One superset "invoice" schema: the classifier cannot separate a vehicle
+    # tax invoice from a retail / accessories / extended-warranty invoice, so
+    # all are classified as `invoice` and `invoice_kind` is set during extraction.
+    "invoice":                   INVOICE_SCHEMA,
+    "dealer_accounts_statement": DEALER_ACCOUNTS_STATEMENT_SCHEMA,
+    "rto_tax_receipt":           RTO_TAX_RECEIPT_SCHEMA,
     # ── Existing global types with Gemini schemas ────────────────────────────
     "insurance_cover":        INSURANCE_COVER_SCHEMA,
     "pan_card":               PAN_CARD_SCHEMA,
