@@ -204,6 +204,41 @@ async def run_processing_job(
 
 # ── Step execution ────────────────────────────────────────────────────────────
 
+def _non_scoring_confirmation_values(
+    effective_threshold: Decimal, *, deterministic_rules_force_review: bool,
+) -> tuple[Decimal, Decimal, HumanVerificationStatus]:
+    """(confidence_score, threshold_applied, human_verification_status) for a
+    document type whose extraction profile has no score_included fields (a
+    "non-scoring profile") -- e.g. gate_pass, rto_challan, tax_invoice_tally,
+    all seeded with score_included=false on every field.
+
+    ck_documents_confirmation_invariants requires confidence_score and
+    verification_threshold_applied to be NOT NULL whenever confirmation_status
+    is CONFIRMED, and human_verification_status to equal EXACTLY 'OPTIONAL' if
+    confidence_score > verification_threshold_applied else 'MANDATORY'.
+    Leaving both None (the previous behaviour) violated the NOT NULL half of
+    that constraint for every non-scoring document type -- the CONFIRMED
+    UPDATE in _execute_steps raised CheckViolationError, poisoning the
+    worker's transaction and leaving the document stuck retrying forever,
+    never actually reaching CONFIRMED (confirmed live for gate_pass,
+    rto_challan, tax_invoice_tally).
+
+    There is nothing to score, so ordinarily record full confidence against
+    the same threshold used everywhere else -> OPTIONAL, consistent with
+    never needing review. But a normalization or validation failure
+    elsewhere in the document (deterministic_rules_force_review) still
+    forces mandatory review even for a non-scoring profile; recording full
+    confidence in that case would make the constraint's own CASE derive
+    OPTIONAL while human_verification_status says MANDATORY -- the same
+    class of violation this function exists to prevent. So confidence is
+    recorded at (not above) the threshold instead, which the CASE always
+    resolves to MANDATORY.
+    """
+    if deterministic_rules_force_review:
+        return Decimal("0"), effective_threshold, HumanVerificationStatus.MANDATORY
+    return Decimal("100"), effective_threshold, HumanVerificationStatus.OPTIONAL
+
+
 async def _execute_steps(
     *,
     session: AsyncSession,
@@ -571,9 +606,9 @@ async def _execute_steps(
     non_scoring_profile = not scored_fields
 
     if non_scoring_profile:
-        confidence_score: Decimal | None = None
-        threshold_applied: Decimal | None = None
-        hvs = HumanVerificationStatus.OPTIONAL
+        confidence_score, threshold_applied, hvs = _non_scoring_confirmation_values(
+            effective_threshold, deterministic_rules_force_review=deterministic_rules_force_review,
+        )
     else:
         try:
             conf_result = calculate_confidence_score(scored_fields, threshold=effective_threshold)
