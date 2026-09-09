@@ -138,6 +138,12 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         response_tokens = 0
         http_status = 0
 
+        # Handwritten forms consistently need Gemini longer than the flat 120s
+        # budget that works fine for printed documents -- observed live as
+        # ReadTimeout at just over 120s on both internal attempts, every time,
+        # for the same handwritten Booking Form (never a transient blip).
+        timeout_seconds = 240.0 if physical_form_type == "HANDWRITTEN" else 120.0
+
         for attempt in range(2):
             try:
                 raw_response, http_status, prompt_tokens, response_tokens = (
@@ -146,6 +152,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                         artifact_bytes=artifact_bytes,
                         mime_type=mime_type,
                         prompt=prompt,
+                        timeout_seconds=timeout_seconds,
                     )
                 )
                 log.debug(
@@ -396,11 +403,12 @@ async def _call_gemini_instrumented(
     artifact_bytes: bytes,
     mime_type: str,
     prompt: str,
+    timeout_seconds: float = 120.0,
 ) -> tuple[str, int, int, int]:
     """Send document bytes + prompt to Gemini with token instrumentation."""
     payload = _build_payload(artifact_bytes, mime_type, prompt)
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         resp = await client.post(
             _GEMINI_API_URL,
             headers={"x-goog-api-key": api_key},

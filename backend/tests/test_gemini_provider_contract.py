@@ -86,3 +86,40 @@ async def test_adapter_propagates_provider_auth_failure(
             [],
             document_type_key="pan_card",
         )
+
+
+@pytest.mark.asyncio
+async def test_handwritten_forms_get_a_longer_gemini_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test for a live production failure: a handwritten Booking
+    # Form's extraction consistently hit ReadTimeout at just over 120s on
+    # both internal attempts, every time -- Gemini genuinely needs longer
+    # than the flat 120s budget that works fine for printed documents.
+    captured: dict[str, object] = {}
+
+    async def fake_call(**kwargs: object) -> tuple[str, int, int, int]:
+        captured.update(kwargs)
+        return "{}", 200, 0, 0
+
+    monkeypatch.setattr(gemini_adapter, "_call_gemini_instrumented", fake_call)
+    adapter = gemini_adapter.GeminiDocumentAIAdapter("AQ.test-auth-key")
+
+    await adapter.extract(
+        b"pdf",
+        "application/pdf",
+        [],
+        physical_form_type="HANDWRITTEN",
+        document_type_key="booking_form",
+    )
+    assert captured["timeout_seconds"] == 240.0
+
+    captured.clear()
+    await adapter.extract(
+        b"pdf",
+        "application/pdf",
+        [],
+        physical_form_type="PRINTABLE",
+        document_type_key="booking_form",
+    )
+    assert captured["timeout_seconds"] == 120.0
