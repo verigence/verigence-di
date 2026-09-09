@@ -357,6 +357,13 @@ async def tenant_cleanup(test_tenant_id: str) -> AsyncGenerator[None, None]:
                 {"tid": test_tenant_id},
             )
             for table in [
+                # Same FK gap as tenant_housekeeping.py's own deletion lists
+                # (fixed alongside): document_capture_v2_uploads and
+                # document_capture_v2_classification_jobs (migration 0021)
+                # both FK-reference documents(tenant_id, document_id) and
+                # must be cleared before it.
+                "docintel.document_capture_v2_classification_jobs",
+                "docintel.document_capture_v2_uploads",
                 "docintel.processing_jobs",
                 "docintel.document_artifacts",
                 "docintel.documents",

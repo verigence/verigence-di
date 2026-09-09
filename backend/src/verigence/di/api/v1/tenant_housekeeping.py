@@ -133,6 +133,13 @@ async def _delete_transaction_rows(session: AsyncSession, tenant_id: str) -> Non
         "processor_invocations",
         "processing_runs",
         "processing_jobs",
+        # UC03 Document Capture V2's own upload/classification-queue state
+        # (migration 0021) -- both FK-reference documents(tenant_id,
+        # document_id) and were missing here, so a full tenant purge failed
+        # with a foreign key violation on document_capture_v2_uploads as
+        # soon as any V2 upload existed for the tenant.
+        "document_capture_v2_classification_jobs",
+        "document_capture_v2_uploads",
         "documents",
     )
     for table_name in tables:
@@ -196,6 +203,13 @@ async def _delete_selected_document_rows(
         "integration_intake_events",
         "document_artifacts",
         "human_verifications",
+        # Same UC03 Document Capture V2 tables added to _delete_transaction_
+        # rows above -- this is the path Audit Core Journey housekeeping
+        # actually calls (purge selected documents), and the one that was
+        # failing in production with a foreign key violation on
+        # document_capture_v2_uploads.
+        "document_capture_v2_classification_jobs",
+        "document_capture_v2_uploads",
     )
     for table_name in direct_tables:
         await session.execute(
