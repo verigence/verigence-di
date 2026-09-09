@@ -14,7 +14,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 BOOKING_FORM_SCHEMA = SchemaDefinition(
     document_type_key="booking_form",
     display_name="Booking Form",
-    schema_version="1.5",
+    schema_version="1.6",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=True, description="Name of the dealership exactly as visible"),
         FieldSpec(key="dealer_branch", field_type="string", required=False, description="Dealer branch/outlet/location exactly as visible"),
@@ -56,6 +56,7 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         FieldSpec(key="buffer_discount_amount", field_type="number", required=False, description="Buffer discount amount only when explicitly labelled/shown", normalization="indian_currency"),
         FieldSpec(key="exchange_discount_amount", field_type="number", required=False, description="Exchange discount/benefit amount only when explicitly labelled/shown; keep separate from exchange vehicle value", normalization="indian_currency"),
         FieldSpec(key="corporate_discount_amount", field_type="number", required=False, description="Corporate discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
+        FieldSpec(key="scrappage_discount_amount", field_type="number", required=False, description="Scrappage/vehicle-scrappage discount or bonus amount only when explicitly labelled/shown", normalization="indian_currency"),
         FieldSpec(key="loyalty_discount_amount", field_type="number", required=False, description="Loyalty discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
         FieldSpec(key="inhouse_insurance_discount_amount", field_type="number", required=False, description="In-house insurance discount/benefit amount only when explicitly labelled/shown", normalization="indian_currency"),
         FieldSpec(key="mr_discount_amount", field_type="number", required=False, description="MR discount/benefit amount only when the document explicitly uses the MR label", normalization="indian_currency"),
@@ -91,7 +92,7 @@ BOOKING_FORM_SCHEMA = SchemaDefinition(
         "exchange_applicable is based only on an explicit Yes/No, checkbox, tick, or equivalent selection. The existence of exchange_value must not be used to infer it.",
         "total_price must be extracted only from an explicitly shown grand-total/on-road-total value. Do not sum component charges.",
         "net_amount, discount_amount, bonus_amount, and balance_amount must be extracted only when explicitly shown. Do not derive one from the others.",
-        "discount_amount is the explicitly printed aggregate/lump-sum discount. Sales, Buffer, Exchange, Corporate, Loyalty, In-house Insurance, MR, OEM Referral, Other and Free Accessory discounts are populated independently only when the form explicitly shows their individual monetary values. Never allocate a lump-sum scheme across them.",
+        "discount_amount is the explicitly printed aggregate/lump-sum discount. Sales, Buffer, Exchange, Corporate, Scrappage, Loyalty, In-house Insurance, MR, OEM Referral, Other and Free Accessory discounts are populated independently only when the form explicitly shows their individual monetary values. Never allocate a lump-sum scheme across them.",
         "accessories_cost is the explicitly printed total/combined accessories amount. essential_kit_amount, genuine_accessories_amount and non_genuine_accessories_amount are populated only when those components are separately visible; never split a total accessories amount.",
         "FASTag, Extended Warranty/EW, Green Tax and Service Package are kept as distinct commercial components whenever the form explicitly shows them.",
         "other_charges must not absorb a separately labelled TCS, RSA, warranty, FASTag, green tax, service package, registration, road tax, insurance, accessories, discount, or bonus amount.",

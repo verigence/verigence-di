@@ -8,7 +8,7 @@ def _field_map(schema):
 
 
 def test_booking_form_v15_contains_complete_commercial_and_legacy_fields() -> None:
-    assert BOOKING_FORM_SCHEMA.schema_version == "1.5"
+    assert BOOKING_FORM_SCHEMA.schema_version == "1.6"
     fields = _field_map(BOOKING_FORM_SCHEMA)
     expected = {
         "registration_by",
@@ -36,6 +36,7 @@ def test_booking_form_v15_contains_complete_commercial_and_legacy_fields() -> No
         "buffer_discount_amount",
         "exchange_discount_amount",
         "corporate_discount_amount",
+        "scrappage_discount_amount",
         "loyalty_discount_amount",
         "inhouse_insurance_discount_amount",
         "mr_discount_amount",
