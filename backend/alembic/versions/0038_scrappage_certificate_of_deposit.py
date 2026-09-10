@@ -44,13 +44,16 @@ _NEW_CANONICAL_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("old_vehicle_category", "Old Vehicle Category", "STRING"),
     ("old_vehicle_type", "Old Vehicle Type", "STRING"),
     ("old_vehicle_fuel_type", "Old Vehicle Fuel Type", "STRING"),
-    ("old_vehicle_cubic_capacity", "Old Vehicle Cubic Capacity", "NUMBER"),
-    ("old_vehicle_seating_capacity", "Old Vehicle Seating Capacity", "NUMBER"),
+    # docintel.canonical_fields.data_type is CHECK-constrained (migration
+    # 0001) to STRING/INTEGER/DECIMAL/BOOLEAN/DATE/DATETIME/CURRENCY/
+    # IDENTIFIER/PHONE/EMAIL/JSON -- there is no NUMBER.
+    ("old_vehicle_cubic_capacity", "Old Vehicle Cubic Capacity", "DECIMAL"),
+    ("old_vehicle_seating_capacity", "Old Vehicle Seating Capacity", "INTEGER"),
     ("old_vehicle_year_of_manufacturing", "Old Vehicle Year of Manufacturing", "STRING"),
-    ("old_vehicle_unladen_weight_kg", "Old Vehicle Unladen Weight (kg)", "NUMBER"),
-    ("old_vehicle_number_of_cylinders", "Old Vehicle Number of Cylinders", "NUMBER"),
-    ("old_vehicle_gross_vehicle_weight_kg", "Old Vehicle Gross Vehicle Weight (kg)", "NUMBER"),
-    ("old_vehicle_wheelbase_mm", "Old Vehicle Wheelbase (mm)", "NUMBER"),
+    ("old_vehicle_unladen_weight_kg", "Old Vehicle Unladen Weight (kg)", "DECIMAL"),
+    ("old_vehicle_number_of_cylinders", "Old Vehicle Number of Cylinders", "INTEGER"),
+    ("old_vehicle_gross_vehicle_weight_kg", "Old Vehicle Gross Vehicle Weight (kg)", "DECIMAL"),
+    ("old_vehicle_wheelbase_mm", "Old Vehicle Wheelbase (mm)", "DECIMAL"),
     ("original_owner_name", "Original Owner Name", "STRING"),
     ("current_holder_name", "Current Holder Name", "STRING"),
     ("current_holder_mobile", "Current Holder Mobile", "STRING"),
