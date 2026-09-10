@@ -19,6 +19,7 @@ INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS = frozenset(
         "accessory_invoice_tally",
         "ew_invoice",
         "rsa_invoice",
+        "credit_note",
     }
 )
 INVOICE_DOCUMENT_TYPE_KEYS = INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS | {
@@ -48,6 +49,12 @@ INVOICE_CLASSIFICATION_HINTS: dict[str, str] = {
     ),
     "ew_invoice": "invoice specifically for extended-warranty coverage",
     "rsa_invoice": "invoice specifically for roadside-assistance (RSA) coverage/service",
+    "credit_note": (
+        "a credit note against an earlier invoice, reducing or reversing a previously "
+        "billed amount -- not a new sale invoice; must reference the original invoice "
+        "it corrects and typically shows a negative/refunded value or explicit "
+        "credit-note numbering distinct from an invoice series"
+    ),
     GENERIC_INVOICE_TYPE_KEY: (
         "fallback only: the document is clearly an invoice, but none of the more specific "
         "invoice candidates can be established reliably from the visible document"
