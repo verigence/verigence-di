@@ -37,6 +37,7 @@ from verigence.di.repositories.processing_jobs import (
     complete_job,
     fail_job,
     retry_job,
+    schedule_v2_fast_retry,
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.job_runner import run_processing_job
@@ -386,6 +387,11 @@ async def _execute_claimed_job(
     document_id: uuid.UUID = job["document_id"]
     correlation_id: str = str(job["correlation_id"])
     job_type: str = str(job["job_type"])
+    # Only claim_next_v2_job's LEFT JOIN populates this key with a non-NULL
+    # value (the document has a Capture V2 upload row); claim_next_non_v2_job
+    # explicitly excludes such documents, so this is a reliable signal for
+    # which retry policy a first failure should get, below.
+    is_capture_v2 = job.get("capture_v2_document_type_key") is not None
 
     job_log = log.bind(
         tenant_id=tenant_id,
@@ -431,11 +437,13 @@ async def _execute_claimed_job(
                     tenant_id=tenant_id,
                     job_id=job_id,
                     document_id=document_id,
+                    correlation_id=correlation_id,
                     processing_run_id=result.processing_run_id,
                     error_code=result.error_code,
                     error_detail=result.error_detail,
                     retryable=result.retryable,
                     attempt_no=int(job["attempt_no"]),
+                    is_capture_v2=is_capture_v2,
                     job_log=job_log,
                 )
 
@@ -446,11 +454,13 @@ async def _execute_claimed_job(
                 tenant_id=tenant_id,
                 job_id=job_id,
                 document_id=document_id,
+                correlation_id=correlation_id,
                 processing_run_id=None,
                 error_code="WORKER_INTERNAL_ERROR",
                 error_detail=str(exc),
                 retryable=True,
                 attempt_no=int(job["attempt_no"]),
+                is_capture_v2=is_capture_v2,
                 job_log=job_log,
             )
 
@@ -461,11 +471,13 @@ async def _handle_failure(
     tenant_id: str,
     job_id: uuid.UUID,
     document_id: uuid.UUID,
+    correlation_id: str,
     processing_run_id: uuid.UUID | None,
     error_code: str | None,
     error_detail: str | None,
     retryable: bool,
     attempt_no: int,
+    is_capture_v2: bool,
     job_log: Any,
 ) -> None:
     from datetime import UTC, datetime
@@ -483,11 +495,25 @@ async def _handle_failure(
                 error_code=error_code,
                 error_detail=error_detail,
             )
+            # The legacy/V1 flow's next attempt is the once-daily EOD Retry
+            # Scheduler (scheduler/beat.py) -- an accepted design there, but
+            # Capture V2's whole reason for a dedicated worker pool is fast
+            # PC-facing turnaround. Give it a fast second attempt instead of
+            # leaving the document showing "still processing" for up to ~24h.
+            if is_capture_v2:
+                await schedule_v2_fast_retry(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    correlation_id=correlation_id,
+                )
         job_log.info(
             "job_retry_pending",
             error_class=error_class,
             error_code=error_code,
             error_detail=error_detail,
+            is_capture_v2=is_capture_v2,
+            fast_retry_scheduled=is_capture_v2,
         )
         return
 

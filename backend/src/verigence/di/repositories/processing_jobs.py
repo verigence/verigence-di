@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _MAX_ERROR_DETAIL = 2000
 _MAX_ERROR_CODE = 128
+
+# The bounded V2 worker pool exists specifically to give Capture V2
+# extraction a fast, PC-facing turnaround (see module docstring in
+# workers/processor.py). Its first retryable failure must not fall back to
+# the legacy EOD Retry Scheduler, which can leave a document showing
+# nothing more than "still processing" for up to ~24h (see
+# schedule_v2_fast_retry below).
+V2_FAST_RETRY_DELAY_SECONDS = 120
 
 
 def _cap(value: str | None, limit: int) -> str | None:
@@ -297,6 +305,54 @@ async def retry_job(
             "error_detail": safe_detail,
             "tenant_id": tenant_id,
             "job_id": processing_job_id,
+        },
+    )
+
+
+async def schedule_v2_fast_retry(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    document_id: uuid.UUID,
+    correlation_id: str,
+) -> None:
+    """Give a Capture V2 document's first retryable extraction failure a
+    fast second attempt instead of the legacy EOD Retry Scheduler.
+
+    retry_job() above already set the document to RETRY_PENDING -- correct
+    for the legacy/V1 flow, where the EOD Retry Scheduler inserting the
+    attempt_no=2 job once a day is an accepted design (see scheduler/beat.py).
+    But Document Capture V2's whole reason for a dedicated bounded worker
+    pool is a fast, PC-facing turnaround (see workers/processor.py's module
+    docstring) -- leaving its retry on the same once-daily schedule can
+    leave a document showing nothing more than "still processing" for up
+    to ~24h with no way for a PC to tell it already failed once.
+
+    Idempotent via the same (tenant_id, document_id, job_type) uniqueness
+    EOD_RETRY already relies on -- a second failed attempt at the SAME
+    job_type can't insert a duplicate, and by the time a genuinely new
+    upload of the same document_id could exist, this row is long since
+    resolved.
+    """
+    now = datetime.now(UTC)
+    due_at = now + timedelta(seconds=V2_FAST_RETRY_DELAY_SECONDS)
+    await session.execute(
+        text("""
+            INSERT INTO docintel.processing_jobs
+                (tenant_id, processing_job_id, document_id, correlation_id,
+                 job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+            VALUES
+                (:tenant_id, :job_id, :document_id, :correlation_id,
+                 'V2_FAST_RETRY', 'PENDING', :due_at, 2, :now)
+            ON CONFLICT (tenant_id, document_id, job_type) DO NOTHING
+        """),
+        {
+            "tenant_id": tenant_id,
+            "job_id": uuid.uuid4(),
+            "document_id": document_id,
+            "correlation_id": correlation_id,
+            "due_at": due_at,
+            "now": now,
         },
     )
 

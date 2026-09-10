@@ -204,6 +204,27 @@ class TestBackoutTtlHoursSetting:
 
 # ── _handle_failure integration ───────────────────────────────────────────────
 
+def _make_mock_session_factory() -> MagicMock:
+    """Return a mock async_sessionmaker that yields a mock session/begin."""
+    session_cm = AsyncMock()
+    session_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    begin_cm = AsyncMock()
+    begin_cm.__aenter__ = AsyncMock(return_value=None)
+    begin_cm.__aexit__ = AsyncMock(return_value=False)
+
+    session_mock = AsyncMock()
+    session_mock.begin = MagicMock(return_value=begin_cm)
+    session_mock.execute = AsyncMock()
+
+    outer_cm = AsyncMock()
+    outer_cm.__aenter__ = AsyncMock(return_value=session_mock)
+    outer_cm.__aexit__ = AsyncMock(return_value=False)
+
+    return MagicMock(return_value=outer_cm)
+
+
 class TestHandleFailure:
     """Verify that _handle_failure routes to RETRY_PENDING or D24 backout correctly.
 
@@ -211,25 +232,7 @@ class TestHandleFailure:
     """
 
     def _make_session_factory(self) -> MagicMock:
-        """Return a mock async_sessionmaker that yields a mock session/begin."""
-        session_cm = AsyncMock()
-        session_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
-        session_cm.__aexit__ = AsyncMock(return_value=False)
-
-        begin_cm = AsyncMock()
-        begin_cm.__aenter__ = AsyncMock(return_value=None)
-        begin_cm.__aexit__ = AsyncMock(return_value=False)
-
-        session_mock = AsyncMock()
-        session_mock.begin = MagicMock(return_value=begin_cm)
-        session_mock.execute = AsyncMock()
-
-        outer_cm = AsyncMock()
-        outer_cm.__aenter__ = AsyncMock(return_value=session_mock)
-        outer_cm.__aexit__ = AsyncMock(return_value=False)
-
-        factory = MagicMock(return_value=outer_cm)
-        return factory
+        return _make_mock_session_factory()
 
     # ── New retry-path tests (Phase 3 #10) ────────────────────────────────────
 
@@ -252,11 +255,13 @@ class TestHandleFailure:
                 tenant_id="t1",
                 job_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
+                correlation_id="corr-1",
                 processing_run_id=uuid.uuid4(),
                 error_code="CLASSIFICATION_PROVIDER_ERROR",
                 error_detail="timeout",
                 retryable=True,
                 attempt_no=1,
+                is_capture_v2=False,
                 job_log=job_log,
             )
 
@@ -285,11 +290,13 @@ class TestHandleFailure:
                 tenant_id="t1",
                 job_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
+                correlation_id="corr-1",
                 processing_run_id=uuid.uuid4(),
                 error_code="CLASSIFICATION_PROVIDER_ERROR",
                 error_detail="timeout",
                 retryable=True,
                 attempt_no=2,
+                is_capture_v2=False,
                 job_log=job_log,
             )
 
@@ -319,11 +326,13 @@ class TestHandleFailure:
                 tenant_id="t1",
                 job_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
+                correlation_id="corr-1",
                 processing_run_id=uuid.uuid4(),
                 error_code="CLASSIFICATION_PROVIDER_ERROR",
                 error_detail="timeout",
                 retryable=True,
                 attempt_no=2,
+                is_capture_v2=False,
                 job_log=job_log,
             )
 
@@ -351,11 +360,13 @@ class TestHandleFailure:
                 tenant_id="t1",
                 job_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
+                correlation_id="corr-1",
                 processing_run_id=None,
                 error_code="CLASSIFICATION_NO_CANDIDATES",
                 error_detail="no profiles",
                 retryable=False,
                 attempt_no=1,
+                is_capture_v2=False,
                 job_log=job_log,
             )
 
@@ -382,14 +393,164 @@ class TestHandleFailure:
                 tenant_id="t1",
                 job_id=uuid.uuid4(),
                 document_id=uuid.uuid4(),
+                correlation_id="corr-1",
                 processing_run_id=None,
                 error_code="EXTRACTION_PROVIDER_ERROR",
                 error_detail="gemini 429",
                 retryable=True,
                 attempt_no=2,
+                is_capture_v2=False,
                 job_log=job_log,
             )
 
         job_log.warning.assert_called_once()
         call_args = job_log.warning.call_args
         assert call_args[0][0] == "job_failed_backout"
+
+    # ── V2 fast-retry path (root cause of Delivery docs stuck at Classified) ──
+
+    @pytest.mark.asyncio
+    async def test_capture_v2_retryable_attempt1_also_schedules_fast_retry(self) -> None:
+        """A Capture V2 document's first retryable failure gets a near-term
+        second attempt, not just the once-daily EOD Retry Scheduler."""
+        from verigence.di.workers.processor import _handle_failure
+
+        factory = self._make_session_factory()
+        job_log = MagicMock()
+        job_log.info = MagicMock()
+        document_id = uuid.uuid4()
+
+        with (
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch(
+                "verigence.di.workers.processor.schedule_v2_fast_retry", new_callable=AsyncMock,
+            ) as mock_fast_retry,
+        ):
+            await _handle_failure(
+                session_factory=factory,
+                tenant_id="t1",
+                job_id=uuid.uuid4(),
+                document_id=document_id,
+                correlation_id="corr-1",
+                processing_run_id=uuid.uuid4(),
+                error_code="EXTRACTION_PROVIDER_ERROR",
+                error_detail="gemini timeout",
+                retryable=True,
+                attempt_no=1,
+                is_capture_v2=True,
+                job_log=job_log,
+            )
+
+        mock_retry.assert_called_once()
+        mock_fast_retry.assert_called_once()
+        call_kwargs = mock_fast_retry.call_args.kwargs
+        assert call_kwargs["tenant_id"] == "t1"
+        assert call_kwargs["document_id"] == document_id
+        assert call_kwargs["correlation_id"] == "corr-1"
+
+    @pytest.mark.asyncio
+    async def test_legacy_retryable_attempt1_does_not_schedule_fast_retry(self) -> None:
+        """A non-V2 (legacy) document's first retryable failure is unaffected --
+        it still waits on the once-daily EOD Retry Scheduler as before."""
+        from verigence.di.workers.processor import _handle_failure
+
+        factory = self._make_session_factory()
+        job_log = MagicMock()
+        job_log.info = MagicMock()
+
+        with (
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch(
+                "verigence.di.workers.processor.schedule_v2_fast_retry", new_callable=AsyncMock,
+            ) as mock_fast_retry,
+        ):
+            await _handle_failure(
+                session_factory=factory,
+                tenant_id="t1",
+                job_id=uuid.uuid4(),
+                document_id=uuid.uuid4(),
+                correlation_id="corr-1",
+                processing_run_id=uuid.uuid4(),
+                error_code="EXTRACTION_PROVIDER_ERROR",
+                error_detail="gemini timeout",
+                retryable=True,
+                attempt_no=1,
+                is_capture_v2=False,
+                job_log=job_log,
+            )
+
+        mock_retry.assert_called_once()
+        mock_fast_retry.assert_not_called()
+
+
+class TestExecuteClaimedJobDetectsCaptureV2:
+    """_execute_claimed_job derives is_capture_v2 from the claimed job dict --
+    only claim_next_v2_job's query populates capture_v2_document_type_key."""
+
+    @pytest.mark.asyncio
+    async def test_v2_job_with_document_type_key_is_flagged_capture_v2(self) -> None:
+        from verigence.di.workers.processor import _execute_claimed_job
+
+        factory = _make_mock_session_factory()
+        job = {
+            "tenant_id": "t1",
+            "processing_job_id": uuid.uuid4(),
+            "document_id": uuid.uuid4(),
+            "correlation_id": "corr-1",
+            "job_type": "V2_FAST_RETRY",
+            "attempt_no": 2,
+            "capture_v2_document_type_key": "payment_receipt",
+        }
+
+        with (
+            patch(
+                "verigence.di.workers.processor.run_processing_job",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "verigence.di.workers.processor._handle_failure", new_callable=AsyncMock,
+            ) as mock_handle_failure,
+        ):
+            await _execute_claimed_job(
+                session_factory=factory,
+                job=job,
+                ai_adapter=MagicMock(),
+                log=MagicMock(),
+            )
+
+        assert mock_handle_failure.call_args.kwargs["is_capture_v2"] is True
+        assert mock_handle_failure.call_args.kwargs["correlation_id"] == "corr-1"
+
+    @pytest.mark.asyncio
+    async def test_legacy_job_without_document_type_key_is_not_capture_v2(self) -> None:
+        from verigence.di.workers.processor import _execute_claimed_job
+
+        factory = _make_mock_session_factory()
+        job = {
+            "tenant_id": "t1",
+            "processing_job_id": uuid.uuid4(),
+            "document_id": uuid.uuid4(),
+            "correlation_id": "corr-1",
+            "job_type": "INITIAL",
+            "attempt_no": 1,
+        }
+
+        with (
+            patch(
+                "verigence.di.workers.processor.run_processing_job",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "verigence.di.workers.processor._handle_failure", new_callable=AsyncMock,
+            ) as mock_handle_failure,
+        ):
+            await _execute_claimed_job(
+                session_factory=factory,
+                job=job,
+                ai_adapter=MagicMock(),
+                log=MagicMock(),
+            )
+
+        assert mock_handle_failure.call_args.kwargs["is_capture_v2"] is False
