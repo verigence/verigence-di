@@ -44,6 +44,7 @@ from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
 from verigence.di.document_ai.schemas.payment_receipt import PAYMENT_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.purchase_order import PURCHASE_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.rto_challan import RTO_CHALLAN_SCHEMA
+from verigence.di.document_ai.schemas.scrappage_certificate import SCRAPPAGE_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
 from verigence.di.document_ai.schemas.valuation_report import VALUATION_REPORT_SCHEMA
@@ -97,6 +98,10 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "payment_receipt": PAYMENT_RECEIPT_SCHEMA,
     "customer_kyc": CUSTOMER_KYC_SCHEMA,
     "gst_declaration": GST_DECLARATION_SCHEMA,
+    # Vehicle Scrappage Certificate of Deposit -- evidence for the Booking
+    # Form's scrappage_discount_amount (0033), previously unclassifiable
+    # (see verigence-audit-core's BK_SCRAPPAGE_DOCUMENT_UNCLASSIFIED finding).
+    "scrappage_certificate_of_deposit": SCRAPPAGE_CERTIFICATE_SCHEMA,
 }
 
 
