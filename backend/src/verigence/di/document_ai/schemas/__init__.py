@@ -20,16 +20,19 @@ from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEM
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
+from verigence.di.document_ai.schemas.customer_kyc import CUSTOMER_KYC_SCHEMA
 from verigence.di.document_ai.schemas.customer_ledger import CUSTOMER_LEDGER_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.debit_note import DEBIT_NOTE_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.gate_pass import GATE_PASS_SCHEMA
 from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
+from verigence.di.document_ai.schemas.gst_declaration import GST_DECLARATION_SCHEMA
 from verigence.di.document_ai.schemas.insurance_cover import INSURANCE_COVER_SCHEMA
 from verigence.di.document_ai.schemas.invoice import (
     ACCESSORY_INVOICE_DMS_SCHEMA,
     ACCESSORY_INVOICE_TALLY_SCHEMA,
+    CREDIT_NOTE_SCHEMA,
     CUSTOMER_INVOICE_DMS_SCHEMA,
     EW_INVOICE_SCHEMA,
     GENERIC_INVOICE_SCHEMA,
@@ -38,6 +41,7 @@ from verigence.di.document_ai.schemas.invoice import (
     WHOLESALE_INVOICE_SCHEMA,
 )
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
+from verigence.di.document_ai.schemas.payment_receipt import PAYMENT_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.purchase_order import PURCHASE_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.rto_challan import RTO_CHALLAN_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
@@ -83,7 +87,16 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "ew_invoice": EW_INVOICE_SCHEMA,
     "rsa_invoice": RSA_INVOICE_SCHEMA,
     "invoice_generic": GENERIC_INVOICE_SCHEMA,
+    "credit_note": CREDIT_NOTE_SCHEMA,
     "rto_challan": RTO_CHALLAN_SCHEMA,
+    # Delivery's payment_receipt/customer_kyc were registered as document types
+    # (migration 0016) but never got a dedicated schema -- silently falling
+    # back to FALLBACK_SCHEMA's generic prompt. gst_declaration is a new type
+    # (migration 0036) for a real form previously mis-landing in customer_kyc
+    # for lack of a correct bucket.
+    "payment_receipt": PAYMENT_RECEIPT_SCHEMA,
+    "customer_kyc": CUSTOMER_KYC_SCHEMA,
+    "gst_declaration": GST_DECLARATION_SCHEMA,
 }
 
 

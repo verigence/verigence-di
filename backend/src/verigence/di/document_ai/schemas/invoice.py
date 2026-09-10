@@ -395,6 +395,13 @@ TAX_INVOICE_TALLY_SCHEMA = _build_schema(
     expected_source="TALLY",
     extension="vehicle",
 )
+CREDIT_NOTE_SCHEMA = _build_schema(
+    document_type_key="credit_note",
+    display_name="Credit Note",
+    expected_purpose="VEHICLE_SALE",
+    expected_source=None,
+    extension="vehicle",
+)
 ACCESSORY_INVOICE_DMS_SCHEMA = _build_schema(
     document_type_key="accessory_invoice_dms",
     display_name="Accessory Invoice / Challan (DMS)",
