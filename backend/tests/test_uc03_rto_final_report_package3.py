@@ -67,7 +67,7 @@ async def test_package3_rto_profile_remains_published_at_current_head(
     version = (
         await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
     ).scalar_one()
-    assert version == "0037"
+    assert version == "0038"
 
     published_count = (
         await db_session.execute(
