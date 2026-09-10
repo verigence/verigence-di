@@ -32,10 +32,13 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
         FieldSpec(key="policy_end_date", field_type="date", required=False, description="Policy expiry/end date", normalization="date_dd_mm_yyyy"),
         FieldSpec(key="issue_date", field_type="date", required=False, description="Policy/cover-note issue date if present", normalization="date_dd_mm_yyyy"),
         FieldSpec(key="add_ons", field_type="array", required=False, description="Add-on covers explicitly listed, such as zero depreciation, RSA, engine protect, consumables, key cover, etc.; return null if none are printed"),
+        FieldSpec(key="agent_intermediary_name", field_type="string", required=False, description="Agent/intermediary/broker name exactly as printed, if the policy was sold through one"),
+        FieldSpec(key="agent_intermediary_code", field_type="string", required=False, description="Agent/intermediary/broker code or license number exactly as printed"),
+        FieldSpec(key="misp_code", field_type="string", required=False, description="MISP (Motor Insurance Service Provider) code exactly as printed, when the dealership itself is registered as the selling MISP"),
     ],
     system_prompt=(
         "You are a document data extraction assistant specialising in Indian motor insurance policies and cover notes.\n"
-        "Extract only values explicitly visible in the supplied document. Never infer missing vehicle identifiers, dates, amounts, policy type, or add-ons.\n"
+        "Extract only values explicitly visible in the supplied document. Never infer missing vehicle identifiers, dates, amounts, policy type, add-ons, or intermediary details.\n"
         "Zero depreciation and similar covers are add-ons, not policy types.\n"
         "Return ONLY valid JSON using the requested field structure."
     ),
@@ -43,6 +46,7 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
         "Preserve chassis/VIN, engine number, registration number, and policy number exactly as visible.",
         "add_ons: return only covers explicitly listed in the document; otherwise return null with low confidence.",
         "policy_type: do not infer from premium components or add-ons; extract only an explicitly stated policy type.",
+        "agent_intermediary_name/agent_intermediary_code and misp_code are independent labels -- a policy can show either, both, or neither; never fill one from the other.",
         "Normalize INR formatting only for amounts that are explicitly present.",
     ],
 )
