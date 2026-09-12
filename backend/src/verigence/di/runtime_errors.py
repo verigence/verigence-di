@@ -47,7 +47,11 @@ def correlation_id_or_new(candidate: object | None = None) -> str:
     return str(uuid.uuid4())
 
 
-def safe_exception_context(exc: BaseException, *, max_frames: int = _MAX_STACK_FRAMES) -> dict[str, Any]:
+def safe_exception_context(
+    exc: BaseException,
+    *,
+    max_frames: int = _MAX_STACK_FRAMES,
+) -> dict[str, Any]:
     """Return exception diagnostics without message, locals, source text or full stack.
 
     Only the exception class and a bounded list of code locations are emitted.
@@ -98,7 +102,10 @@ def technical_failure(
 
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
-        if status_code == 429 and operation in {"classification_provider", "extraction_provider"}:
+        if status_code == 429 and operation in {
+            "classification_provider",
+            "extraction_provider",
+        }:
             return TechnicalFailure(
                 "DOCUMENT_AI_RATE_LIMITED",
                 _detail_for_code("DOCUMENT_AI_RATE_LIMITED"),
@@ -152,7 +159,9 @@ def safe_persisted_detail(code: str) -> str:
     return _detail_for_code(code)[:500]
 
 
-def validation_problem_detail(errors: list[dict[str, Any]]) -> tuple[str, list[dict[str, str]]]:
+def validation_problem_detail(
+    errors: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, str]]]:
     """Summarise Pydantic validation errors without echoing submitted values.
 
     Only schema locations and stable validation type identifiers are retained.
@@ -176,6 +185,21 @@ def validation_problem_detail(errors: list[dict[str, Any]]) -> tuple[str, list[d
     return f"Request validation failed for {preview}{suffix}.", issues
 
 
+def _catalogue_title(code: str) -> str | None:
+    """Resolve an existing ErrorCode title without coupling to its private type."""
+    from verigence.di.errors import ErrorCode
+
+    for name in dir(ErrorCode):
+        if name.startswith("_"):
+            continue
+        candidate = getattr(ErrorCode, name)
+        if getattr(candidate, "code", None) == code:
+            title = getattr(candidate, "title", None)
+            if isinstance(title, str) and title:
+                return title
+    return None
+
+
 def _detail_for_code(code: str) -> str:
     details = {
         "INTERNAL_ERROR": "An unexpected technical error occurred. Use the correlation ID when contacting support.",
@@ -193,8 +217,14 @@ def _detail_for_code(code: str) -> str:
         "SECURITY_INTEGRATION_FAILED": "Security service authorization could not be completed. The integration may be retried where safe.",
         "NOTIFY_LISTENER_UNAVAILABLE": "Database notification listener is unavailable; polling fallback is active.",
         "STARTUP_VALIDATION_FAILED": "A non-blocking startup consistency check failed; runtime startup continued.",
+        "EXTRACTION_PROFILE_EMPTY": "The effective extraction profile contains no enabled fields.",
+        "SCORING_DENOMINATOR_ZERO": "The extraction profile scoring configuration has no positive denominator.",
+        "UPLOAD_NOT_FIT": "The uploaded document failed file-quality validation.",
     }
-    return details.get(
-        code,
-        "A technical error occurred. Use the error code and correlation ID for diagnosis.",
-    )
+    explicit = details.get(code)
+    if explicit is not None:
+        return explicit
+    catalogue = _catalogue_title(code)
+    if catalogue is not None:
+        return catalogue
+    return "A technical error occurred. Use the error code and correlation ID for diagnosis."
