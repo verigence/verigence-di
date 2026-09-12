@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import traceback
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -160,7 +161,7 @@ def safe_persisted_detail(code: str) -> str:
 
 
 def validation_problem_detail(
-    errors: list[dict[str, Any]],
+    errors: Sequence[Mapping[str, Any]],
 ) -> tuple[str, list[dict[str, str]]]:
     """Summarise Pydantic validation errors without echoing submitted values.
 
