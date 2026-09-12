@@ -8,19 +8,25 @@ Lifespan: starts/stops the ProcessingWorker background task.
 from __future__ import annotations
 
 import time
-import traceback
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from verigence.di.errors import ErrorCode, problem_response
+from verigence.di.errors import ErrorCode, error_for_http_status, problem_response
+from verigence.di.runtime_errors import (
+    correlation_id_or_new,
+    safe_exception_context,
+    technical_failure,
+    validation_problem_detail,
+)
 from verigence.di.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -34,7 +40,12 @@ def _is_valid_correlation_id(value: str) -> bool:
 
 
 async def _validate_schema_profile_consistency() -> None:
-    """D25 — startup check: warn if published extraction profile fields diverge from SCHEMA_REGISTRY."""
+    """D25 — warn if published extraction fields diverge from SCHEMA_REGISTRY.
+
+    This is a non-blocking startup check.  Failure diagnostics intentionally do
+    not include database/provider exception messages or query/input values.
+    """
+    startup_correlation_id = correlation_id_or_new()
     try:
         from sqlalchemy import text  # noqa: PLC0415
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: PLC0415
@@ -74,20 +85,25 @@ async def _validate_schema_profile_consistency() -> None:
                 if schema_only or profile_only:
                     logger.warning(
                         "schema_profile_mismatch",
+                        correlation_id=startup_correlation_id,
                         document_type_key=dtkey,
                         schema_only=schema_only,
                         profile_only=profile_only,
                     )
     except Exception as exc:  # noqa: BLE001
+        failure = technical_failure(exc, operation="processing")
         logger.warning(
             "schema_profile_consistency_check_failed",
-            exc_type=type(exc).__name__,
-            exc_msg=str(exc),
+            correlation_id=startup_correlation_id,
+            error_code="STARTUP_VALIDATION_FAILED",
+            technical_class=failure.code,
+            **safe_exception_context(exc),
         )
 
 
 def create_app() -> FastAPI:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
+
     configure_logging()
     settings = get_settings()
 
@@ -100,6 +116,7 @@ def create_app() -> FastAPI:
             get_capture_v2_classifier_worker,
         )
         from verigence.di.workers.processor import get_worker  # noqa: PLC0415
+
         worker = get_worker()
         capture_v2_worker = get_capture_v2_classifier_worker()
         scheduler = get_eod_scheduler()
@@ -138,6 +155,7 @@ def create_app() -> FastAPI:
         if app.openapi_schema:
             return app.openapi_schema
         from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
+
         schema = get_openapi(
             title=app.title,
             version=app.version,
@@ -179,36 +197,47 @@ def create_app() -> FastAPI:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         del request
-        correlation_id = structlog.contextvars.get_contextvars().get(
-            "correlation_id", str(uuid.uuid4())
-        )
+        correlation_id = correlation_id_or_new()
+        detail, issues = validation_problem_detail(exc.errors())
         body = problem_response(
             ErrorCode.INVALID_REQUEST,
-            detail=str(exc.errors()),
+            detail=detail,
+            correlation_id=correlation_id,
+            extensions={"validationIssues": issues} if issues else None,
+        )
+        logger.warning(
+            "di_validation_error",
+            error_code=ErrorCode.INVALID_REQUEST.code,
+            error_category=ErrorCode.INVALID_REQUEST.category,
+            validation_issue_count=len(issues),
+            http_status=400,
             correlation_id=correlation_id,
         )
-        logger.warning("di_validation_error", http_status=400, correlation_id=correlation_id)
         return JSONResponse(
             status_code=400,
             content=body,
             headers={CORRELATION_ID_HEADER: correlation_id},
         )
 
-    @app.exception_handler(HTTPException)
+    # Register against Starlette's base HTTPException so framework-generated
+    # routing failures (404/405) receive the same business error contract as
+    # FastAPI/application HTTPExceptions.
+    @app.exception_handler(StarletteHTTPException)
     async def _http_exception_handler(
-        request: Request, exc: HTTPException
+        request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         del request
-        correlation_id = structlog.contextvars.get_contextvars().get(
-            "correlation_id", str(uuid.uuid4())
-        )
+        correlation_id = correlation_id_or_new()
         if isinstance(exc.detail, dict) and "code" in exc.detail:
             body = dict(exc.detail)
-            body.setdefault("correlationId", correlation_id)
+            # The response body/header pair must always use the correlation id
+            # created/bound for this request, even if a caller supplied another.
+            body["correlationId"] = correlation_id
         else:
+            mapped = error_for_http_status(exc.status_code)
             body = problem_response(
-                ErrorCode.INTERNAL_ERROR,
-                detail=str(exc.detail),
+                mapped,
+                detail=mapped.title,
                 correlation_id=correlation_id,
             )
         logger.warning(
@@ -242,15 +271,21 @@ def create_app() -> FastAPI:
         try:
             response: Response = await call_next(request)
         except Exception as exc:  # noqa: BLE001
+            failure = technical_failure(exc, operation="api")
+            duration_ms = round((time.perf_counter() - start) * 1000, 1)
             logger.error(
-                "unhandled_exception",
-                exc_type=type(exc).__name__,
-                exc_msg=str(exc),
-                traceback=traceback.format_exc(),
+                "api_request_failed",
+                error_code=failure.code,
+                http_status=500,
+                method=request.method,
+                path=request.url.path,
+                duration_ms=duration_ms,
+                correlation_id=correlation_id,
+                **safe_exception_context(exc),
             )
             body = problem_response(
                 ErrorCode.INTERNAL_ERROR,
-                detail=f"{type(exc).__name__}: {exc}",
+                detail=failure.detail,
                 correlation_id=correlation_id,
             )
             return JSONResponse(
@@ -258,8 +293,8 @@ def create_app() -> FastAPI:
                 content=body,
                 headers={CORRELATION_ID_HEADER: correlation_id},
             )
-        duration_ms = round((time.perf_counter() - start) * 1000, 1)
 
+        duration_ms = round((time.perf_counter() - start) * 1000, 1)
         response.headers[CORRELATION_ID_HEADER] = correlation_id
         logger.info(
             "http_request",
@@ -339,13 +374,18 @@ def create_app() -> FastAPI:
     if settings.sentry_dsn:
         try:
             import sentry_sdk
+
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
                 traces_sample_rate=0.1,
             )
         except ImportError:
-            logger.warning("sentry_sdk not installed; error tracking disabled")
+            logger.warning(
+                "sentry_sdk_unavailable",
+                correlation_id=correlation_id_or_new(),
+                reason="package_not_installed",
+            )
 
     return app
 
