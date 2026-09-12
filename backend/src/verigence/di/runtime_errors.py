@@ -20,7 +20,6 @@ from typing import Any
 
 import structlog
 
-
 _MAX_STACK_FRAMES = 4
 
 
