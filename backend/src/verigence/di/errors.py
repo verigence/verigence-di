@@ -70,7 +70,7 @@ class ErrorCode:
     WHATSAPP_ROUTE_NOT_FOUND         = _ErrorDef("WHATSAPP_ROUTE_NOT_FOUND",         404, False, "INTEGRATION",      "No configured Tenant route matches the WhatsApp identity.")
     QUARANTINE_ITEM_NOT_FOUND        = _ErrorDef("QUARANTINE_ITEM_NOT_FOUND",        404, False, "INTEGRATION",      "System quarantine item does not exist or is no longer actionable.")
     STORAGE_WRITE_FAILED             = _ErrorDef("STORAGE_WRITE_FAILED",             503, True,  "DEPENDENCY",       "Object-storage write failed transiently.")
-    STORAGE_READ_FAILED              = _ErrorDef("STORAGE_READ_FAILED",              503, True,  "DEPENDENDENCY",     "Object-storage read failed transiently.")
+    STORAGE_READ_FAILED              = _ErrorDef("STORAGE_READ_FAILED",              503, True,  "DEPENDENCY",       "Object-storage read failed transiently.")
     QUALITY_POLICY_NOT_CONFIGURED    = _ErrorDef("QUALITY_POLICY_NOT_CONFIGURED",    409, False, "CONFIGURATION",    "Tenant quality policy is absent/invalid.")
     CLASSIFICATION_NO_CANDIDATES     = _ErrorDef("CLASSIFICATION_NO_CANDIDATES",     409, False, "CLASSIFICATION",   "Candidate formation produced no processing-ready Document Type.")
     CLASSIFICATION_AMBIGUOUS         = _ErrorDef("CLASSIFICATION_AMBIGUOUS",         422, False, "CLASSIFICATION",   "Classification did not yield exactly one acceptable candidate.")
