@@ -4,7 +4,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
