@@ -27,7 +27,6 @@ import structlog
 
 from verigence.di.runtime_errors import correlation_id_or_new, safe_exception_context
 
-
 # ── Level filtering ───────────────────────────────────────────────────────────
 
 _LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
