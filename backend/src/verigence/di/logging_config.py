@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from types import TracebackType
 from typing import Any
 
 import structlog
@@ -165,9 +166,12 @@ class _SafeStdlibFormatter(logging.Formatter):
 
     def formatException(  # noqa: N802
         self,
-        ei: tuple[type[BaseException], BaseException, object],
+        ei: tuple[type[BaseException], BaseException, TracebackType | None]
+        | tuple[None, None, None],
     ) -> str:
         exc = ei[1]
+        if exc is None:
+            return "no-exception"
         context = safe_exception_context(exc)
         frames = context["stack_summary"]
         rendered = " <- ".join(frames) if frames else "no-python-frames"
