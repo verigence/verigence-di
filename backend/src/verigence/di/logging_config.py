@@ -16,6 +16,7 @@ Configuration (all DI_ prefixed env vars, read from Settings):
   DI_LOG_LEVEL      DEBUG | INFO | WARNING | ERROR  (default: INFO)
   DI_LOG_STDOUT     true | false                    (default: true)
 """
+
 from __future__ import annotations
 
 import logging
