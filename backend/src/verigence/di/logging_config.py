@@ -32,10 +32,11 @@ from verigence.di.runtime_errors import correlation_id_or_new, safe_exception_co
 _LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
 # Values under these keys can contain caller input, document contents, extracted
-# values, credentials or raw downstream responses.  Keep metadata (counts,
+# values, credentials or raw downstream responses. Keep metadata (counts,
 # status, field keys, ids, timings) but never the value itself.
 _SENSITIVE_LOG_KEYS = frozenset(
     {
+        "access_token",
         "api_key",
         "artifact_bytes",
         "authorization",
@@ -43,29 +44,45 @@ _SENSITIVE_LOG_KEYS = frozenset(
         "content",
         "cookie",
         "cookies",
+        "current_value",
+        "detail",
         "document_bytes",
+        "error",
         "error_detail",
+        "error_message",
+        "error_summary",
         "exc_msg",
+        "field_value",
         "filename",
         "file_name",
         "headers",
         "input",
         "inputs",
+        "left_value",
+        "new_value",
         "normalized_value",
+        "old_value",
+        "parse_error",
         "password",
         "payload",
         "prompt",
+        "provider_detail",
+        "provider_raw",
+        "provider_response",
         "query",
         "query_params",
         "raw_provider_response",
         "raw_response",
         "raw_snippet",
+        "raw_text",
         "raw_value",
         "request_body",
         "response_body",
+        "response_text",
+        "right_value",
         "secret",
         "token",
-        "access_token",
+        "value",
     }
 )
 
@@ -124,7 +141,7 @@ class _SafeEventProcessor:
             if isinstance(candidate, BaseException):
                 exc = candidate
 
-        # Never pass renderer-native traceback fields downstream.  A bounded
+        # Never pass renderer-native traceback fields downstream. A bounded
         # location-only summary is sufficient to locate the failing code.
         event_dict.pop("traceback", None)
         event_dict.pop("stack", None)
@@ -146,7 +163,10 @@ class _SafeEventProcessor:
 class _SafeStdlibFormatter(logging.Formatter):
     """Prevent stdlib/third-party ``exc_info`` from printing a full traceback."""
 
-    def formatException(self, ei: tuple[type[BaseException], BaseException, object]) -> str:  # noqa: N802
+    def formatException(  # noqa: N802
+        self,
+        ei: tuple[type[BaseException], BaseException, object],
+    ) -> str:
         exc = ei[1]
         context = safe_exception_context(exc)
         frames = context["stack_summary"]
