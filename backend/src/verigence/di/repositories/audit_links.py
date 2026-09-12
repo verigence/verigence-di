@@ -26,7 +26,7 @@ async def claim_pending_audit_link(session: AsyncSession) -> dict | None:  # typ
             text(
                 """
                 SELECT tenant_id, document_id, audit_requirement_ref,
-                       audit_link_attempt_count
+                       audit_link_attempt_count, correlation_id
                 FROM docintel.documents
                 WHERE upload_status = 'FIT'
                   AND audit_link_status = 'PENDING'
@@ -69,6 +69,9 @@ async def mark_audit_link_attempt(
     asyncpg bind parameter across both direct timestamptz assignments and a CASE
     expression, which previously caused ``AmbiguousParameterError`` and blocked
     the worker before extraction jobs could be claimed.
+
+    ``error_summary`` must be a safe technical code/detail and never raw exception
+    or downstream response text.
     """
     await session.execute(
         text(

@@ -8,6 +8,10 @@ Booking documents can be extracted concurrently.
 Both paths execute the same durable processing pipeline.  V2 only wraps the
 configured adapter so the already-accepted byte-based V2 classification is reused
 locally; extraction is delegated unchanged to the configured provider adapter.
+
+Failure paths intentionally use stable technical codes, correlation ids and a
+bounded code-location summary. Raw exception messages and full tracebacks are not
+logged or persisted.
 """
 from __future__ import annotations
 
@@ -38,6 +42,12 @@ from verigence.di.repositories.processing_jobs import (
     fail_job,
     retry_job,
     schedule_v2_fast_retry,
+)
+from verigence.di.runtime_errors import (
+    correlation_id_or_new,
+    safe_exception_context,
+    safe_persisted_detail,
+    technical_failure,
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.job_runner import run_processing_job
@@ -75,12 +85,16 @@ class _NotifyWorker:
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
         self._notify_conn: Any | None = None
+        self._runtime_correlation_id = correlation_id_or_new()
 
     def start(self) -> None:
         self._stop_event.clear()
         self._notify_event.clear()
         self._task = asyncio.create_task(self._run(), name=self._task_name)
-        logger.info(f"{self._task_name}_started")
+        logger.info(
+            f"{self._task_name}_started",
+            correlation_id=self._runtime_correlation_id,
+        )
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -94,13 +108,22 @@ class _NotifyWorker:
             with contextlib.suppress(Exception):
                 await self._notify_conn.close()
             self._notify_conn = None
-        logger.info(f"{self._task_name}_stopped")
+        logger.info(
+            f"{self._task_name}_stopped",
+            correlation_id=self._runtime_correlation_id,
+        )
 
     async def _open_notify_conn(self, notify_db_url: str) -> bool:
         try:
             import asyncpg
         except ImportError:
-            logger.warning("notify_listener_unavailable", reason="asyncpg_not_installed")
+            logger.warning(
+                "notify_listener_unavailable",
+                error_code="NOTIFY_LISTENER_UNAVAILABLE",
+                reason="asyncpg_not_installed",
+                worker=self._task_name,
+                correlation_id=self._runtime_correlation_id,
+            )
             return False
 
         def _on_notify(
@@ -110,7 +133,12 @@ class _NotifyWorker:
             payload: str,
         ) -> None:
             del connection, pid
-            logger.info("notify_received", channel=channel, payload=payload)
+            logger.info(
+                "notify_received",
+                channel=channel,
+                payload=payload,
+                correlation_id=self._runtime_correlation_id,
+            )
             self._notify_event.set()
 
         try:
@@ -121,14 +149,17 @@ class _NotifyWorker:
                 "notify_listener_started",
                 channel=_NOTIFY_CHANNEL,
                 worker=self._task_name,
+                correlation_id=self._runtime_correlation_id,
             )
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "notify_listener_failed",
-                reason=str(exc),
+                error_code="NOTIFY_LISTENER_UNAVAILABLE",
                 fallback="poll_only",
                 worker=self._task_name,
+                correlation_id=self._runtime_correlation_id,
+                **safe_exception_context(exc),
             )
             return False
 
@@ -151,7 +182,11 @@ class ProcessingWorker(_NotifyWorker):
         engine = create_async_engine(str(settings.database_url), echo=False)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         ai_adapter = get_document_ai_adapter()
-        log = logger.bind(worker_id=worker_id, processing_lane="legacy")
+        log = logger.bind(
+            worker_id=worker_id,
+            processing_lane="legacy",
+            correlation_id=self._runtime_correlation_id,
+        )
 
         notify_active = False
         if notify_db_url.strip():
@@ -185,8 +220,14 @@ class ProcessingWorker(_NotifyWorker):
                             ai_adapter=ai_adapter,
                             log=log,
                         )
-                except Exception as exc:
-                    log.exception("processing_worker_loop_error", error=str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    failure = technical_failure(exc, operation="worker")
+                    log.error(
+                        "processing_worker_loop_error",
+                        error_code=failure.code,
+                        retryable=failure.retryable,
+                        **safe_exception_context(exc),
+                    )
                     did_work = False
 
                 if not did_work:
@@ -213,28 +254,35 @@ class ProcessingWorker(_NotifyWorker):
             tenant_id = str(link["tenant_id"])
             document_id: uuid.UUID = link["document_id"]
             requirement_ref = str(link["audit_requirement_ref"])
+            correlation_id = correlation_id_or_new(link.get("correlation_id"))
             link_log = log.bind(
                 tenant_id=tenant_id,
                 document_id=str(document_id),
                 audit_requirement_ref=requirement_ref,
+                correlation_id=correlation_id,
             )
             try:
                 await get_audit_core_link_client().link_booking_document(
                     requirement_ref=requirement_ref,
                     document_id=str(document_id),
+                    correlation_id=correlation_id,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
+                failure = technical_failure(exc, operation="audit_core_link")
+                safe_detail = safe_persisted_detail(failure.code)
                 await mark_audit_link_attempt(
                     session,
                     tenant_id=tenant_id,
                     document_id=document_id,
                     acknowledged=False,
-                    error_summary=f"{type(exc).__name__}: {exc}",
+                    error_summary=f"{failure.code}: {safe_detail}",
                 )
                 link_log.warning(
                     "audit_document_link_delivery_failed",
                     attempt=int(link["audit_link_attempt_count"]) + 1,
-                    error_type=type(exc).__name__,
+                    error_code=failure.code,
+                    retryable=failure.retryable,
+                    **safe_exception_context(exc),
                 )
             else:
                 await mark_audit_link_attempt(
@@ -299,6 +347,7 @@ class V2ProcessingWorker(_NotifyWorker):
             worker_id=worker_id,
             processing_lane="capture_v2",
             pool_slot=self._slot,
+            correlation_id=self._runtime_correlation_id,
         )
 
         notify_active = False
@@ -324,8 +373,14 @@ class V2ProcessingWorker(_NotifyWorker):
                         delegate=delegate,
                         log=log,
                     )
-                except Exception as exc:
-                    log.exception("v2_processing_worker_loop_error", error=str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    failure = technical_failure(exc, operation="worker")
+                    log.error(
+                        "v2_processing_worker_loop_error",
+                        error_code=failure.code,
+                        retryable=failure.retryable,
+                        **safe_exception_context(exc),
+                    )
                     did_work = False
 
                 if not did_work:
@@ -385,7 +440,7 @@ async def _execute_claimed_job(
     tenant_id: str = str(job["tenant_id"])
     job_id: uuid.UUID = job["processing_job_id"]
     document_id: uuid.UUID = job["document_id"]
-    correlation_id: str = str(job["correlation_id"])
+    correlation_id: str = correlation_id_or_new(job.get("correlation_id"))
     job_type: str = str(job["job_type"])
     # Only claim_next_v2_job's LEFT JOIN populates this key with a non-NULL
     # value (the document has a Capture V2 upload row); claim_next_non_v2_job
@@ -447,8 +502,14 @@ async def _execute_claimed_job(
                     job_log=job_log,
                 )
 
-        except Exception as exc:
-            job_log.exception("job_runner_unexpected_escape", error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            failure = technical_failure(exc, operation="worker")
+            job_log.error(
+                "job_runner_unexpected_escape",
+                error_code=failure.code,
+                retryable=failure.retryable,
+                **safe_exception_context(exc),
+            )
             await _handle_failure(
                 session_factory=session_factory,
                 tenant_id=tenant_id,
@@ -456,9 +517,9 @@ async def _execute_claimed_job(
                 document_id=document_id,
                 correlation_id=correlation_id,
                 processing_run_id=None,
-                error_code="WORKER_INTERNAL_ERROR",
-                error_detail=str(exc),
-                retryable=True,
+                error_code=failure.code,
+                error_detail=failure.detail,
+                retryable=failure.retryable,
                 attempt_no=int(job["attempt_no"]),
                 is_capture_v2=is_capture_v2,
                 job_log=job_log,
@@ -484,6 +545,9 @@ async def _handle_failure(
 
     from sqlalchemy import text
 
+    del error_detail  # Never persist a raw exception/provider detail from a caller.
+    safe_code = error_code or "WORKER_INTERNAL_ERROR"
+    safe_detail = safe_persisted_detail(safe_code)
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
 
     if retryable and attempt_no == 1:
@@ -492,8 +556,8 @@ async def _handle_failure(
                 session,
                 tenant_id=tenant_id,
                 processing_job_id=job_id,
-                error_code=error_code,
-                error_detail=error_detail,
+                error_code=safe_code,
+                error_detail=safe_detail,
             )
             # The legacy/V1 flow's next attempt is the once-daily EOD Retry
             # Scheduler (scheduler/beat.py) -- an accepted design there, but
@@ -510,8 +574,7 @@ async def _handle_failure(
         job_log.info(
             "job_retry_pending",
             error_class=error_class,
-            error_code=error_code,
-            error_detail=error_detail,
+            error_code=safe_code,
             is_capture_v2=is_capture_v2,
             fast_retry_scheduled=is_capture_v2,
         )
@@ -526,8 +589,8 @@ async def _handle_failure(
             tenant_id=tenant_id,
             processing_job_id=job_id,
             document_id=document_id,
-            error_code=error_code,
-            error_detail=error_detail,
+            error_code=safe_code,
+            error_detail=safe_detail,
         )
         await session.execute(
             text("""
@@ -543,8 +606,8 @@ async def _handle_failure(
             {
                 "tid": tenant_id,
                 "doc_id": document_id,
-                "error_code": error_code,
-                "error_detail": error_detail,
+                "error_code": safe_code,
+                "error_detail": safe_detail,
                 "now": datetime.now(UTC),
             },
         )
@@ -555,16 +618,15 @@ async def _handle_failure(
             processing_job_id=job_id,
             processing_run_id=processing_run_id,
             error_class=error_class,
-            error_code=error_code,
-            error_detail=error_detail,
+            error_code=safe_code,
+            error_detail=safe_detail,
             ttl_hours=ttl_hours,
         )
 
     job_log.warning(
         "job_failed_backout",
         error_class=error_class,
-        error_code=error_code,
-        error_detail=error_detail,
+        error_code=safe_code,
         ttl_hours=ttl_hours,
     )
 
