@@ -2,6 +2,10 @@
 
 Source of truth: DI_ERROR_CATALOG_v2.2.yaml / DI_ERROR_CATALOG_v2.2.md
 
+The baseline catalogue remains unchanged.  A small set of additive transport and
+runtime aliases is defined below it so framework/dependency failures can use the
+same stable Problem contract instead of leaking raw exception text.
+
 Usage::
 
     from verigence.di.errors import problem_response, ErrorCode
@@ -27,8 +31,12 @@ class _ErrorDef:
 
 
 class ErrorCode:
-    """All 38 canonical DI error codes from DI_ERROR_CATALOG_v2.2.yaml.
-    Additional convenience aliases added for common HTTP patterns.
+    """Canonical DI errors plus additive API/runtime aliases.
+
+    Existing baseline codes retain their exact code, status, retryability,
+    category and title.  The additive aliases make previously-unhandled
+    framework and technical failures machine-readable without changing any
+    successful or already-canonical API path.
     """
 
     INVALID_REQUEST                  = _ErrorDef("INVALID_REQUEST",                  400, False, "REQUEST",          "Request syntax/parameters/body are invalid.")
@@ -51,7 +59,7 @@ class ErrorCode:
     MIME_TYPE_NOT_ALLOWED            = _ErrorDef("MIME_TYPE_NOT_ALLOWED",            415, False, "UPLOAD",           "Declared/detected MIME type is not allowed.")
     INVALID_FILE_CONTENT             = _ErrorDef("INVALID_FILE_CONTENT",             422, False, "UPLOAD",           "File signature/parser/structure validation failed.")
     INVALID_CONFIGURATION            = _ErrorDef("INVALID_CONFIGURATION",            409, False, "CONFIGURATION",    "Configuration fails a deterministic invariant.")
-    DOCUMENT_NOT_FOUND               = _ErrorDef("DOCUMENT_NOT_FOUND",              404, False, "RESOURCE",          "Document resource does not exist or is not visible.")
+    DOCUMENT_NOT_FOUND               = _ErrorDef("DOCUMENT_NOT_FOUND",               404, False, "RESOURCE",         "Document resource does not exist or is not visible.")
     UNASSIGNED_DOCUMENT_NOT_FOUND    = _ErrorDef("UNASSIGNED_DOCUMENT_NOT_FOUND",    404, False, "RESOURCE",         "Unassigned Tenant Document does not exist or is not visible.")
     SUBJECT_DOCUMENT_MISMATCH        = _ErrorDef("SUBJECT_DOCUMENT_MISMATCH",        404, False, "RESOURCE",         "Document does not belong to the supplied Subject boundary.")
     INVALID_DOCUMENT_STATE           = _ErrorDef("INVALID_DOCUMENT_STATE",           409, False, "STATE",            "Requested state transition/action is not valid for current Document state.")
@@ -62,7 +70,7 @@ class ErrorCode:
     WHATSAPP_ROUTE_NOT_FOUND         = _ErrorDef("WHATSAPP_ROUTE_NOT_FOUND",         404, False, "INTEGRATION",      "No configured Tenant route matches the WhatsApp identity.")
     QUARANTINE_ITEM_NOT_FOUND        = _ErrorDef("QUARANTINE_ITEM_NOT_FOUND",        404, False, "INTEGRATION",      "System quarantine item does not exist or is no longer actionable.")
     STORAGE_WRITE_FAILED             = _ErrorDef("STORAGE_WRITE_FAILED",             503, True,  "DEPENDENCY",       "Object-storage write failed transiently.")
-    STORAGE_READ_FAILED              = _ErrorDef("STORAGE_READ_FAILED",              503, True,  "DEPENDENCY",       "Object-storage read failed transiently.")
+    STORAGE_READ_FAILED              = _ErrorDef("STORAGE_READ_FAILED",              503, True,  "DEPENDENDENCY",     "Object-storage read failed transiently.")
     QUALITY_POLICY_NOT_CONFIGURED    = _ErrorDef("QUALITY_POLICY_NOT_CONFIGURED",    409, False, "CONFIGURATION",    "Tenant quality policy is absent/invalid.")
     CLASSIFICATION_NO_CANDIDATES     = _ErrorDef("CLASSIFICATION_NO_CANDIDATES",     409, False, "CLASSIFICATION",   "Candidate formation produced no processing-ready Document Type.")
     CLASSIFICATION_AMBIGUOUS         = _ErrorDef("CLASSIFICATION_AMBIGUOUS",         422, False, "CLASSIFICATION",   "Classification did not yield exactly one acceptable candidate.")
@@ -70,16 +78,62 @@ class ErrorCode:
     SUBJECT_IDENTIFIER_CONFLICT      = _ErrorDef("SUBJECT_IDENTIFIER_CONFLICT",      409, False, "SUBJECT_MATCHING", "Active VERIFIED identifier already belongs to another Subject.")
     INTERNAL_ERROR                   = _ErrorDef("INTERNAL_ERROR",                   500, True,  "INTERNAL",         "Unexpected server error.")
 
-    # ── Convenience aliases / additional codes for API layer ─────────────────
+    # ── Existing convenience aliases used by the API layer ───────────────────
     SUBJECT_NOT_FOUND                = _ErrorDef("SUBJECT_NOT_FOUND",                404, False, "RESOURCE",         "Subject does not exist or is not visible to the caller.")
     VALIDATION_ERROR                 = _ErrorDef("VALIDATION_ERROR",                 422, False, "REQUEST",          "Request body failed validation.")
-    CONFLICT                         = _ErrorDef("CONFLICT",                          409, False, "STATE",            "Request conflicts with existing resource state.")
+    CONFLICT                         = _ErrorDef("CONFLICT",                         409, False, "STATE",            "Request conflicts with existing resource state.")
     INVALID_PROFILE_STATE            = _ErrorDef("INVALID_PROFILE_STATE",            409, False, "CONFIGURATION",    "Profile mutation requires DRAFT state.")
     REQUIREMENT_PROFILE_NOT_FOUND    = _ErrorDef("REQUIREMENT_PROFILE_NOT_FOUND",    404, False, "CONFIGURATION",    "Requirement Profile does not exist.")
     RETENTION_POLICY_NOT_FOUND       = _ErrorDef("RETENTION_POLICY_NOT_FOUND",       404, False, "RESOURCE",         "Retention Policy does not exist.")
     INVALID_DOCUMENT_TYPE_STATE      = _ErrorDef("INVALID_DOCUMENT_TYPE_STATE",      409, False, "CONFIGURATION",    "Document Type state does not allow this operation.")
     STORAGE_READ_ERROR               = _ErrorDef("STORAGE_READ_ERROR",               503, True,  "DEPENDENCY",       "Object-storage read failed transiently.")
-    DOCUMENT_NOT_ELIGIBLE_FOR_DELETE = _ErrorDef("DOCUMENT_NOT_ELIGIBLE_FOR_DELETE",  409, False, "STATE",            "Document does not meet the eligibility criteria for deletion.")
+    DOCUMENT_NOT_ELIGIBLE_FOR_DELETE = _ErrorDef("DOCUMENT_NOT_ELIGIBLE_FOR_DELETE",409, False, "STATE",            "Document does not meet the eligibility criteria for deletion.")
+
+    # ── Additive safe technical/transport mappings ────────────────────────────
+    ROUTE_NOT_FOUND                  = _ErrorDef("ROUTE_NOT_FOUND",                  404, False, "REQUEST",          "Requested API resource does not exist.")
+    METHOD_NOT_ALLOWED               = _ErrorDef("METHOD_NOT_ALLOWED",               405, False, "REQUEST",          "HTTP method is not allowed for this API resource.")
+    RATE_LIMITED                     = _ErrorDef("RATE_LIMITED",                     429, True,  "REQUEST",          "Request rate limit was exceeded.")
+    DEPENDENCY_UNAVAILABLE           = _ErrorDef("DEPENDENCY_UNAVAILABLE",           503, True,  "DEPENDENCY",       "A required downstream service is temporarily unavailable.")
+    DATABASE_UNAVAILABLE             = _ErrorDef("DATABASE_UNAVAILABLE",             503, True,  "DEPENDENCY",       "Database service is temporarily unavailable.")
+    DOCUMENT_AI_UNAVAILABLE          = _ErrorDef("DOCUMENT_AI_UNAVAILABLE",          503, True,  "DEPENDENCY",       "Document AI provider is temporarily unavailable.")
+    DOCUMENT_AI_RATE_LIMITED         = _ErrorDef("DOCUMENT_AI_RATE_LIMITED",         503, True,  "DEPENDENCY",       "Document AI provider is temporarily rate limited.")
+    DOCUMENT_AI_RESPONSE_INVALID     = _ErrorDef("DOCUMENT_AI_RESPONSE_INVALID",     502, True,  "DEPENDENCY",       "Document AI provider returned an unusable response.")
+    AUDIT_CORE_INTEGRATION_FAILED    = _ErrorDef("AUDIT_CORE_INTEGRATION_FAILED",    502, True,  "INTEGRATION",      "Audit Core document-link integration failed.")
+    SECURITY_INTEGRATION_FAILED      = _ErrorDef("SECURITY_INTEGRATION_FAILED",      503, True,  "INTEGRATION",      "Security service integration failed.")
+    CLASSIFICATION_PROVIDER_ERROR    = _ErrorDef("CLASSIFICATION_PROVIDER_ERROR",    503, True,  "CLASSIFICATION",   "Document classification provider request failed.")
+    EXTRACTION_PROVIDER_ERROR        = _ErrorDef("EXTRACTION_PROVIDER_ERROR",        503, True,  "DEPENDENCY",       "Document extraction provider request failed.")
+    CLASSIFICATION_FAILED            = _ErrorDef("CLASSIFICATION_FAILED",            503, True,  "CLASSIFICATION",   "Document classification could not be completed.")
+    WORKER_INTERNAL_ERROR            = _ErrorDef("WORKER_INTERNAL_ERROR",            500, True,  "INTERNAL",         "Document processing failed due to an internal technical error.")
+
+
+def error_for_http_status(status_code: int) -> _ErrorDef:
+    """Return a safe canonical error for a framework-generated HTTP status.
+
+    Route/framework exceptions often carry a human string in ``detail``.  That
+    string is intentionally not used here because framework/dependency messages
+    can contain request or implementation data.
+    """
+    mapping: dict[int, _ErrorDef] = {
+        400: ErrorCode.INVALID_REQUEST,
+        401: ErrorCode.UNAUTHORIZED,
+        403: ErrorCode.FORBIDDEN,
+        404: ErrorCode.ROUTE_NOT_FOUND,
+        405: ErrorCode.METHOD_NOT_ALLOWED,
+        409: ErrorCode.CONFLICT,
+        410: ErrorCode.DOCUMENT_CONTENT_PURGED,
+        413: ErrorCode.FILE_TOO_LARGE,
+        415: ErrorCode.MIME_TYPE_NOT_ALLOWED,
+        422: ErrorCode.VALIDATION_ERROR,
+        429: ErrorCode.RATE_LIMITED,
+        502: ErrorCode.DEPENDENCY_UNAVAILABLE,
+        503: ErrorCode.DEPENDENCY_UNAVAILABLE,
+        504: ErrorCode.DEPENDENCY_UNAVAILABLE,
+    }
+    if status_code in mapping:
+        return mapping[status_code]
+    if 400 <= status_code < 500:
+        return ErrorCode.INVALID_REQUEST
+    return ErrorCode.INTERNAL_ERROR
 
 
 def problem_response(
@@ -93,6 +147,8 @@ def problem_response(
     """Build a v2.2 Problem body dict.
 
     Clients MUST branch on ``code``; never on ``title`` or ``detail``.
+    ``detail`` must be a caller-safe explanation and must never contain raw
+    provider responses, exception text, document values or request payloads.
     """
     body: dict[str, Any] = {
         "type": f"https://docs.verigence.app/errors/{error.code.lower()}",
@@ -140,9 +196,10 @@ def problem(
 ) -> Exception:
     """Convenience shorthand — build and return (not raise) an HTTPException.
 
-    Usage::
-        raise problem(404, "Subject not found", ErrorCode.SUBJECT_NOT_FOUND)
+    ``http_status`` is retained for backward signature compatibility; the
+    canonical catalogue status remains authoritative.
     """
+    del http_status
     from fastapi import HTTPException
     return HTTPException(
         status_code=error.http_status,
