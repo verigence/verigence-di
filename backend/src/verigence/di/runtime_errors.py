@@ -9,6 +9,7 @@ adapters and integrations can all use the same rules:
 * every failure event has a correlation id;
 * preserve stable technical codes so operations can understand the failing layer.
 """
+
 from __future__ import annotations
 
 import os
