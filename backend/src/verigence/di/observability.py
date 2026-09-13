@@ -1,11 +1,11 @@
 """Provider-neutral observability for Verigence DI.
 
-Logs, metrics and traces are independent capabilities.  Each capability is
-fail-open: telemetry configuration/export failures must never block DI business
-processing.  Remote export uses standard OTLP/HTTP variables, so Axiom can be the
-backend without introducing an Axiom-specific runtime dependency.
+Logs, errors, metrics and traces are independently controlled capabilities. Each
+capability is fail-open: telemetry configuration/export failures must never block
+DI business processing. Remote export uses standard OTLP/HTTP variables, so
+Axiom can be the backend without introducing an Axiom-specific runtime dependency.
 
-Tracing is deliberately disabled by default.  When disabled, DI does not create a
+Tracing is deliberately disabled by default. When disabled, DI does not create a
 TracerProvider and does not install FastAPI, HTTPX or SQLAlchemy trace
 instrumentation.
 """
@@ -51,7 +51,6 @@ _SAFE_REMOTE_LOG_ATTRIBUTES = frozenset(
         "error_category",
         "error_class",
         "error_code",
-        "event",
         "fallback",
         "fast_retry_scheduled",
         "fields_extracted",
@@ -62,7 +61,6 @@ _SAFE_REMOTE_LOG_ATTRIBUTES = frozenset(
         "gemini_model",
         "http_status",
         "job_type",
-        "level",
         "method",
         "operation",
         "path",
@@ -79,7 +77,6 @@ _SAFE_REMOTE_LOG_ATTRIBUTES = frozenset(
         "status",
         "status_code",
         "tenant_id",
-        "timestamp",
         "total_duration_ms",
         "worker_id",
         "worker_mode",
@@ -95,10 +92,10 @@ _FORBIDDEN_METRIC_LABELS = frozenset(
         "document_id",
         "journey_id",
         "processing_job_id",
+        "span_id",
         "subject_id",
         "tenant_id",
         "trace_id",
-        "span_id",
     }
 )
 
@@ -117,15 +114,19 @@ class ObservabilityState:
     """Effective DI telemetry state after fail-open initialization."""
 
     logs_enabled: bool
+    errors_enabled: bool
     metrics_enabled: bool
     traces_enabled: bool
 
 
 _otel_logger: Any | None = None
+_logger_provider: LoggerProvider | None = None
 _meter_provider: MeterProvider | None = None
 _tracer_provider: TracerProvider | None = None
 _meter: Any | None = None
 _instruments: dict[tuple[str, str], Any] = {}
+_export_all_logs = False
+_export_errors = False
 _httpx_instrumented = False
 _sqlalchemy_instrumented = False
 _fastapi_instrumented = False
@@ -174,13 +175,18 @@ def _export_timeout_ms(settings: Settings) -> int:
     return int(settings.observability_export_timeout_seconds * 1000)
 
 
-def _configure_logs(settings: Settings, resource: Resource) -> bool:
-    global _otel_logger
-    if not settings.observability_logs_enabled:
-        return False
+def _configure_logs(settings: Settings, resource: Resource) -> tuple[bool, bool]:
+    global _otel_logger, _logger_provider, _export_all_logs, _export_errors
+    requested_logs = settings.observability_logs_enabled
+    requested_errors = settings.observability_errors_enabled
+    if not requested_logs and not requested_errors:
+        return False, False
     if not _signal_endpoint_configured("logs"):
-        _bootstrap_warning("logs", "missing_otlp_endpoint")
-        return False
+        if requested_logs:
+            _bootstrap_warning("logs", "missing_otlp_endpoint")
+        if requested_errors:
+            _bootstrap_warning("errors", "missing_otlp_endpoint")
+        return False, False
     try:
         provider = LoggerProvider(resource=resource)
         provider.add_log_record_processor(
@@ -192,14 +198,21 @@ def _configure_logs(settings: Settings, resource: Resource) -> bool:
                 export_timeout_millis=_export_timeout_ms(settings),
             )
         )
+        _logger_provider = provider
         _otel_logger = provider.get_logger("verigence.di")
-        # Keep a strong reference for shutdown via the logger provider itself.
-        setattr(_otel_logger, "_verigence_provider", provider)
-        return True
+        _export_all_logs = requested_logs
+        _export_errors = requested_errors
+        return requested_logs, requested_errors
     except Exception as exc:  # noqa: BLE001 -- observability must fail open
         _otel_logger = None
-        _bootstrap_warning("logs", "initialization_failed", exc)
-        return False
+        _logger_provider = None
+        _export_all_logs = False
+        _export_errors = False
+        if requested_logs:
+            _bootstrap_warning("logs", "initialization_failed", exc)
+        if requested_errors:
+            _bootstrap_warning("errors", "initialization_failed", exc)
+        return False, False
 
 
 def _configure_metrics(settings: Settings, resource: Resource) -> bool:
@@ -253,7 +266,11 @@ def _configure_traces(
         _tracer_provider = provider
 
         if app is not None:
-            FastAPIInstrumentor.instrument_app(app, tracer_provider=provider, excluded_urls="/health,/ready")
+            FastAPIInstrumentor.instrument_app(
+                app,
+                tracer_provider=provider,
+                excluded_urls="/health,/ready",
+            )
             _fastapi_instrumented = True
         HTTPXClientInstrumentor().instrument(
             tracer_provider=provider,
@@ -272,8 +289,10 @@ def _configure_traces(
 def configure_observability(app: FastAPI | None, settings: Settings) -> ObservabilityState:
     """Initialize only the DI telemetry capabilities explicitly enabled."""
     resource = _resource(settings)
+    logs_enabled, errors_enabled = _configure_logs(settings, resource)
     return ObservabilityState(
-        logs_enabled=_configure_logs(settings, resource),
+        logs_enabled=logs_enabled,
+        errors_enabled=errors_enabled,
         metrics_enabled=_configure_metrics(settings, resource),
         traces_enabled=_configure_traces(app, settings, resource),
     )
@@ -289,9 +308,16 @@ def _primitive_attribute(value: Any) -> Any | None:
     return None
 
 
+def _is_error_event(event_dict: Mapping[str, Any]) -> bool:
+    level = str(event_dict.get("level", "info")).lower()
+    return level in {"error", "critical", "exception"} or bool(event_dict.get("error_code"))
+
+
 def emit_otel_log(event_dict: Mapping[str, Any]) -> None:
-    """Export one already-sanitized DI structured event when log export is active."""
+    """Export one already-sanitized DI event according to log/error controls."""
     if _otel_logger is None:
+        return
+    if not _export_all_logs and not (_export_errors and _is_error_event(event_dict)):
         return
     try:
         event_name = str(event_dict.get("event", "di_event"))
@@ -316,7 +342,6 @@ def emit_otel_log(event_dict: Mapping[str, Any]) -> None:
             attributes=attributes,
         )
     except Exception:
-        # Remote observability is never allowed to affect business processing.
         return
 
 
@@ -370,7 +395,7 @@ def record_event_metrics(event_dict: Mapping[str, Any]) -> None:
     record_metric("di.events", labels={"event": event, "level": level})
 
     error_code = event_dict.get("error_code")
-    if level in {"error", "critical", "exception"} or error_code:
+    if _is_error_event(event_dict):
         labels = {"event": event}
         if isinstance(error_code, str) and error_code:
             labels["error_code"] = error_code
@@ -453,16 +478,15 @@ async def _httpx_async_request_hook(span: Any, request: Any) -> None:
 
 def shutdown_observability() -> None:
     """Flush active DI telemetry providers without raising into the business path."""
-    global _otel_logger, _meter_provider, _tracer_provider, _meter
+    global _otel_logger, _logger_provider, _meter_provider, _tracer_provider, _meter
+    global _export_all_logs, _export_errors
     global _httpx_instrumented, _sqlalchemy_instrumented, _fastapi_instrumented
 
-    if _otel_logger is not None:
-        provider = getattr(_otel_logger, "_verigence_provider", None)
-        if provider is not None:
-            try:
-                provider.shutdown()
-            except Exception:
-                pass
+    if _logger_provider is not None:
+        try:
+            _logger_provider.shutdown()
+        except Exception:
+            pass
     if _meter_provider is not None:
         try:
             _meter_provider.shutdown()
@@ -475,9 +499,12 @@ def shutdown_observability() -> None:
             pass
 
     _otel_logger = None
+    _logger_provider = None
     _meter_provider = None
     _tracer_provider = None
     _meter = None
+    _export_all_logs = False
+    _export_errors = False
     _instruments.clear()
     _httpx_instrumented = False
     _sqlalchemy_instrumented = False
