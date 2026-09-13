@@ -25,13 +25,30 @@ async def _main() -> None:
 
     configure_logging()
 
+    # Configure telemetry before importing worker/repository modules so optional
+    # SQLAlchemy and HTTPX trace instrumentation is in place before their runtime
+    # clients/engines are created.
+    from verigence.di.observability import (  # noqa: PLC0415
+        configure_observability,
+        shutdown_observability,
+    )
+    from verigence.di.settings import WorkerMode, get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    observability_state = configure_observability(None, settings)
+    logger.info(
+        "di_worker_observability_configured",
+        logs_enabled=observability_state.logs_enabled,
+        errors_enabled=observability_state.errors_enabled,
+        metrics_enabled=observability_state.metrics_enabled,
+        traces_enabled=observability_state.traces_enabled,
+    )
+
     from verigence.di.document_ai.v2_classifier import close_v2_classifier_client
     from verigence.di.scheduler.beat import EODRetryScheduler
-    from verigence.di.settings import WorkerMode, get_settings
     from verigence.di.workers.capture_v2_classifier import CaptureV2ClassificationWorker
     from verigence.di.workers.processor import ProcessingWorker, V2ProcessingWorker
 
-    settings = get_settings()
     mode = settings.worker_mode
     include_legacy = mode in {WorkerMode.COMBINED, WorkerMode.LEGACY}
     include_v2 = mode in {WorkerMode.COMBINED, WorkerMode.V2}
@@ -128,6 +145,7 @@ async def _main() -> None:
         if scheduler_started and scheduler is not None:
             scheduler.stop()
         logger.info("di_worker_stopped", worker_mode=mode.value)
+        shutdown_observability()
 
 
 if __name__ == "__main__":
