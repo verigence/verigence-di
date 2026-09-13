@@ -39,6 +39,7 @@ def test_trace_switch_is_independent_from_other_capabilities(monkeypatch: pytest
         observability_metrics_enabled=True,
         observability_traces_enabled=False,
     )
+    real_configure_traces = observability._configure_traces
     monkeypatch.setattr(observability, "_configure_logs", lambda *_args: (True, True))
     monkeypatch.setattr(observability, "_configure_metrics", lambda *_args: True)
 
@@ -47,20 +48,25 @@ def test_trace_switch_is_independent_from_other_capabilities(monkeypatch: pytest
     def _trace_probe(*_args: Any) -> bool:
         nonlocal trace_called
         trace_called = True
-        return True
+        return False
 
     monkeypatch.setattr(observability, "_configure_traces", _trace_probe)
     state = observability.configure_observability(None, settings)
 
-    # configure_observability calls the trace configurator, but the real
-    # configurator returns before creating providers/instrumentors when false.
+    # The trace capability remains independently disabled even when logs/errors
+    # and metrics are enabled.
     assert trace_called is True
     assert state.logs_enabled is True
     assert state.errors_enabled is True
     assert state.metrics_enabled is True
+    assert state.traces_enabled is False
 
     real_settings = _settings(observability_traces_enabled=False)
-    assert observability._configure_traces(None, real_settings, observability._resource(real_settings)) is False
+    assert real_configure_traces(
+        None,
+        real_settings,
+        observability._resource(real_settings),
+    ) is False
 
 
 def test_errors_only_is_a_distinct_remote_log_mode(monkeypatch: pytest.MonkeyPatch) -> None:
