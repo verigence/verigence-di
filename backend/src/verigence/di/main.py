@@ -21,6 +21,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from verigence.di.errors import ErrorCode, error_for_http_status, problem_response
+from verigence.di.observability import (
+    attach_correlation_to_current_span,
+    configure_observability,
+    current_trace_context,
+    record_metric,
+    shutdown_observability,
+)
 from verigence.di.runtime_errors import (
     correlation_id_or_new,
     safe_exception_context,
@@ -32,11 +39,18 @@ from verigence.di.settings import get_settings
 logger = structlog.get_logger(__name__)
 
 CORRELATION_ID_HEADER = "X-Correlation-ID"
+TRACE_ID_HEADER = "X-Trace-ID"
 _CORRELATION_SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-")
 
 
 def _is_valid_correlation_id(value: str) -> bool:
     return 1 <= len(value) <= 128 and all(c in _CORRELATION_SAFE for c in value)
+
+
+def _route_template(request: Request) -> str:
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return str(path) if path else "unmatched"
 
 
 async def _validate_schema_profile_consistency() -> None:
@@ -124,12 +138,15 @@ def create_app() -> FastAPI:
             worker.start()
             capture_v2_worker.start()
             scheduler.start()
-        await _validate_schema_profile_consistency()
-        yield
-        if settings.worker_enabled:
-            await capture_v2_worker.stop()
-            await worker.stop()
-            scheduler.stop()
+        try:
+            await _validate_schema_profile_consistency()
+            yield
+        finally:
+            if settings.worker_enabled:
+                await capture_v2_worker.stop()
+                await worker.stop()
+                scheduler.stop()
+            shutdown_observability()
 
     app = FastAPI(
         title="Verigence Document Intelligence API",
@@ -149,6 +166,15 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
+    )
+
+    observability_state = configure_observability(app, settings)
+    logger.info(
+        "di_observability_configured",
+        logs_enabled=observability_state.logs_enabled,
+        errors_enabled=observability_state.errors_enabled,
+        metrics_enabled=observability_state.metrics_enabled,
+        traces_enabled=observability_state.traces_enabled,
     )
 
     def custom_openapi() -> dict[str, Any]:
@@ -189,7 +215,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=[CORRELATION_ID_HEADER],
+        expose_headers=[CORRELATION_ID_HEADER, TRACE_ID_HEADER],
     )
 
     @app.exception_handler(RequestValidationError)
@@ -266,6 +292,7 @@ def create_app() -> FastAPI:
         )
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
+        attach_correlation_to_current_span(correlation_id)
 
         start = time.perf_counter()
         try:
@@ -288,7 +315,7 @@ def create_app() -> FastAPI:
                 detail=failure.detail,
                 correlation_id=correlation_id,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=500,
                 content=body,
                 headers={CORRELATION_ID_HEADER: correlation_id},
@@ -296,10 +323,32 @@ def create_app() -> FastAPI:
 
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
         response.headers[CORRELATION_ID_HEADER] = correlation_id
+        trace_id, _span_id = current_trace_context()
+        if trace_id:
+            response.headers[TRACE_ID_HEADER] = trace_id
+
+        status_class = f"{response.status_code // 100}xx"
+        route = _route_template(request)
+        metric_labels = {
+            "method": request.method,
+            "route": route,
+            "status_class": status_class,
+        }
+        record_metric("di.http.requests", labels=metric_labels)
+        record_metric(
+            "di.http.duration_ms",
+            duration_ms,
+            kind="histogram",
+            labels=metric_labels,
+        )
+        if response.status_code >= 400:
+            record_metric("di.http.errors", labels=metric_labels)
+
         logger.info(
             "http_request",
             method=request.method,
             path=request.url.path,
+            route=route,
             status=response.status_code,
             duration_ms=duration_ms,
         )
@@ -378,7 +427,7 @@ def create_app() -> FastAPI:
             sentry_sdk.init(
                 dsn=settings.sentry_dsn,
                 environment=settings.env.value,
-                traces_sample_rate=0.1,
+                traces_sample_rate=(0.1 if settings.observability_traces_enabled else 0.0),
             )
         except ImportError:
             logger.warning(
