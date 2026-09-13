@@ -47,10 +47,25 @@ class Settings(BaseSettings):
     # Logging — D27
     log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
     log_stdout: bool = True            # emit structured logs to stdout
-    log_axiom: bool = False            # Deprecated: Axiom drain removed. Parsed for env-var compat only.
-    axiom_token: str = ""              # Deprecated: Axiom drain removed. Parsed for env-var compat only.
-    axiom_dataset: str = "verigence-di"  # Deprecated: Axiom drain removed. Parsed for env-var compat only.
+    log_axiom: bool = False            # Deprecated: direct Axiom drain removed.
+    axiom_token: str = ""              # Deprecated: OTLP headers own credentials.
+    axiom_dataset: str = "verigence-di"  # Deprecated: OTLP headers own datasets.
     success_events_enabled: bool = True
+
+    # Observability — independent, fail-open OTLP capabilities.
+    # All are opt-in; tracing stays off unless explicitly enabled because it has
+    # the highest runtime/I/O cost.  Logs and errors share the OTLP Logs signal,
+    # but can be selected independently (errors-only is supported).
+    observability_logs_enabled: bool = False
+    observability_errors_enabled: bool = False
+    observability_metrics_enabled: bool = False
+    observability_traces_enabled: bool = False
+    observability_service_name: str = "verigence-di"
+    observability_export_timeout_seconds: float = Field(default=2.0, gt=0)
+    observability_batch_delay_ms: int = Field(default=1000, gt=0)
+    observability_max_queue_size: int = Field(default=2048, gt=0)
+    observability_max_export_batch_size: int = Field(default=512, gt=0)
+    observability_metric_export_interval_ms: int = Field(default=60000, gt=0)
 
     # Database
     database_url: str  # postgresql+asyncpg://...
@@ -110,6 +125,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def safety_rules(self) -> Settings:
         """Block unsafe configurations at startup — fail fast before serving traffic."""
+        if self.observability_max_export_batch_size > self.observability_max_queue_size:
+            raise ValueError(
+                "DI_OBSERVABILITY_MAX_EXPORT_BATCH_SIZE cannot exceed "
+                "DI_OBSERVABILITY_MAX_QUEUE_SIZE"
+            )
         if self.is_production:
             if not self.security_jwks_url or "mock" in self.security_jwks_url.lower():
                 raise ValueError(
