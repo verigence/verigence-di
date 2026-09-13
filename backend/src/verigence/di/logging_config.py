@@ -122,7 +122,7 @@ def _sanitize_nested(value: Any) -> Any:  # noqa: ANN401
     if isinstance(value, list):
         return [_sanitize_nested(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_sanitize_nested(item) for item in value]
+        return tuple(_sanitize_nested(item) for item in value)
     return value
 
 
