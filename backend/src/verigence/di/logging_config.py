@@ -1,7 +1,11 @@
 """logging_config.py — Structured logging pipeline (D27).
 
-Single output channel:
+Single local output channel:
   - stdout: always safe; JSON in production/uat, pretty in local/dev
+
+When DI observability is enabled, the already-sanitized structured event is also
+queued for OTLP log/error export and low-cardinality metric derivation. Remote
+telemetry never sees request/document/provider values removed by this pipeline.
 
 Call configure_logging() once at process startup — before any log emission.
 
@@ -26,6 +30,7 @@ from typing import Any
 
 import structlog
 
+from verigence.di.observability import emit_otel_log, record_event_metrics
 from verigence.di.runtime_errors import correlation_id_or_new, safe_exception_context
 
 # ── Level filtering ───────────────────────────────────────────────────────────
@@ -117,7 +122,7 @@ def _sanitize_nested(value: Any) -> Any:  # noqa: ANN401
     if isinstance(value, list):
         return [_sanitize_nested(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_sanitize_nested(item) for item in value)
+        return tuple(_sanitize_nested(item) for item in value]
     return value
 
 
@@ -161,6 +166,21 @@ class _SafeEventProcessor:
         return sanitized
 
 
+class _ObservabilityProcessor:
+    """Fan out only sanitized DI events to enabled remote telemetry capabilities."""
+
+    def __call__(
+        self,
+        logger: Any,  # noqa: ANN401
+        method: str,
+        event_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        del logger, method
+        emit_otel_log(event_dict)
+        record_event_metrics(event_dict)
+        return event_dict
+
+
 class _SafeStdlibFormatter(logging.Formatter):
     """Prevent stdlib/third-party ``exc_info`` from printing a full traceback."""
 
@@ -196,6 +216,7 @@ def configure_logging() -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         _LevelFilter(level_str),
         _SafeEventProcessor(),
+        _ObservabilityProcessor(),
     ]
 
     output_processors: list[Any] = list(shared_processors)
