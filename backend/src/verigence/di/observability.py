@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -483,20 +484,14 @@ def shutdown_observability() -> None:
     global _httpx_instrumented, _sqlalchemy_instrumented, _fastapi_instrumented
 
     if _logger_provider is not None:
-        try:
+        with suppress(Exception):
             _logger_provider.shutdown()
-        except Exception:
-            pass
     if _meter_provider is not None:
-        try:
+        with suppress(Exception):
             _meter_provider.shutdown()
-        except Exception:
-            pass
     if _tracer_provider is not None:
-        try:
+        with suppress(Exception):
             _tracer_provider.shutdown()
-        except Exception:
-            pass
 
     _otel_logger = None
     _logger_provider = None
