@@ -4,8 +4,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = structlog.get_logger(__name__)
 
 _MAX_ERROR_DETAIL = 2000
 _MAX_ERROR_CODE = 128
@@ -328,11 +331,11 @@ async def schedule_v2_fast_retry(
     leave a document showing nothing more than "still processing" for up
     to ~24h with no way for a PC to tell it already failed once.
 
-    Idempotent via the same (tenant_id, document_id, job_type) uniqueness
-    EOD_RETRY already relies on -- a second failed attempt at the SAME
-    job_type can't insert a duplicate, and by the time a genuinely new
-    upload of the same document_id could exist, this row is long since
-    resolved.
+    Idempotent via the same (tenant_id, document_id, job_type, attempt_no)
+    uniqueness EOD_RETRY and NIGHTLY_REPROCESS also rely on -- a second
+    failed attempt at the SAME job_type+attempt_no can't insert a
+    duplicate, and by the time a genuinely new upload of the same
+    document_id could exist, this row is long since resolved.
     """
     now = datetime.now(UTC)
     due_at = now + timedelta(seconds=V2_FAST_RETRY_DELAY_SECONDS)
@@ -344,7 +347,7 @@ async def schedule_v2_fast_retry(
             VALUES
                 (:tenant_id, :job_id, :document_id, :correlation_id,
                  'V2_FAST_RETRY', 'PENDING', :due_at, 2, :now)
-            ON CONFLICT (tenant_id, document_id, job_type) DO NOTHING
+            ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
         """),
         {
             "tenant_id": tenant_id,
@@ -355,6 +358,101 @@ async def schedule_v2_fast_retry(
             "now": now,
         },
     )
+
+
+NIGHTLY_REPROCESS_MAX_ATTEMPTS = 3
+_NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO = 3  # 1=INITIAL, 2=EOD_RETRY/V2_FAST_RETRY, 3.. = nightly
+
+
+async def insert_nightly_reprocessing_jobs(
+    session: AsyncSession,
+) -> int:
+    """Give every currently-FAILED document (any active Tenant) one more
+    extraction attempt, up to NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly
+    tries -- called once nightly by scheduler/beat.py, not per-Tenant (see
+    its own module docstring: one fixed global trigger time, not each
+    Tenant's own local EOD).
+
+    A document already sitting on its NIGHTLY_REPROCESS_MAX_ATTEMPTS-th
+    attempt (or beyond, if the count were ever exceeded some other way) is
+    left alone -- it stays FAILED, its backout_jobs row is its permanent
+    record, and no further reprocessing job is ever queued for it again.
+
+    Returns the number of jobs inserted (i.e. documents queued for another
+    attempt tonight).
+    """
+    now = datetime.now(UTC)
+    eligible_rows = (
+        await session.execute(
+            text("""
+                SELECT d.tenant_id, d.document_id,
+                       COALESCE(
+                           (SELECT max(pj.attempt_no)
+                            FROM docintel.processing_jobs pj
+                            WHERE pj.tenant_id = d.tenant_id
+                              AND pj.document_id = d.document_id
+                              AND pj.job_type = 'NIGHTLY_REPROCESS'),
+                           :first_attempt_no - 1
+                       ) AS last_attempt_no,
+                       COALESCE(
+                           (SELECT pj2.correlation_id
+                            FROM docintel.processing_jobs pj2
+                            WHERE pj2.tenant_id = d.tenant_id
+                              AND pj2.document_id = d.document_id
+                              AND pj2.job_type = 'INITIAL'
+                            ORDER BY pj2.created_at_utc DESC
+                            LIMIT 1),
+                           gen_random_uuid()::text
+                       ) AS original_correlation_id
+                FROM docintel.documents d
+                JOIN docintel.tenant_settings ts
+                  ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
+                WHERE d.upload_status = 'FIT'
+                  AND d.processing_status = 'FAILED'
+            """),
+            {"first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO},
+        )
+    ).mappings().all()
+
+    queued = 0
+    for row in eligible_rows:
+        next_attempt_no = int(row["last_attempt_no"]) + 1
+        if next_attempt_no > _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO + NIGHTLY_REPROCESS_MAX_ATTEMPTS - 1:
+            continue
+        correlation_id = f"nightly.{uuid.uuid4()}"
+        try:
+            await session.execute(
+                text("""
+                    INSERT INTO docintel.processing_jobs
+                        (tenant_id, processing_job_id, document_id, correlation_id,
+                         job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+                    VALUES
+                        (:tenant_id, :job_id, :doc_id, :corr,
+                         'NIGHTLY_REPROCESS', 'PENDING', :now, :attempt_no, :now)
+                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
+                """),
+                {
+                    "tenant_id": row["tenant_id"],
+                    "job_id": uuid.uuid4(),
+                    "doc_id": row["document_id"],
+                    "corr": correlation_id,
+                    "now": now,
+                    "attempt_no": next_attempt_no,
+                },
+            )
+            queued += 1
+        except Exception as exc:
+            # Matches _insert_eod_retry_jobs' own established handling of
+            # this same shape of loop -- log and move on rather than let one
+            # bad row abort the whole nightly pass.
+            logger.warning(
+                "nightly_reprocess_job_insert_failed",
+                tenant_id=row["tenant_id"],
+                document_id=str(row["document_id"]),
+                error=str(exc),
+            )
+
+    return queued
 
 
 async def fail_job(

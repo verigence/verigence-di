@@ -11,7 +11,9 @@ Coverage:
   - retryable=True, attempt_no=1  → RETRY_PENDING path (retry_job called, no backout)
   - retryable=True, attempt_no=2  → D24 backout path (fail_job + insert_backout_job)
   - retryable=False, any attempt  → D24 backout path immediately
-- settings backout_ttl_hours default is 12
+- settings backout_ttl_hours default is 72 (3 days, since 2026-09-14 --
+  needs to outlive every Nightly Reprocessing attempt, not just the
+  original failure)
 """
 from __future__ import annotations
 
@@ -181,7 +183,7 @@ class TestSweepExpiredBackoutJobs:
 
 class TestBackoutTtlHoursSetting:
 
-    def test_default_is_12(self) -> None:
+    def test_default_is_72(self) -> None:
         from verigence.di.settings import Settings
 
         # Minimal settings object — only required fields
@@ -189,7 +191,7 @@ class TestBackoutTtlHoursSetting:
             secret_key="a" * 32,
             database_url="postgresql+asyncpg://u:p@localhost/db",
         )
-        assert s.backout_ttl_hours == 12
+        assert s.backout_ttl_hours == 72
 
     def test_can_be_overridden_via_env(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         monkeypatch.setenv("DI_BACKOUT_TTL_HOURS", "6")

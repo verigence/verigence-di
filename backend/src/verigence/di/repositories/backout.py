@@ -28,7 +28,7 @@ async def insert_backout_job(
     error_class: str,          # 'RETRYABLE' or 'NON_RETRYABLE'
     error_code: str | None,
     error_detail: str | None,
-    ttl_hours: int = 12,
+    ttl_hours: int = 72,
 ) -> uuid.UUID:
     """Insert one backout_jobs row for a failed document.
 

@@ -58,7 +58,7 @@ async def test_schedule_v2_fast_retry_inserts_a_near_term_second_attempt() -> No
     assert session.execute.call_count == 1
     sql, params = session.execute.call_args_list[0][0]
     assert "V2_FAST_RETRY" in str(sql)
-    assert "ON CONFLICT (tenant_id, document_id, job_type) DO NOTHING" in str(sql)
+    assert "ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING" in str(sql)
     assert params["tenant_id"] == "tenant-test"
     assert params["document_id"] == document_id
     assert params["correlation_id"] == "corr-1"
