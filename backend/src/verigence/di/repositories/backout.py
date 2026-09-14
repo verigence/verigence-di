@@ -95,4 +95,4 @@ async def sweep_expired_backout_jobs(session: AsyncSession) -> int:
         """),
         {"now": now},
     )
-    return result.rowcount  # type: ignore[return-value]
+    return result.rowcount  # type: ignore[attr-defined, no-any-return]
