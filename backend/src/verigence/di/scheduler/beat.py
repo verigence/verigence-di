@@ -1,19 +1,32 @@
-"""scheduler/beat.py — EOD Retry Scheduler.
+"""scheduler/beat.py — background job scheduler.
 
-Implements DI_LLD_v2.2 §EOD Retry Scheduler:
+Runs four independent things in-process alongside FastAPI, every 60 seconds:
 
-  At each Tenant's configured local EOD time:
-  1. Select RETRY_PENDING Documents with no existing EOD_RETRY job
-  2. Insert one EOD_RETRY processing job (attempt_no=2)
-  3. The Processing Worker picks these up on the next poll
+  0. Reclaim stale RUNNING jobs (lease timeout exceeded).
+  1. Sweep expired backout_jobs rows (D24).
+  2. EOD Retry: at each Tenant's configured local EOD time, give every
+     RETRY_PENDING legacy (non-Capture-V2) document its once-daily second
+     attempt. Still live -- this is the only retry mechanism for any
+     document intake path that doesn't go through Capture V2 (insurance/
+     trade-in evidence, feedback attachments, etc.), independent of the
+     one legacy Booking evidence-upload screen retired alongside this
+     change; retiring that one UI path does not retire this mechanism.
+  3. Nightly Reprocessing: once a day, at a fixed global time, give every
+     currently-FAILED document (any active Tenant) one more processing
+     attempt -- up to NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly tries
+     (see repositories/processing_jobs.py::insert_nightly_reprocessing_jobs).
+     Distinct from (2): this catches documents already permanently FAILED
+     (backed out), not the once-off RETRY_PENDING->EOD_RETRY handoff.
 
 Design:
 - APScheduler AsyncIOScheduler runs in-process alongside FastAPI
-- Runs every 60 seconds; uses per-Tenant timezone + eod_retry_local_time to decide
-  whether EOD has just passed (within the scheduling window)
-- Idempotent: the UNIQUE (tenant_id, document_id, job_type) constraint prevents duplicates
+- Runs every 60 seconds; (2) uses per-Tenant timezone + eod_retry_local_time
+  to decide whether EOD has just passed, (3) uses a fixed UTC time with a
+  ±90s window
+- Idempotent: UNIQUE (tenant_id, document_id, job_type, attempt_no) on
+  processing_jobs prevents duplicates for either job type
 
-Configuration (from tenant_settings):
+Configuration (from tenant_settings, EOD retry only):
   timezone_name          — e.g. "Africa/Johannesburg"
   eod_retry_local_time   — e.g. 18:00:00
   eod_retry_enabled      — boolean, must be true
@@ -30,11 +43,12 @@ from datetime import time as dtime
 from typing import Any
 
 import structlog
-from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import]
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.repositories.backout import sweep_expired_backout_jobs
+from verigence.di.repositories.processing_jobs import insert_nightly_reprocessing_jobs
 
 logger = structlog.get_logger(__name__)
 
@@ -42,9 +56,17 @@ logger = structlog.get_logger(__name__)
 # (scheduler fires every 60s; ±90s window prevents both double-fire and misses)
 _EOD_WINDOW_SECONDS = 90
 
+# Same window logic, for the fixed-time Nightly Reprocessing trigger below.
+_NIGHTLY_WINDOW_SECONDS = 90
+
+# 10:30 PM IST, fixed for every Tenant regardless of its own timezone
+# (IST = UTC+5:30, so 22:30 IST = 17:00 UTC).
+_NIGHTLY_REPROCESS_UTC_TIME = dtime(17, 0, 0)
+
 
 class EODRetryScheduler:
-    """APScheduler-backed EOD retry job injector."""
+    """APScheduler-backed background job scheduler (name kept for
+    call-site compatibility)."""
 
     def __init__(self) -> None:
         self._scheduler: AsyncIOScheduler | None = None
@@ -59,34 +81,31 @@ class EODRetryScheduler:
 
         self._scheduler = AsyncIOScheduler()
         self._scheduler.add_job(
-            _run_eod_check,
+            _run_scheduler_tick,
             trigger="interval",
             seconds=60,
             kwargs={"session_factory": session_factory},
-            id="eod_retry_check",
-            name="EOD Retry Scheduler",
+            id="scheduler_tick",
+            name="Background Job Scheduler",
             max_instances=1,
             coalesce=True,
         )
         self._scheduler.start()
-        logger.info("eod_retry_scheduler_started", interval_seconds=60)
+        logger.info("scheduler_started", interval_seconds=60)
 
     def stop(self) -> None:
         """Shut down the APScheduler gracefully."""
         if self._scheduler and self._scheduler.running:
             self._scheduler.shutdown(wait=False)
-        logger.info("eod_retry_scheduler_stopped")
+        logger.info("scheduler_stopped")
 
 
-async def _run_eod_check(session_factory: async_sessionmaker) -> None:
-    """Periodic check (every 60 s):
-    0. Reclaim stale RUNNING jobs (lease timeout exceeded).
-    1. Sweep expired backout_jobs rows (D24) — runs on every tick.
-    2. For every enabled Tenant, insert EOD_RETRY jobs if EOD just passed.
-    """
+async def _run_scheduler_tick(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Periodic check (every 60 s) -- see module docstring for the four
+    independent things this does."""
     now_utc = datetime.now(UTC)
     log = logger.bind(scheduled_at_utc=now_utc.isoformat())
-    log.debug("eod_tick")
+    log.debug("scheduler_tick")
 
     # ── 0. Stale RUNNING job reaper ──────────────────────────────────────
     try:
@@ -97,7 +116,7 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
     except Exception as exc:
         log.warning("stale_job_reaper_failed", error=str(exc))
 
-    # ── 1. Backout sweep — runs on every tick regardless of EOD window ────────
+    # ── 1. Backout sweep — runs on every tick regardless of any window ──────
     try:
         async with session_factory() as session, session.begin():
             deleted = await sweep_expired_backout_jobs(session)
@@ -107,24 +126,43 @@ async def _run_eod_check(session_factory: async_sessionmaker) -> None:
         log.warning("backout_sweep_failed", error=str(exc))
 
     # ── 2. EOD retry job injection — only when Tenant EOD window matches ──────
-    async with session_factory() as session:
-        tenants = await _load_enabled_tenants(session)
+    try:
+        async with session_factory() as session:
+            tenants = await _load_enabled_tenants(session)
 
-    for tenant in tenants:
-        tenant_id: str = tenant["tenant_id"]
-        tz_name: str = tenant["timezone_name"]
-        eod_time: dtime = tenant["eod_retry_local_time"]
+        for tenant in tenants:
+            tenant_id: str = tenant["tenant_id"]
+            tz_name: str = tenant["timezone_name"]
+            eod_time: dtime = tenant["eod_retry_local_time"]
 
-        if not _is_eod_window(now_utc, tz_name, eod_time):
-            continue
+            if not _is_eod_window(now_utc, tz_name, eod_time):
+                continue
 
-        log.debug("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
+            log.debug("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
+            async with session_factory() as session, session.begin():
+                count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
+            if count:
+                log.info("eod_retry_jobs_inserted",
+                         tenant_id=tenant_id,
+                         jobs_inserted=count)
+    except Exception as exc:
+        log.warning("eod_retry_check_failed", error=str(exc))
+
+    # ── 3. Nightly Reprocessing — one fixed global time, every Tenant at once ──
+    if not _is_nightly_window(now_utc):
+        return
+
+    log.debug("nightly_reprocess_window_matched")
+    try:
         async with session_factory() as session, session.begin():
-            count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
-        if count:
-            log.info("eod_retry_jobs_inserted",
-                     tenant_id=tenant_id,
-                     jobs_inserted=count)
+            queued = await insert_nightly_reprocessing_jobs(session)
+        log.info("nightly_reprocess_jobs_queued", jobs_queued=queued)
+        await _report_nightly_reprocess_run(queued_count=queued, ran_at_utc=now_utc, log=log)
+    except Exception as exc:
+        log.warning("nightly_reprocess_failed", error=str(exc))
+        await _report_nightly_reprocess_run(
+            queued_count=None, ran_at_utc=now_utc, log=log, error=str(exc),
+        )
 
 
 async def _load_enabled_tenants(session: AsyncSession) -> list[dict[str, Any]]:
@@ -148,7 +186,7 @@ def _is_eod_window(now_utc: datetime, tz_name: str, eod_time: dtime) -> bool:
         tz = zoneinfo.ZoneInfo(tz_name)
     except (ImportError, Exception):
         try:
-            from dateutil import tz as dateutil_tz  # type: ignore[import]
+            from dateutil import tz as dateutil_tz
             tz_obj = dateutil_tz.gettz(tz_name)
             if tz_obj is None:
                 logger.warning("unknown_timezone", tz_name=tz_name)
@@ -225,7 +263,7 @@ async def _insert_eod_retry_jobs(
                     VALUES
                         (:tid, :job_id, :doc_id, :corr,
                          'EOD_RETRY', 'PENDING', :now, 2, :now)
-                    ON CONFLICT (tenant_id, document_id, job_type) DO NOTHING
+                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
                 """),
                 {
                     "tid": tenant_id,
@@ -243,6 +281,40 @@ async def _insert_eod_retry_jobs(
                            error=str(exc))
 
     return count
+
+
+def _is_nightly_window(now_utc: datetime) -> bool:
+    """True when the fixed global Nightly Reprocessing time (10:30 PM IST /
+    17:00 UTC) falls within the ±_NIGHTLY_WINDOW_SECONDS window right now."""
+    now_seconds = now_utc.hour * 3600 + now_utc.minute * 60 + now_utc.second
+    trigger_seconds = (
+        _NIGHTLY_REPROCESS_UTC_TIME.hour * 3600
+        + _NIGHTLY_REPROCESS_UTC_TIME.minute * 60
+        + _NIGHTLY_REPROCESS_UTC_TIME.second
+    )
+    return abs(now_seconds - trigger_seconds) <= _NIGHTLY_WINDOW_SECONDS
+
+
+async def _report_nightly_reprocess_run(
+    *,
+    queued_count: int | None,
+    ran_at_utc: datetime,
+    log: Any,
+    error: str | None = None,
+) -> None:
+    """Best-effort: tell Audit Core this run happened, for the PMO/TL
+    "Failed Extraction Reprocessing" status tile. Never lets a reporting
+    failure affect the run itself -- the run already committed above."""
+    try:
+        from verigence.di.integrations.audit_core import get_audit_core_link_client
+        client = get_audit_core_link_client()
+        await client.report_nightly_reprocessing_run(
+            ran_at_utc=ran_at_utc,
+            documents_queued=queued_count,
+            error=error,
+        )
+    except Exception as exc:
+        log.warning("nightly_reprocess_report_failed", error=str(exc))
 
 
 async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
@@ -264,7 +336,7 @@ async def _reclaim_stale_jobs(session: AsyncSession, now_utc: datetime) -> int:
         """),
         {"cutoff": now_utc - timedelta(minutes=lease_minutes)},
     )
-    return result.rowcount
+    return result.rowcount  # type: ignore[attr-defined, no-any-return]
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

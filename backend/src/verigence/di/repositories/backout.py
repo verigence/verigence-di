@@ -28,7 +28,7 @@ async def insert_backout_job(
     error_class: str,          # 'RETRYABLE' or 'NON_RETRYABLE'
     error_code: str | None,
     error_detail: str | None,
-    ttl_hours: int = 12,
+    ttl_hours: int = 72,
 ) -> uuid.UUID:
     """Insert one backout_jobs row for a failed document.
 
@@ -95,4 +95,4 @@ async def sweep_expired_backout_jobs(session: AsyncSession) -> int:
         """),
         {"now": now},
     )
-    return result.rowcount  # type: ignore[return-value]
+    return result.rowcount  # type: ignore[attr-defined, no-any-return]

@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import time
+from datetime import datetime
 from functools import lru_cache
 
 import httpx
@@ -123,6 +124,48 @@ class AuditCoreLinkClient:
                 json={
                     "requirementRef": requirement_ref,
                     "documentId": document_id,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise AuditCoreLinkError(
+                technical_code="AUDIT_CORE_INTEGRATION_FAILED",
+                status_code=None,
+                retryable=True,
+            ) from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise AuditCoreLinkError(
+                technical_code="AUDIT_CORE_INTEGRATION_FAILED",
+                status_code=response.status_code,
+                retryable=_retryable_status(response.status_code),
+            )
+
+    async def report_nightly_reprocessing_run(
+        self,
+        *,
+        ran_at_utc: datetime,
+        documents_queued: int | None,
+        error: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Tell Audit Core a Nightly Reprocessing run just happened, for the
+        PMO/TL "Failed Extraction Reprocessing" status tile
+        (scheduler/beat.py calls this once per run). Best-effort by design
+        at the caller -- this itself still raises on failure so the caller
+        can log it, but never retries and never blocks the run it reports on.
+        """
+        safe_correlation_id = correlation_id_or_new(correlation_id)
+        token = await self._service_token(correlation_id=safe_correlation_id)
+        try:
+            response = await self._audit.post(
+                "/v1/internal/di/nightly-reprocessing-runs",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    _CORRELATION_HEADER: safe_correlation_id,
+                },
+                json={
+                    "ranAtUtc": ran_at_utc.isoformat(),
+                    "documentsQueued": documents_queued,
+                    "error": error,
                 },
             )
         except httpx.HTTPError as exc:
