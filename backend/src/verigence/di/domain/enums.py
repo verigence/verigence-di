@@ -84,6 +84,7 @@ class ContentState(str, Enum):
 class JobType(str, Enum):
     INITIAL = "INITIAL"
     EOD_RETRY = "EOD_RETRY"
+    V2_FAST_RETRY = "V2_FAST_RETRY"
 
 
 class JobStatus(str, Enum):
