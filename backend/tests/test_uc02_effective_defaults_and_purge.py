@@ -8,6 +8,7 @@ from sqlalchemy import text
 from verigence.di.api.v1.admin_provisioning import _effective_versions, purge_project_data
 from verigence.di.repositories.database import set_tenant_context
 from verigence.di.repositories.tenants import (
+    provision_actor,
     provision_retention_policy,
     provision_tenant,
     provision_tenant_document_types,
@@ -327,3 +328,104 @@ async def test_project_purge_removes_tenant_state_but_preserves_global_defaults(
     ).scalar_one()
     assert global_booking_id_after == global_booking_id_before
     assert global_profile_id_after == global_profile_id_before
+
+
+@pytest.mark.asyncio
+async def test_project_purge_breaks_documents_processing_run_cycle(db_session) -> None:  # type: ignore[no-untyped-def]
+    """A document's current_processing_run_id points at processing_runs, while every
+    processing_runs row also points back at its own document -- a genuine FK cycle
+    (the same "current pointer" shape as tenant_settings/retention_policies, just
+    between two different tables). The generic depth-ordered deletion loop has no
+    cycle handling, so processing_runs can end up ranked ahead of documents and the
+    purge fails with ForeignKeyViolation. Reproduces that live failure end to end.
+    """
+    tenant_id = f"uc02-purge-cycle-{uuid.uuid4().hex[:10]}"
+    document_id = uuid.uuid4()
+    processing_job_id = uuid.uuid4()
+    processing_run_id = uuid.uuid4()
+
+    await set_tenant_context(db_session, tenant_id)
+    await provision_tenant(db_session, tenant_id)
+    retention_policy_id = await provision_retention_policy(db_session, tenant_id)
+    await provision_actor(db_session, tenant_id, "test-uploader", "USER")
+
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO docintel.documents (
+                tenant_id, document_id, active_retention_policy_id,
+                retention_disposition, source_channel, uploaded_by_actor_type,
+                uploaded_by_actor_id, registered_at_utc, correlation_id,
+                created_at_utc, updated_at_utc
+            ) VALUES (
+                :tenant_id, :document_id, :policy_id,
+                'PURGE_CONTENT', 'WEB', 'USER',
+                'test-uploader', now(), 'test-correlation',
+                now(), now()
+            )
+            """
+        ),
+        {"tenant_id": tenant_id, "document_id": document_id, "policy_id": retention_policy_id},
+    )
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO docintel.processing_jobs (
+                tenant_id, processing_job_id, document_id, correlation_id,
+                job_type, job_status, due_at_utc, attempt_no, created_at_utc
+            ) VALUES (
+                :tenant_id, :job_id, :document_id, 'test-correlation',
+                'INITIAL', 'COMPLETED', now(), 1, now()
+            )
+            """
+        ),
+        {"tenant_id": tenant_id, "job_id": processing_job_id, "document_id": document_id},
+    )
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO docintel.processing_runs (
+                tenant_id, processing_run_id, processing_job_id, document_id,
+                correlation_id, run_type, run_status, pipeline_version,
+                started_at_utc, created_at_utc
+            ) VALUES (
+                :tenant_id, :run_id, :job_id, :document_id,
+                'test-correlation', 'INITIAL', 'COMPLETED', 'test-pipeline',
+                now(), now()
+            )
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "run_id": processing_run_id,
+            "job_id": processing_job_id,
+            "document_id": document_id,
+        },
+    )
+    await db_session.execute(
+        text(
+            "UPDATE docintel.documents SET current_processing_run_id=:run_id "
+            "WHERE tenant_id=:tenant_id AND document_id=:document_id"
+        ),
+        {"tenant_id": tenant_id, "run_id": processing_run_id, "document_id": document_id},
+    )
+    await db_session.flush()
+
+    result = await purge_project_data(tenant_id, None, db_session)  # type: ignore[arg-type]
+    assert result.data is not None
+    assert result.data.purgeStatus == "REMOVED"
+
+    remaining_documents = (
+        await db_session.execute(
+            text("SELECT count(*) FROM docintel.documents WHERE tenant_id=:tid"),
+            {"tid": tenant_id},
+        )
+    ).scalar_one()
+    remaining_runs = (
+        await db_session.execute(
+            text("SELECT count(*) FROM docintel.processing_runs WHERE tenant_id=:tid"),
+            {"tid": tenant_id},
+        )
+    ).scalar_one()
+    assert remaining_documents == 0
+    assert remaining_runs == 0

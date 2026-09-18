@@ -438,6 +438,24 @@ async def purge_project_data(
         {"tid": tenantId},
     )
 
+    # documents.current_processing_run_id points at processing_runs, while every
+    # processing_runs row also points back at its own document (document_id) --
+    # the same "current pointer" ownership cycle as tenant_settings above, just
+    # between two tables instead of the same one. The generic depth-ordered loop
+    # below has no cycle handling: it computes each table's *own* longest reachable
+    # FK chain, so processing_runs (which also chains through extraction_profiles)
+    # can end up ranked ahead of documents even though documents must be cleared
+    # first for this specific edge. Hit live: a Project purge raised
+    # ForeignKeyViolation deleting processing_runs because a documents row still
+    # referenced it via current_processing_run_id. Break the cycle here first.
+    await session.execute(
+        text(
+            "UPDATE docintel.documents "
+            "SET current_processing_run_id=NULL WHERE tenant_id=:tid"
+        ),
+        {"tid": tenantId},
+    )
+
     # Delete tenant-scoped operational/link tables first. This is intentionally
     # before deleting extraction-profile configuration: extracted_facts has a FK
     # to extraction_profile_fields, so removing profile fields first can violate
