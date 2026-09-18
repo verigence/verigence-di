@@ -6,7 +6,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 RTO_CHALLAN_SCHEMA = SchemaDefinition(
     document_type_key="rto_challan",
     display_name="RTO Challan",
-    schema_version="1.0",
+    schema_version="2.0",
     fields=[
         FieldSpec(
             "registration_number",
@@ -50,6 +50,53 @@ RTO_CHALLAN_SCHEMA = SchemaDefinition(
             False,
             "Hypothecation/HP charges only when explicitly labelled and printed; never derive or calculate them from finance details.",
         ),
+        FieldSpec(
+            "chassis_number",
+            "string",
+            False,
+            "Vehicle chassis number exactly as printed; never derive it from a registration number or VIN.",
+        ),
+        FieldSpec(
+            "financer_name",
+            "string",
+            False,
+            "Financer/bank name exactly as printed (e.g. against 'FinancerName' or 'Financed By'); null when the document shows no financer.",
+        ),
+        FieldSpec(
+            "bank_reference_number",
+            "string",
+            False,
+            "Bank reference number exactly as printed (e.g. against 'Bank Ref No').",
+        ),
+        FieldSpec(
+            "receipt_number",
+            "string",
+            False,
+            "Receipt/application number exactly as printed (e.g. against 'RECEIPT/APPL No'), preserved verbatim including any slash-separated parts.",
+        ),
+        FieldSpec(
+            "receipt_date",
+            "date",
+            False,
+            "Receipt date exactly as printed; never confuse it with a separate 'Printed On' timestamp.",
+        ),
+        FieldSpec(
+            "grand_total_amount",
+            "number",
+            False,
+            "Final grand total amount exactly as printed; never recompute it by summing the Particulars table.",
+        ),
+        FieldSpec(
+            "line_items",
+            "array",
+            False,
+            (
+                "JSON array of every visible row of the Particulars/charges table. For each row "
+                "preserve description_raw exactly as printed, and extract only explicitly printed "
+                "amount, rebate_waiver_amount, fine_penalty_amount and total. Do not merge separate "
+                "printed rows into one, and do not invent a row that is not printed."
+            ),
+        ),
     ],
     system_prompt=(
         "You extract final-report evidence from an automobile RTO Challan or RTO paper. "
@@ -61,5 +108,8 @@ RTO_CHALLAN_SCHEMA = SchemaDefinition(
         "If State, Territory/UT, or District is not explicitly identifiable, return null for that field.",
         "Return ex_showroom_amount and hp_charges_amount only from explicitly labelled printed amounts.",
         "Return registration_type only from explicit source text; do not classify it yourself.",
+        "Extract chassis_number and financer_name exactly as printed; do not derive either from other document fields.",
+        "For line_items return a JSON array; do not merge separate printed Particulars rows into one, "
+        "and do not compute grand_total_amount yourself -- extract it only if explicitly printed.",
     ],
 )
