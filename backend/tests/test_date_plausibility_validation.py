@@ -120,10 +120,22 @@ async def test_every_published_date_field_has_the_validator_wired(
     # otherwise cloning to work around the immutability guard would have
     # silently dropped existing quality gates for every profile it touched.
     # Scoped to profiles this migration itself created (created_by_actor_id)
-    # and their immediate predecessor version, not every historical
+    # and the specific profile it actually retired, not every historical
     # retired/published pair for the same document type -- an unrelated,
     # legitimately-changed field set between two much older versions is not
     # this migration's concern.
+    #
+    # Identifying "the specific profile it retired" by new_ep.version_no - 1
+    # is unreliable: a document type can already carry older DRAFT/RETIRED
+    # rows with gaps in their version numbers (confirmed live -- one
+    # document type's version_no - 1 landed on an unrelated pre-existing
+    # row, not the profile this migration actually cloned from, making
+    # every one of that unrelated row's normalizers look "dropped"). The
+    # migration always retires exactly the one profile that was PUBLISHED
+    # immediately before creating the clone, so among every RETIRED profile
+    # with a version_no below the clone's own, that retired profile is
+    # unambiguously the one with the *highest* such version_no -- nothing
+    # else could be closer without being the clone itself.
     dropped_normalizers = (
         await db_session.execute(
             text(
@@ -133,7 +145,15 @@ async def test_every_published_date_field_has_the_validator_wired(
                 JOIN docintel.extraction_profiles old_ep
                   ON old_ep.document_type_id = new_ep.document_type_id
                  AND old_ep.scope_tenant_id IS NOT DISTINCT FROM new_ep.scope_tenant_id
-                 AND old_ep.version_no = new_ep.version_no - 1
+                 AND old_ep.status = 'RETIRED'
+                 AND old_ep.version_no = (
+                     SELECT MAX(o2.version_no)
+                     FROM docintel.extraction_profiles o2
+                     WHERE o2.document_type_id = new_ep.document_type_id
+                       AND o2.scope_tenant_id IS NOT DISTINCT FROM new_ep.scope_tenant_id
+                       AND o2.status = 'RETIRED'
+                       AND o2.version_no < new_ep.version_no
+                 )
                 JOIN docintel.extraction_profile_fields old_epf
                   ON old_epf.profile_id = old_ep.profile_id
                 JOIN docintel.profile_field_normalizers old_pfn
