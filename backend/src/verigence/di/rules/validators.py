@@ -41,7 +41,7 @@ ValidatorFn = Callable[
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make(rule_key: str, result: str, severity: str,
-          msg: str | None = None, details: dict | None = None) -> ValidatorRuleResult:
+          msg: str | None = None, details: dict[str, Any] | None = None) -> ValidatorRuleResult:
     return ValidatorRuleResult(
         rule_key=rule_key, result=result, severity=severity,
         message=msg, details=details,
@@ -241,7 +241,7 @@ def _val_allowed_values(
     severity = params.get("severity", "ERROR")
     if value is None:
         return _make(rule_key, "SKIP", severity, "No value to check")
-    allowed: list = params.get("allowed_values", [])
+    allowed: list[Any] = params.get("allowed_values", [])
     if not allowed:
         return _make(rule_key, "ERROR", "ERROR", "allowed_values: 'allowed_values' parameter is required")
     case_sensitive: bool = params.get("case_sensitive", False)
