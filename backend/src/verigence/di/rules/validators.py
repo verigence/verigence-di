@@ -41,7 +41,7 @@ ValidatorFn = Callable[
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make(rule_key: str, result: str, severity: str,
-          msg: str | None = None, details: dict | None = None) -> ValidatorRuleResult:
+          msg: str | None = None, details: dict[str, Any] | None = None) -> ValidatorRuleResult:
     return ValidatorRuleResult(
         rule_key=rule_key, result=result, severity=severity,
         message=msg, details=details,
@@ -188,6 +188,51 @@ def _val_date_not_expired(
     return _make(rule_key, "PASS", severity)
 
 
+def _shift_years(d: date, years: int) -> date:
+    """d shifted by whole years, clamped to the 28th on a Feb-29 -> non-leap-year
+    landing (rare, but a raw .replace(year=...) raises ValueError outright)."""
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        return d.replace(year=d.year + years, day=28)
+
+
+def _val_date_plausible_range(
+    value: Any, raw: str | None, params: dict[str, Any],
+    rule_key: str = "di.val.date_plausible_range",
+) -> ValidatorRuleResult:
+    """Fail when an ISO-8601 date falls outside a plausible window around today.
+
+    Confirmed live: OCR/LLM date extraction on dealership documents
+    occasionally misreads a year (a 2-digit year expanded to the wrong
+    century, a smudged digit, a transposition), landing an invoice/receipt/
+    delivery date years away from reality with no other check catching it
+    -- date_not_future only catches dates AFTER today, nothing catches one
+    implausibly far in the PAST. Bounded by a rolling window relative to
+    today (``max_years_past``/``max_years_future``), not fixed calendar
+    years, so this doesn't need updating every year the way a hardcoded
+    "2026 <= year <= 2027" check would.
+    """
+    severity = params.get("severity", "ERROR")
+    if value is None:
+        return _make(rule_key, "SKIP", severity, "No date value to check")
+    try:
+        d = date.fromisoformat(str(value))
+    except ValueError:
+        return _make(rule_key, "FAIL", severity,
+                     f"Cannot parse {value!r} as ISO-8601 date")
+    today = datetime.now(UTC).date()
+    max_years_past = int(params.get("max_years_past", 3))
+    max_years_future = int(params.get("max_years_future", 1))
+    earliest = _shift_years(today, -max_years_past)
+    latest = _shift_years(today, max_years_future)
+    if d < earliest or d > latest:
+        return _make(rule_key, "FAIL", severity,
+                     f"Date {d} is outside the plausible range {earliest}..{latest}",
+                     {"date": str(d), "earliest": str(earliest), "latest": str(latest)})
+    return _make(rule_key, "PASS", severity)
+
+
 def _val_allowed_values(
     value: Any, raw: str | None, params: dict[str, Any],
     rule_key: str = "di.val.allowed_values",
@@ -196,7 +241,7 @@ def _val_allowed_values(
     severity = params.get("severity", "ERROR")
     if value is None:
         return _make(rule_key, "SKIP", severity, "No value to check")
-    allowed: list = params.get("allowed_values", [])
+    allowed: list[Any] = params.get("allowed_values", [])
     if not allowed:
         return _make(rule_key, "ERROR", "ERROR", "allowed_values: 'allowed_values' parameter is required")
     case_sensitive: bool = params.get("case_sensitive", False)
@@ -306,6 +351,7 @@ VALIDATOR_REGISTRY: dict[str, ValidatorFn] = {
     "di.val.numeric_range":     lambda v, r, p: _val_numeric_range(v, r, p, "di.val.numeric_range"),
     "di.val.date_not_future":   lambda v, r, p: _val_date_not_future(v, r, p, "di.val.date_not_future"),
     "di.val.date_not_expired":  lambda v, r, p: _val_date_not_expired(v, r, p, "di.val.date_not_expired"),
+    "di.val.date_plausible_range": lambda v, r, p: _val_date_plausible_range(v, r, p, "di.val.date_plausible_range"),
     "di.val.allowed_values":    lambda v, r, p: _val_allowed_values(v, r, p, "di.val.allowed_values"),
     "di.val.luhn":              lambda v, r, p: _val_luhn(v, r, p, "di.val.luhn"),
     "di.val.sa_id_number":      lambda v, r, p: _val_sa_id_number(v, r, p, "di.val.sa_id_number"),

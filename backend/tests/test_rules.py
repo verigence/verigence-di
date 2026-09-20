@@ -4,7 +4,7 @@ All tests are marked no_docker — pure deterministic rule logic, no DB.
 
 Coverage:
 - normalizers: all 12 built-in rules
-- validators: all 11 built-in rules
+- validators: all 12 built-in rules
 - runner._run_normalizers pipeline
 - REGISTRY completeness
 """
@@ -328,6 +328,60 @@ class TestValDateNotExpired:
         assert r.result == "PASS"
 
 
+class TestValDatePlausibleRange:
+    # Confirmed live: OCR/LLM date extraction on dealership documents
+    # occasionally lands years away from reality (a misread year, a
+    # transposition) with nothing catching it -- date_not_future only
+    # catches the future direction. Dates are computed relative to today,
+    # never hardcoded calendar years, matching the validator's own design
+    # (a fixed "2026 <= year <= 2027" check would need updating every year).
+    @pytest.mark.no_docker
+    def test_passes_a_recent_date(self):
+        from datetime import UTC, datetime, timedelta
+        fn = get_validator("di.val.date_plausible_range")
+        recent = (datetime.now(UTC).date() - timedelta(days=30)).isoformat()
+        r = fn(recent, None, {})
+        assert r.result == "PASS"
+
+    @pytest.mark.no_docker
+    def test_fails_a_date_years_in_the_past(self):
+        from datetime import UTC, datetime
+        fn = get_validator("di.val.date_plausible_range")
+        ancient = datetime.now(UTC).date().replace(year=datetime.now(UTC).year - 5).isoformat()
+        r = fn(ancient, None, {})
+        assert r.result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_fails_a_date_years_in_the_future(self):
+        from datetime import UTC, datetime
+        fn = get_validator("di.val.date_plausible_range")
+        distant = datetime.now(UTC).date().replace(year=datetime.now(UTC).year + 5).isoformat()
+        r = fn(distant, None, {})
+        assert r.result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_respects_custom_window_params(self):
+        from datetime import UTC, datetime
+        fn = get_validator("di.val.date_plausible_range")
+        two_years_ago = datetime.now(UTC).date().replace(year=datetime.now(UTC).year - 2).isoformat()
+        # Default window (3 years past) accepts it...
+        assert fn(two_years_ago, None, {}).result == "PASS"
+        # ...but a tighter caller-supplied window correctly rejects it.
+        assert fn(two_years_ago, None, {"max_years_past": 1}).result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_fails_unparseable_value(self):
+        fn = get_validator("di.val.date_plausible_range")
+        r = fn("not-a-date", None, {})
+        assert r.result == "FAIL"
+
+    @pytest.mark.no_docker
+    def test_skips_when_no_value(self):
+        fn = get_validator("di.val.date_plausible_range")
+        r = fn(None, None, {})
+        assert r.result == "SKIP"
+
+
 class TestValAllowedValues:
     @pytest.mark.no_docker
     def test_passes_valid_value(self):
@@ -418,4 +472,4 @@ class TestRegistryCompleteness:
 
     @pytest.mark.no_docker
     def test_validator_count(self):
-        assert len(VALIDATOR_REGISTRY) == 11
+        assert len(VALIDATOR_REGISTRY) == 12
