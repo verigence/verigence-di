@@ -97,6 +97,22 @@ def test_package4_migration_adds_the_rest_of_the_printed_document() -> None:
         assert f'"{field_key}"' in source
 
 
+@pytest.mark.no_docker
+def test_package5_migration_strengthens_line_items_completeness() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "0043_rto_challan_line_items_completeness.py"
+    ).read_text(encoding="utf-8")
+
+    assert "document_type_key='rto_challan'" in source
+    for field_key in RTO_FIELDS:
+        assert f'"{field_key}"' in source
+    assert "ONE ENTRY PER PRINTED ROW" in source
+    assert "re-count the printed rows" in source
+
+
 @pytest.mark.asyncio
 async def test_package3_rto_profile_remains_published_at_current_head(
     db_session: AsyncSession,
@@ -104,7 +120,7 @@ async def test_package3_rto_profile_remains_published_at_current_head(
     version = (
         await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
     ).scalar_one()
-    assert version == "0042"
+    assert version == "0043"
 
     published_count = (
         await db_session.execute(
@@ -170,6 +186,15 @@ async def test_package3_rto_profile_remains_published_at_current_head(
     assert "never classify" in fields["registration_type"][1].lower()
     assert "never calculate" in fields["hp_charges_amount"][1].lower()
     assert "never derive" in fields["chassis_number"][1].lower()
+
+    # Package 5 (migration 0043): reported live that line_items only ever
+    # extracted one row despite 0041's "extract every visible row" wording --
+    # the republished instruction now tells the model how many rows to
+    # expect and to verify its own count against the printed table.
+    line_items_instruction = fields["line_items"][1].lower()
+    assert "one entry per printed row" in line_items_instruction
+    assert "re-count the printed rows" in line_items_instruction
+    assert "never a single summarized or totaled entry" in line_items_instruction
 
     disabled_count = (
         await db_session.execute(
