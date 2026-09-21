@@ -56,7 +56,7 @@ async def test_every_published_date_field_has_the_validator_wired(
     version = (
         await db_session.execute(text("SELECT version_num FROM docintel.alembic_version"))
     ).scalar_one()
-    assert version == "0042"
+    assert version == "0043"
 
     catalog_row = (
         await db_session.execute(

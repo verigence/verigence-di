@@ -91,10 +91,18 @@ RTO_CHALLAN_SCHEMA = SchemaDefinition(
             "array",
             False,
             (
-                "JSON array of every visible row of the Particulars/charges table. For each row "
-                "preserve description_raw exactly as printed, and extract only explicitly printed "
-                "amount, rebate_waiver_amount, fine_penalty_amount and total. Do not merge separate "
-                "printed rows into one, and do not invent a row that is not printed."
+                "JSON array with ONE ENTRY PER PRINTED ROW of the Particulars/charges table -- "
+                "an RTO Challan's fee break-up routinely lists many separate rows (for example: "
+                "Registration Fee, Road Tax, Hypothecation/HPA Charges, Smart Card Fee, Fitness "
+                "Fee, Fancy/Choice Number Fee, Form Fee, Postal/Speed Post Charges, Agent Fee, "
+                "Cess), each with its own amount -- return every one of them as its own array "
+                "element, never a single summarized or totaled entry. Scan the ENTIRE table from "
+                "its first printed row to its last before answering; a table with N printed rows "
+                "must produce an array of exactly N items, never fewer. For each row preserve "
+                "description_raw exactly as printed, and extract only explicitly printed amount, "
+                "rebate_waiver_amount, fine_penalty_amount and total. Never merge two or more "
+                "printed rows into one array element, never invent a row that is not printed, and "
+                "never collapse the table down to only its total/grand-total row."
             ),
         ),
     ],
@@ -109,7 +117,11 @@ RTO_CHALLAN_SCHEMA = SchemaDefinition(
         "Return ex_showroom_amount and hp_charges_amount only from explicitly labelled printed amounts.",
         "Return registration_type only from explicit source text; do not classify it yourself.",
         "Extract chassis_number and financer_name exactly as printed; do not derive either from other document fields.",
-        "For line_items return a JSON array; do not merge separate printed Particulars rows into one, "
-        "and do not compute grand_total_amount yourself -- extract it only if explicitly printed.",
+        "line_items is almost never a single row in practice -- an RTO Challan's Particulars/fee "
+        "table typically prints 5 to 15 separate charge lines. Before finalizing line_items, "
+        "re-count the printed rows in the table image and confirm the array has that same number "
+        "of elements; a one-element array is correct ONLY if the printed table itself genuinely "
+        "shows just one row. Do not merge separate printed Particulars rows into one, and do not "
+        "compute grand_total_amount yourself -- extract it only if explicitly printed.",
     ],
 )
