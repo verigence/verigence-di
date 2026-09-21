@@ -34,7 +34,7 @@ from verigence.di.repositories.documents import (
 from verigence.di.repositories.tenants import provision_actor
 from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.storage.audit_keys import build_audit_original_key
-from verigence.di.storage.v2_presigned import presign_v2_put
+from verigence.di.storage.v2_presigned import open_v2_s3_client, presign_v2_put
 
 router = APIRouter(prefix="/v2/tenants/{tenantId}", tags=["Document Capture V2"])
 
@@ -238,7 +238,7 @@ async def create_capture_upload_intents(
     requirement_refs_json = json.dumps(requirement_refs, sort_keys=True)
 
     intents: list[V2UploadIntent] = []
-    async with tenant_session(tenantId) as session:
+    async with open_v2_s3_client() as s3_client, tenant_session(tenantId) as session:
         context = await get_audit_storage_context_by_ref(
             session,
             tenant_id=tenantId,
@@ -386,6 +386,7 @@ async def create_capture_upload_intents(
             signed = await presign_v2_put(
                 logical_key=logical_key,
                 content_type=item.contentType,
+                client=s3_client,
             )
             intents.append(
                 V2UploadIntent(
