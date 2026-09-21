@@ -14,7 +14,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+import structlog
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -32,9 +33,12 @@ from verigence.di.repositories.documents import (
     get_active_retention_policy,
 )
 from verigence.di.repositories.tenants import provision_actor
+from verigence.di.runtime_errors import safe_exception_context, technical_failure
 from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.storage.audit_keys import build_audit_original_key
 from verigence.di.storage.v2_presigned import open_v2_s3_client, presign_v2_put
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/v2/tenants/{tenantId}", tags=["Document Capture V2"])
 
@@ -64,10 +68,22 @@ class V2UploadIntent(BaseModel):
     expiresAtUtc: datetime
 
 
+class V2UploadIntentFailure(BaseModel):
+    clientUploadId: str
+    errorCode: str
+    detail: str
+
+
 class V2UploadIntentResponse(BaseModel):
     externalContextRef: str
     phase: Literal["BOOKING", "DELIVERY"]
     uploads: list[V2UploadIntent]
+    # One batch, one file at a time isolated by a SAVEPOINT (see
+    # create_capture_upload_intents) -- a problem with one file (a stale
+    # conflicting intent, an unexpected DB error) no longer fails every
+    # other file in the same batch. Always present; empty when every file
+    # in the batch succeeded.
+    failures: list[V2UploadIntentFailure] = Field(default_factory=list)
 
 
 class V2CaptureDocumentStatus(BaseModel):
@@ -238,6 +254,7 @@ async def create_capture_upload_intents(
     requirement_refs_json = json.dumps(requirement_refs, sort_keys=True)
 
     intents: list[V2UploadIntent] = []
+    failures: list[V2UploadIntentFailure] = []
     async with open_v2_s3_client() as s3_client, tenant_session(tenantId) as session:
         context = await get_audit_storage_context_by_ref(
             session,
@@ -259,135 +276,168 @@ async def create_capture_upload_intents(
             )
 
         for item in command.files:
-            existing = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT document_id, logical_object_key,
-                               requirement_refs_by_document_type_key
-                        FROM docintel.document_capture_v2_uploads
-                        WHERE tenant_id=:tenant_id
-                          AND external_context_ref=:external_context_ref
-                          AND phase=:phase
-                          AND client_upload_id=:client_upload_id
-                        """
-                    ),
-                    {
-                        "tenant_id": tenantId,
-                        "external_context_ref": externalContextRef,
-                        "phase": command.phase,
-                        "client_upload_id": item.clientUploadId,
-                    },
-                )
-            ).mappings().one_or_none()
-
-            if existing is None:
-                doc = await create_document_receiving(
-                    session,
-                    tenant_id=tenantId,
-                    subject_id=_context_uuid(context, "subject_id"),
-                    uploaded_by_actor_id=principal.service_id,
-                    uploaded_by_actor_type="SERVICE",
-                    correlation_id=f"capture-v2:{item.clientUploadId}",
-                    retention_policy_id=retention["retention_policy_id"],
-                    retention_days=retention["retention_days"],
-                    retention_disposition=retention["disposition"],
-                    original_filename=item.filename,
-                    declared_mime_type=item.contentType,
-                    physical_form_type="ADDITIONAL",
-                    requires_processing=False,
-                )
-                document_id = UUID(str(doc["document_id"]))
-                logical_key = build_audit_original_key(
-                    tenant_id=tenantId,
-                    dealer_id=_context_uuid(context, "dealer_id"),
-                    dealer_outlet_id=_context_uuid(context, "dealer_outlet_id"),
-                    customer_id=_context_uuid(context, "customer_id"),
-                    project_slug=_context_string(context, "project_slug"),
-                    dealer_slug=_context_string(context, "dealer_slug"),
-                    dealer_outlet_slug=_context_string(context, "dealer_outlet_slug"),
-                    customer_slug=_context_string(context, "customer_slug"),
-                    document_id=document_id,
-                    physical_form_type="ADDITIONAL",
-                    original_filename=item.filename,
-                    detected_mime_type=item.contentType,
-                )
-                await session.execute(
-                    text(
-                        """
-                        UPDATE docintel.documents
-                        SET audit_storage_context_id=:storage_context_id,
-                            updated_at_utc=now()
-                        WHERE tenant_id=:tenant_id AND document_id=:document_id
-                        """
-                    ),
-                    {
-                        "tenant_id": tenantId,
-                        "document_id": document_id,
-                        "storage_context_id": _context_uuid(
-                            context, "storage_context_id"
-                        ),
-                    },
-                )
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO docintel.document_capture_v2_uploads (
-                            tenant_id, document_id, audit_storage_context_id,
-                            external_context_ref, phase, client_upload_id,
-                            logical_object_key, original_filename, declared_mime_type,
-                            candidate_document_type_keys,
-                            requirement_refs_by_document_type_key,
-                            state, created_at_utc, updated_at_utc
-                        ) VALUES (
-                            :tenant_id, :document_id, :storage_context_id,
-                            :external_context_ref, :phase, :client_upload_id,
-                            :logical_key, :filename, :content_type,
-                            CAST(:candidate_keys AS jsonb),
-                            CAST(:requirement_refs AS jsonb),
-                            'RECEIVING', now(), now()
+            # Isolated on its own SAVEPOINT: a problem with this one file
+            # (a stale conflicting intent, an unexpected DB error) rolls
+            # back only its own work and is reported as a failure entry --
+            # it no longer takes every other file in the same batch down
+            # with it. The presign call is *inside* the savepoint too, so a
+            # rollback and a "this file didn't get a URL" outcome agree.
+            try:
+                async with session.begin_nested():
+                    existing = (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT document_id, logical_object_key,
+                                       requirement_refs_by_document_type_key
+                                FROM docintel.document_capture_v2_uploads
+                                WHERE tenant_id=:tenant_id
+                                  AND external_context_ref=:external_context_ref
+                                  AND phase=:phase
+                                  AND client_upload_id=:client_upload_id
+                                """
+                            ),
+                            {
+                                "tenant_id": tenantId,
+                                "external_context_ref": externalContextRef,
+                                "phase": command.phase,
+                                "client_upload_id": item.clientUploadId,
+                            },
                         )
-                        """
-                    ),
-                    {
-                        "tenant_id": tenantId,
-                        "document_id": document_id,
-                        "storage_context_id": _context_uuid(
-                            context, "storage_context_id"
-                        ),
-                        "external_context_ref": externalContextRef,
-                        "phase": command.phase,
-                        "client_upload_id": item.clientUploadId,
-                        "logical_key": logical_key,
-                        "filename": item.filename,
-                        "content_type": item.contentType,
-                        "candidate_keys": json.dumps(candidate_keys),
-                        "requirement_refs": requirement_refs_json,
-                    },
-                )
-            else:
-                existing_refs = {
-                    str(key): str(value)
-                    for key, value in dict(
-                        existing["requirement_refs_by_document_type_key"] or {}
-                    ).items()
-                }
-                if existing_refs != requirement_refs:
-                    raise http_exception(
-                        ErrorCode.CONFLICT,
-                        detail=(
-                            "The existing V2 upload intent was created with a "
-                            "different Audit Core requirement mapping."
-                        ),
-                    )
-                document_id = UUID(str(existing["document_id"]))
-                logical_key = str(existing["logical_object_key"])
+                    ).mappings().one_or_none()
 
-            signed = await presign_v2_put(
-                logical_key=logical_key,
-                content_type=item.contentType,
-                client=s3_client,
-            )
+                    if existing is None:
+                        doc = await create_document_receiving(
+                            session,
+                            tenant_id=tenantId,
+                            subject_id=_context_uuid(context, "subject_id"),
+                            uploaded_by_actor_id=principal.service_id,
+                            uploaded_by_actor_type="SERVICE",
+                            correlation_id=f"capture-v2:{item.clientUploadId}",
+                            retention_policy_id=retention["retention_policy_id"],
+                            retention_days=retention["retention_days"],
+                            retention_disposition=retention["disposition"],
+                            original_filename=item.filename,
+                            declared_mime_type=item.contentType,
+                            physical_form_type="ADDITIONAL",
+                            requires_processing=False,
+                        )
+                        document_id = UUID(str(doc["document_id"]))
+                        logical_key = build_audit_original_key(
+                            tenant_id=tenantId,
+                            dealer_id=_context_uuid(context, "dealer_id"),
+                            dealer_outlet_id=_context_uuid(context, "dealer_outlet_id"),
+                            customer_id=_context_uuid(context, "customer_id"),
+                            project_slug=_context_string(context, "project_slug"),
+                            dealer_slug=_context_string(context, "dealer_slug"),
+                            dealer_outlet_slug=_context_string(context, "dealer_outlet_slug"),
+                            customer_slug=_context_string(context, "customer_slug"),
+                            document_id=document_id,
+                            physical_form_type="ADDITIONAL",
+                            original_filename=item.filename,
+                            detected_mime_type=item.contentType,
+                        )
+                        await session.execute(
+                            text(
+                                """
+                                UPDATE docintel.documents
+                                SET audit_storage_context_id=:storage_context_id,
+                                    updated_at_utc=now()
+                                WHERE tenant_id=:tenant_id AND document_id=:document_id
+                                """
+                            ),
+                            {
+                                "tenant_id": tenantId,
+                                "document_id": document_id,
+                                "storage_context_id": _context_uuid(
+                                    context, "storage_context_id"
+                                ),
+                            },
+                        )
+                        await session.execute(
+                            text(
+                                """
+                                INSERT INTO docintel.document_capture_v2_uploads (
+                                    tenant_id, document_id, audit_storage_context_id,
+                                    external_context_ref, phase, client_upload_id,
+                                    logical_object_key, original_filename, declared_mime_type,
+                                    candidate_document_type_keys,
+                                    requirement_refs_by_document_type_key,
+                                    state, created_at_utc, updated_at_utc
+                                ) VALUES (
+                                    :tenant_id, :document_id, :storage_context_id,
+                                    :external_context_ref, :phase, :client_upload_id,
+                                    :logical_key, :filename, :content_type,
+                                    CAST(:candidate_keys AS jsonb),
+                                    CAST(:requirement_refs AS jsonb),
+                                    'RECEIVING', now(), now()
+                                )
+                                """
+                            ),
+                            {
+                                "tenant_id": tenantId,
+                                "document_id": document_id,
+                                "storage_context_id": _context_uuid(
+                                    context, "storage_context_id"
+                                ),
+                                "external_context_ref": externalContextRef,
+                                "phase": command.phase,
+                                "client_upload_id": item.clientUploadId,
+                                "logical_key": logical_key,
+                                "filename": item.filename,
+                                "content_type": item.contentType,
+                                "candidate_keys": json.dumps(candidate_keys),
+                                "requirement_refs": requirement_refs_json,
+                            },
+                        )
+                    else:
+                        existing_refs = {
+                            str(key): str(value)
+                            for key, value in dict(
+                                existing["requirement_refs_by_document_type_key"] or {}
+                            ).items()
+                        }
+                        if existing_refs != requirement_refs:
+                            raise http_exception(
+                                ErrorCode.CONFLICT,
+                                detail=(
+                                    "The existing V2 upload intent was created with a "
+                                    "different Audit Core requirement mapping."
+                                ),
+                            )
+                        document_id = UUID(str(existing["document_id"]))
+                        logical_key = str(existing["logical_object_key"])
+
+                    signed = await presign_v2_put(
+                        logical_key=logical_key,
+                        content_type=item.contentType,
+                        client=s3_client,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+                    error_code = str(exc.detail.get("code") or "UPLOAD_INTENT_FAILED")
+                    detail = str(exc.detail.get("detail") or exc.detail.get("title") or error_code)
+                else:
+                    failure = technical_failure(exc, operation="api")
+                    error_code = failure.code
+                    detail = failure.detail
+                logger.warning(
+                    "capture_v2_upload_intent_item_failed",
+                    tenant_id=tenantId,
+                    external_context_ref=externalContextRef,
+                    client_upload_id=item.clientUploadId,
+                    error_code=error_code,
+                    **safe_exception_context(exc),
+                )
+                failures.append(
+                    V2UploadIntentFailure(
+                        clientUploadId=item.clientUploadId,
+                        errorCode=error_code,
+                        detail=detail,
+                    )
+                )
+                continue
+
             intents.append(
                 V2UploadIntent(
                     clientUploadId=item.clientUploadId,
@@ -402,6 +452,7 @@ async def create_capture_upload_intents(
 
     return V2UploadIntentResponse(
         externalContextRef=externalContextRef,
+        failures=failures,
         phase=command.phase,
         uploads=intents,
     )
