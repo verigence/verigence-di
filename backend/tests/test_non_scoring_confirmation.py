@@ -20,7 +20,10 @@ from decimal import Decimal
 import pytest
 
 from verigence.di.domain.enums import HumanVerificationStatus
-from verigence.di.workers.job_runner import _non_scoring_confirmation_values
+from verigence.di.workers.job_runner import (
+    _apply_deterministic_review_override,
+    _non_scoring_confirmation_values,
+)
 
 pytestmark = pytest.mark.no_docker
 
@@ -88,3 +91,37 @@ def test_respects_a_tenant_specific_threshold() -> None:
     )
     assert threshold_applied == Decimal("75.50")
     _assert_satisfies_confirmation_invariant(confidence_score, threshold_applied, hvs)
+
+
+# ── _apply_deterministic_review_override (scoring-profile path) ─────────────
+def test_deterministic_override_caps_confidence_above_threshold() -> None:
+    """Regression for a live incident: aadhaar/pan_card (real scoring
+    profiles) genuinely scored above threshold (92 vs 90) while an unrelated
+    normalization/validation failure also existed. Forcing MANDATORY without
+    capping confidence_score left confidence_score=92, threshold_applied=90,
+    human_verification_status=MANDATORY -- ck_documents_confirmation_
+    invariants' CASE derives OPTIONAL whenever confidence > threshold, so
+    that combination is a direct CheckViolationError. The CONFIRMED UPDATE
+    raised, poisoning the worker's transaction and leaving the document
+    stuck retrying forever, indistinguishable from a genuine extraction
+    failure to everything downstream."""
+    confidence_score, hvs = _apply_deterministic_review_override(
+        Decimal("92.00"), Decimal("90.00"),
+    )
+    assert hvs == HumanVerificationStatus.MANDATORY
+    assert confidence_score <= Decimal("90.00")
+    _assert_satisfies_confirmation_invariant(confidence_score, Decimal("90.00"), hvs)
+
+
+def test_deterministic_override_leaves_a_below_threshold_score_untouched() -> None:
+    """A genuinely low-confidence score that already derives MANDATORY on
+    its own must not be altered -- only a score that would otherwise
+    contradict the forced MANDATORY needs capping."""
+    confidence_score, hvs = _apply_deterministic_review_override(
+        Decimal("60.00"), Decimal("90.00"),
+    )
+    assert hvs == HumanVerificationStatus.MANDATORY
+    assert confidence_score == Decimal("60.00")
+    _assert_satisfies_confirmation_invariant(confidence_score, Decimal("90.00"), hvs)
+
+
