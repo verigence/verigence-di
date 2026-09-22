@@ -239,6 +239,33 @@ def _non_scoring_confirmation_values(
     return Decimal("100"), effective_threshold, HumanVerificationStatus.OPTIONAL
 
 
+def _apply_deterministic_review_override(
+    confidence_score: Decimal | None, threshold_applied: Decimal,
+) -> tuple[Decimal | None, HumanVerificationStatus]:
+    """Force MANDATORY review for a scoring profile that hit a normalization/
+    validation failure elsewhere in the document, while keeping the CONFIRMED
+    write consistent with ck_documents_confirmation_invariants' own CASE
+    (human_verification_status must equal exactly 'OPTIONAL' if
+    confidence_score > verification_threshold_applied, else 'MANDATORY').
+
+    Same class of bug _non_scoring_confirmation_values exists to prevent,
+    confirmed live for the scoring path too: forcing human_verification_
+    status to MANDATORY without also capping confidence_score meant a
+    document whose OCR genuinely scored above threshold (e.g. 92 vs a 90
+    threshold) alongside an unrelated normalization/validation failure got
+    written as confidence_score=92, threshold_applied=90, human_
+    verification_status=MANDATORY -- a direct CheckViolationError. The
+    CONFIRMED UPDATE raised, poisoning the worker's transaction and leaving
+    the document stuck retrying forever, indistinguishable from a genuine
+    extraction failure to everything downstream (aadhaar/pan_card, both
+    real scoring profiles, confirmed live). Capping confidence_score at the
+    threshold keeps the derivation consistent with the forced MANDATORY.
+    """
+    if confidence_score is not None and confidence_score > threshold_applied:
+        confidence_score = threshold_applied
+    return confidence_score, HumanVerificationStatus.MANDATORY
+
+
 async def _execute_steps(
     *,
     session: AsyncSession,
@@ -622,7 +649,9 @@ async def _execute_steps(
         hvs = conf_result.human_verification_status
 
     if deterministic_rules_force_review:
-        hvs = HumanVerificationStatus.MANDATORY
+        confidence_score, hvs = _apply_deterministic_review_override(
+            confidence_score, threshold_applied,
+        )
 
     _required_present = sum(1 for sf in scored_fields if sf.expected and sf.found_status == FoundStatus.FOUND)
     _required_missing = sum(1 for sf in scored_fields if sf.expected and sf.found_status != FoundStatus.FOUND)
