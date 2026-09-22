@@ -240,8 +240,8 @@ def _non_scoring_confirmation_values(
 
 
 def _apply_deterministic_review_override(
-    confidence_score: Decimal | None, threshold_applied: Decimal,
-) -> tuple[Decimal | None, HumanVerificationStatus]:
+    confidence_score: Decimal, threshold_applied: Decimal,
+) -> tuple[Decimal, HumanVerificationStatus]:
     """Force MANDATORY review for a scoring profile that hit a normalization/
     validation failure elsewhere in the document, while keeping the CONFIRMED
     write consistent with ck_documents_confirmation_invariants' own CASE
@@ -261,7 +261,7 @@ def _apply_deterministic_review_override(
     real scoring profiles, confirmed live). Capping confidence_score at the
     threshold keeps the derivation consistent with the forced MANDATORY.
     """
-    if confidence_score is not None and confidence_score > threshold_applied:
+    if confidence_score > threshold_applied:
         confidence_score = threshold_applied
     return confidence_score, HumanVerificationStatus.MANDATORY
 

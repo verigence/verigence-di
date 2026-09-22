@@ -125,11 +125,3 @@ def test_deterministic_override_leaves_a_below_threshold_score_untouched() -> No
     _assert_satisfies_confirmation_invariant(confidence_score, Decimal("90.00"), hvs)
 
 
-def test_deterministic_override_handles_a_none_confidence_score() -> None:
-    """Defensive: calculate_confidence_score's contract is to always return
-    a real Decimal, but this must not crash if it somehow doesn't."""
-    confidence_score, hvs = _apply_deterministic_review_override(
-        None, Decimal("90.00"),
-    )
-    assert hvs == HumanVerificationStatus.MANDATORY
-    assert confidence_score is None
