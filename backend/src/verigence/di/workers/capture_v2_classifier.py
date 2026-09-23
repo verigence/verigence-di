@@ -530,7 +530,16 @@ class CaptureV2ClassificationWorker:
                 },
             )
 
-            if type_row["requires_processing"] and type_row["has_published_profile"]:
+            # requirement_ref is None both for a genuinely unmapped type
+            # (the existing capture_v2_requirement_ref_missing warning
+            # above) and, by Audit Core's own design
+            # (_requirements_with_open_slot), for an extra copy of a
+            # single-document requirement that already has one -- Audit
+            # Core simply omits a ref for it. Extraction is real DI compute
+            # spent on data nothing will ever read; classification (already
+            # done above, unconditionally) is enough to know what the extra
+            # copy is and let it be counted/labelled without ever queuing it.
+            if requirement_ref is not None and type_row["requires_processing"] and type_row["has_published_profile"]:
                 processing_job_id = await create_initial_job(
                     session,
                     tenant_id=tenant_id,
