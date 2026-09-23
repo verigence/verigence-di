@@ -283,10 +283,25 @@ async def _execute_steps(
     """All 17 processing steps — raises ProcessingError on failure."""
     now = started_at
 
+    # confirmation_status must move to PENDING in the same statement as
+    # processing_status -> PROCESSING: ck_documents_confirmation_invariants
+    # only allows PROCESSING paired with confirmation_status='PENDING'.
+    # INITIAL and EOD_RETRY/V2_FAST_RETRY jobs already reach this row with
+    # confirmation_status='PENDING' (set at document creation and by
+    # retry_job() respectively), so this is a no-op for them. A
+    # NIGHTLY_REPROCESS job's document instead sits at the OTHER terminal
+    # invariant branch -- confirmation_status='NOT_CONFIRMED' from fail_job()
+    # -- since nightly reprocessing is the first thing that ever re-attempts
+    # a permanently-FAILED document. Without this, that document's very
+    # first NIGHTLY_REPROCESS attempt raises a CheckViolation the instant
+    # this UPDATE runs, before any real extraction work happens -- confirmed
+    # live: every one of the 38 documents nightly reprocessing queued for
+    # the first time (2026-09-23) failed within milliseconds this way.
     await session.execute(
         text("""
             UPDATE docintel.documents
             SET processing_status = 'PROCESSING',
+                confirmation_status = 'PENDING',
                 current_processing_run_id = :run_id,
                 updated_at_utc = :now
             WHERE tenant_id = :tid AND document_id = :doc_id
