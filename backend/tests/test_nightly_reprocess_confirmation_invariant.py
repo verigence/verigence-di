@@ -27,11 +27,16 @@ import pytest
 from sqlalchemy import text
 
 from verigence.di.repositories.database import set_tenant_context
-from verigence.di.repositories.tenants import provision_retention_policy, provision_tenant
+from verigence.di.repositories.tenants import (
+    provision_actor,
+    provision_retention_policy,
+    provision_tenant,
+)
 
 
 async def _make_failed_document(db_session, tenant_id: str) -> uuid.UUID:  # type: ignore[no-untyped-def]
     policy_id = await provision_retention_policy(db_session, tenant_id)
+    await provision_actor(db_session, tenant_id, "test-uploader", "USER")
     document_id = uuid.uuid4()
     await db_session.execute(
         text(
@@ -77,7 +82,41 @@ async def test_step_3_moves_a_permanently_failed_document_back_into_processing(
     await db_session.flush()
 
     document_id = await _make_failed_document(db_session, tenant_id)
+    job_id = uuid.uuid4()
     run_id = uuid.uuid4()
+
+    # Step 2 (run_processing_job): the processing_runs row Step 3 immediately
+    # points current_processing_run_id at -- fk_documents_current_processing_run
+    # requires it to already exist by the time Step 3 runs, exactly as in
+    # production, where Step 2 always executes first in the same transaction.
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO docintel.processing_jobs
+                (tenant_id, processing_job_id, document_id, correlation_id,
+                 job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+            VALUES
+                (:tenant_id, :job_id, :document_id, 'test-correlation',
+                 'NIGHTLY_REPROCESS', 'RUNNING', now(), 3, now())
+            """
+        ),
+        {"tenant_id": tenant_id, "job_id": job_id, "document_id": document_id},
+    )
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO docintel.processing_runs
+                (tenant_id, processing_run_id, processing_job_id, document_id,
+                 correlation_id, run_type, run_status, pipeline_version,
+                 started_at_utc, created_at_utc)
+            VALUES
+                (:tenant_id, :run_id, :job_id, :document_id,
+                 'test-correlation', 'NIGHTLY_REPROCESS', 'RUNNING', 'test-pipeline',
+                 now(), now())
+            """
+        ),
+        {"tenant_id": tenant_id, "run_id": run_id, "job_id": job_id, "document_id": document_id},
+    )
 
     # The exact statement job_runner.py's _execute_steps runs at Step 3 --
     # must not raise ck_documents_confirmation_invariants.
