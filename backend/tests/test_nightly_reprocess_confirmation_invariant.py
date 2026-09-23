@@ -27,26 +27,29 @@ import pytest
 from sqlalchemy import text
 
 from verigence.di.repositories.database import set_tenant_context
-from verigence.di.repositories.tenants import provision_tenant
+from verigence.di.repositories.tenants import provision_retention_policy, provision_tenant
 
 
 async def _make_failed_document(db_session, tenant_id: str) -> uuid.UUID:  # type: ignore[no-untyped-def]
+    policy_id = await provision_retention_policy(db_session, tenant_id)
     document_id = uuid.uuid4()
     await db_session.execute(
         text(
             """
             INSERT INTO docintel.documents (
-                tenant_id, document_id, upload_status, retention_disposition,
+                tenant_id, document_id, active_retention_policy_id,
+                upload_status, retention_disposition,
                 source_channel, uploaded_by_actor_type, uploaded_by_actor_id,
                 registered_at_utc, correlation_id, created_at_utc, updated_at_utc
             ) VALUES (
-                :tenant_id, :document_id, 'FIT', 'PURGE_CONTENT',
+                :tenant_id, :document_id, :policy_id,
+                'FIT', 'PURGE_CONTENT',
                 'WEB', 'USER', 'test-uploader',
                 now(), 'test-correlation', now(), now()
             )
             """
         ),
-        {"tenant_id": tenant_id, "document_id": document_id},
+        {"tenant_id": tenant_id, "document_id": document_id, "policy_id": policy_id},
     )
     # Reach the exact terminal state fail_job() leaves a permanently-FAILED
     # document in -- the state every NIGHTLY_REPROCESS-eligible document is
