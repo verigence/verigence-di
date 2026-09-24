@@ -525,7 +525,18 @@ def _parse_response(
             continue
 
         confidence = _CONFIDENCE_MAP.get(conf_str, Decimal("40.00"))
-        str_value = str(raw_value) if not isinstance(raw_value, str) else raw_value
+        # A plain str() on an array/object value (e.g. an invoice's line_items)
+        # produces Python's single-quoted repr, which is not valid JSON and can
+        # never be parsed back into a list/dict downstream -- confirmed live:
+        # RTO Challan and Accessory Invoice line_items landed as an unparseable
+        # string in journey_document_extracted_fields, silently discarding the
+        # itemized breakdown. json.dumps preserves round-trippability.
+        if isinstance(raw_value, str):
+            str_value = raw_value
+        elif isinstance(raw_value, (list, dict)):
+            str_value = json.dumps(raw_value)
+        else:
+            str_value = str(raw_value)
 
         results.append(
             FieldResult(
