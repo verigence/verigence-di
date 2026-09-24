@@ -434,6 +434,12 @@ def upgrade() -> None:
             ),
             {"tid": tenant_id, "did": document_id},
         )
+        # Caught live on the real DB (not locally, no docker here): 0036's
+        # own ON CONFLICT (tenant_id, document_id, job_type) matched that
+        # migration's OWN unique constraint at the time it ran -- 0040
+        # (Nightly Reprocessing), which comes after 0036 but before this
+        # migration, renamed/widened it to include attempt_no. Match the
+        # constraint as it exists today, not as 0036 copied it.
         conn.execute(
             sa.text(
                 """
@@ -443,7 +449,7 @@ def upgrade() -> None:
                 VALUES
                     (:tid, gen_random_uuid(), :did, :corr,
                      'INITIAL', 'PENDING', now(), 1, now())
-                ON CONFLICT (tenant_id, document_id, job_type) DO NOTHING
+                ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
                 """
             ),
             {"tid": tenant_id, "did": document_id, "corr": f"backfill.0046.{document_id}"},
