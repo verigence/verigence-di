@@ -62,6 +62,7 @@ async def mark_audit_link_attempt(
     document_id: UUID,
     acknowledged: bool,
     error_summary: str | None = None,
+    retryable: bool = True,
 ) -> None:
     """Record one Audit-link delivery attempt without ambiguous timestamp binds.
 
@@ -72,14 +73,26 @@ async def mark_audit_link_attempt(
 
     ``error_summary`` must be a safe technical code/detail and never raw exception
     or downstream response text.
+
+    ``retryable`` decides the terminal state of a failed attempt. Found live
+    (2026-09-24): a non-retryable failure (e.g. VAC-NF-006, a stale
+    requirement_ref that can never become valid again) used to be written
+    back as 'PENDING' regardless -- claim_pending_audit_link's own WHERE
+    clause only excludes rows that are NOT 'PENDING', so the exact same
+    permanently-broken link kept getting reclaimed and retried forever
+    (observed at 900+ attempts, ~15 hours, for a handful of documents).
+    A non-retryable failure now writes the terminal 'FAILED' status
+    instead, which claim_pending_audit_link naturally never reclaims
+    again. A retryable failure keeps the existing 'PENDING' behavior.
     """
+    status_expr = "CASE WHEN :ack THEN 'ACKNOWLEDGED' WHEN :retryable THEN 'PENDING' ELSE 'FAILED' END"
     await session.execute(
         text(
-            """
+            f"""
             UPDATE docintel.documents
             SET audit_link_attempt_count        = audit_link_attempt_count + 1,
                 audit_link_last_attempt_at_utc  = now(),
-                audit_link_status               = CASE WHEN :ack THEN 'ACKNOWLEDGED' ELSE 'PENDING' END,
+                audit_link_status               = {status_expr},
                 audit_link_acknowledged_at_utc  = CASE WHEN :ack THEN now() ELSE NULL END,
                 audit_link_last_error           = CASE WHEN :ack THEN NULL ELSE :error END,
                 updated_at_utc                  = now()
@@ -92,6 +105,7 @@ async def mark_audit_link_attempt(
             "tenant_id": tenant_id,
             "document_id": document_id,
             "ack": acknowledged,
+            "retryable": retryable,
             "error": (error_summary or "")[:1000] or None,
         },
     )

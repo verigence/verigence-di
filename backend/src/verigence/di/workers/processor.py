@@ -276,9 +276,11 @@ class ProcessingWorker(_NotifyWorker):
                     document_id=document_id,
                     acknowledged=False,
                     error_summary=f"{failure.code}: {safe_detail}",
+                    retryable=failure.retryable,
                 )
                 link_log.warning(
-                    "audit_document_link_delivery_failed",
+                    "audit_document_link_delivery_failed" if failure.retryable
+                    else "audit_document_link_delivery_permanently_failed",
                     attempt=int(link["audit_link_attempt_count"]) + 1,
                     error_code=failure.code,
                     retryable=failure.retryable,
