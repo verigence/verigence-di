@@ -47,6 +47,14 @@ branch_labels = None
 depends_on = None
 
 _ACTOR = "migration.0046.uc03-delivery-extraction-profile-gaps"
+# Same rule migration 0042 registered and wires onto every DATE field of
+# every published, tenant-agnostic profile -- 0042 could only retrofit
+# profiles that already existed at the time; a brand new profile has to
+# wire this itself. Cheap to do here directly (INSERT while still DRAFT)
+# rather than 0042's clone-and-republish dance, which exists only because
+# profile_field_validators is guarded immutable once PUBLISHED (see
+# 0042's own docstring) -- these fields have never been published yet.
+_DATE_VALIDATOR_RULE_KEY = "date_plausible_range"
 
 _GAP_TYPE_KEYS = (
     "minimum_booking_payment_proof",
@@ -283,6 +291,27 @@ def _add_field(
     )
 
 
+def _wire_date_plausibility_validator(conn: Any, profile_id: Any) -> None:
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO docintel.profile_field_validators (
+                profile_field_validator_id, profile_field_id,
+                sequence_no, rule_key, parameters, severity
+            )
+            SELECT gen_random_uuid(), epf.profile_field_id, 1, :rule_key, '{}'::jsonb, 'ERROR'
+            FROM docintel.extraction_profile_fields epf
+            JOIN docintel.canonical_fields cf
+              ON cf.canonical_field_id = epf.canonical_field_id
+            WHERE epf.profile_id = :profile_id
+              AND cf.data_type = 'DATE'
+              AND epf.enabled = true
+            """
+        ),
+        {"profile_id": profile_id, "rule_key": _DATE_VALIDATOR_RULE_KEY},
+    )
+
+
 def upgrade() -> None:
     conn = op.get_bind()
 
@@ -337,6 +366,8 @@ def upgrade() -> None:
                 expected=expected, instruction=instruction, aliases=aliases,
                 score_included=score_included, score_weight=score_weight, display_sequence=seq,
             )
+
+        _wire_date_plausibility_validator(conn, profile_id)
 
         conn.execute(
             sa.text(
