@@ -266,6 +266,8 @@ async def generate_schema_proposal(
         artifact_bytes=artifact_bytes,
         mime_type=mime_type,
         prompt=prompt,
+        # Rare admin authoring of a new schema: keep the model's own reasoning.
+        thinking_level="",
     )
     try:
         raw = json.loads(raw_text)

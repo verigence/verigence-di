@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     # Gemini 2.5 Flash — AI/OCR provider (D19, supersedes D13 Azure)
     docai_mock: bool = True          # True = use mock adapter (local/CI)
     docai_gemini_api_key: str = ""   # Google AI Studio API key
+    # Cost controls. Gemini 3 "thinks" at a HIGH level by default and thinking
+    # tokens are billed as output -- the largest cost of a document. Reading a
+    # document against a schema needs little reasoning: classification uses
+    # MINIMAL and extraction LOW. "" leaves the model default.
+    docai_gemini_classification_thinking_level: str = "minimal"
+    docai_gemini_extraction_thinking_level: str = "low"
+    # Hard cap on a single answer (thinking included) so a runaway response
+    # cannot bill unbounded output; far above any schema's normal answer.
+    docai_gemini_max_output_tokens: int = 16384
 
     # Sentry
     sentry_dsn: str = ""
@@ -145,6 +154,17 @@ class Settings(BaseSettings):
                     "DI_DOCAI_GEMINI_API_KEY must be set when DI_DOCAI_MOCK=false in production"
                 )
         return self
+
+    @field_validator(
+        "docai_gemini_classification_thinking_level",
+        "docai_gemini_extraction_thinking_level",
+    )
+    @classmethod
+    def _thinking_level(cls, v: str) -> str:
+        value = v.strip().lower()
+        if value not in {"", "minimal", "low", "medium", "high"}:
+            raise ValueError("Gemini thinking level must be minimal, low, medium, high or empty")
+        return value
 
     @field_validator("database_url")
     @classmethod

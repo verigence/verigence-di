@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.application.intake import _detect_mime
-from verigence.di.document_ai.v2_classifier import classify_document_v2
+from verigence.di.document_ai.v2_classifier import V2ClassificationResult, classify_document_v2
 from verigence.di.domain.enums import UploadStatus
 from verigence.di.quality.validator import validate_upload
 from verigence.di.repositories.database import tenant_session
@@ -44,6 +44,17 @@ from verigence.di.storage.adapter import get_storage_adapter
 
 logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
+
+
+def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
+    """The type to accept without a provider call, or None to classify.
+
+    Only an explicit TRUST_SINGLE_CANDIDATE upload whose single candidate is
+    still an active type for the tenant is trusted; anything else is
+    classified from the bytes as before."""
+    if mode != "TRUST_SINGLE_CANDIDATE" or len(candidate_keys) != 1:
+        return None
+    return candidate_keys[0]
 
 
 def _worker_id() -> str:
@@ -271,6 +282,7 @@ class CaptureV2ClassificationWorker:
                         """
                         SELECT u.logical_object_key, u.candidate_document_type_keys,
                                u.requirement_refs_by_document_type_key,
+                               u.classification_mode,
                                u.declared_mime_type, u.state,
                                d.original_filename, d.correlation_id
                         FROM docintel.document_capture_v2_uploads u
@@ -390,13 +402,28 @@ class CaptureV2ClassificationWorker:
             ).scalar_one()
             await session.commit()
 
-        result = await classify_document_v2(
-            document_bytes=document_bytes,
-            mime_type=validation.detected_mime or detected_mime,
-            candidates=[
-                (r["document_type_key"], r["display_name"]) for r in candidates
-            ],
+        trusted = trusted_single_candidate(
+            str(row.get("classification_mode") or "CLASSIFY"),
+            [str(r["document_type_key"]) for r in candidates],
         )
+        if trusted is not None:
+            # The caller already classified this document (e.g. Audit Core's
+            # merged pages of one business document): no second paid call.
+            result = V2ClassificationResult(
+                document_type_key=trusted,
+                confidence=Decimal("100"),
+                provider_request_id=str(uuid.uuid4()),
+                raw_provider_response={"trustedSingleCandidate": True, "documentTypeKey": trusted},
+            )
+            log.info("capture_v2_classification_trusted", document_type_key=trusted)
+        else:
+            result = await classify_document_v2(
+                document_bytes=document_bytes,
+                mime_type=validation.detected_mime or detected_mime,
+                candidates=[
+                    (r["document_type_key"], r["display_name"]) for r in candidates
+                ],
+            )
         accepted = (
             result.document_type_key
             if result.document_type_key is not None
