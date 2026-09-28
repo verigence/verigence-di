@@ -57,6 +57,9 @@ class V2UploadIntentCommand(BaseModel):
     phase: Literal["BOOKING", "DELIVERY"]
     candidateDocumentTypeKeys: list[str] = Field(min_length=1, max_length=64)
     requirementRefsByDocumentTypeKey: dict[str, UUID] = Field(default_factory=dict)
+    # TRUST_SINGLE_CANDIDATE: the caller already knows the type (exactly one
+    # candidate), so DI skips the paid classification call and uses it.
+    classificationMode: Literal["CLASSIFY", "TRUST_SINGLE_CANDIDATE"] = "CLASSIFY"
     files: list[V2UploadIntentItem] = Field(min_length=1, max_length=20)
 
 
@@ -239,6 +242,11 @@ async def create_capture_upload_intents(
         raise http_exception(
             ErrorCode.INVALID_REQUEST, detail="Candidate document types are required"
         )
+    if command.classificationMode == "TRUST_SINGLE_CANDIDATE" and len(candidate_keys) != 1:
+        raise http_exception(
+            ErrorCode.INVALID_REQUEST,
+            detail="TRUST_SINGLE_CANDIDATE needs exactly one candidate document type.",
+        )
 
     requirement_refs = {
         key.strip(): str(value)
@@ -363,6 +371,7 @@ async def create_capture_upload_intents(
                                     logical_object_key, original_filename, declared_mime_type,
                                     candidate_document_type_keys,
                                     requirement_refs_by_document_type_key,
+                                    classification_mode,
                                     state, created_at_utc, updated_at_utc
                                 ) VALUES (
                                     :tenant_id, :document_id, :storage_context_id,
@@ -370,6 +379,7 @@ async def create_capture_upload_intents(
                                     :logical_key, :filename, :content_type,
                                     CAST(:candidate_keys AS jsonb),
                                     CAST(:requirement_refs AS jsonb),
+                                    :classification_mode,
                                     'RECEIVING', now(), now()
                                 )
                                 """
@@ -388,6 +398,7 @@ async def create_capture_upload_intents(
                                 "content_type": item.contentType,
                                 "candidate_keys": json.dumps(candidate_keys),
                                 "requirement_refs": requirement_refs_json,
+                                "classification_mode": command.classificationMode,
                             },
                         )
                     else:

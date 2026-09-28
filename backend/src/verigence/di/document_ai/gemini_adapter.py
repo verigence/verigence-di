@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -30,9 +31,11 @@ from verigence.di.document_ai.adapter import (
     ExtractionField,
     FieldResult,
 )
+from verigence.di.document_ai.gemini_cost import GeminiUsage, generation_config, usage_from_response
 from verigence.di.document_ai.schemas import get_schema
 from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 from verigence.di.domain.enums import AICapability, FoundStatus
+from verigence.di.settings import get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -132,6 +135,9 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         provider_request_id = str(uuid.uuid4())
         raw_response: str | None = None
         field_results: list[FieldResult] | None = None
+        settings = get_settings()
+        thinking_level = settings.docai_gemini_extraction_thinking_level
+        usages: list[GeminiUsage] = []
         last_error: str | None = None
         call_start = _t.monotonic()
         prompt_tokens = 0
@@ -146,6 +152,9 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                         artifact_bytes=artifact_bytes,
                         mime_type=mime_type,
                         prompt=prompt,
+                        thinking_level=thinking_level,
+                        max_output_tokens=settings.docai_gemini_max_output_tokens,
+                        on_usage=usages.append,
                     )
                 )
                 log.debug(
@@ -165,11 +174,16 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                     raw_snippet=(raw_response or "")[:300],
                 )
                 if attempt == 0:
+                    truncated = bool(usages) and usages[-1].truncated
+                    if truncated:
+                        # The answer hit the output cap: think less on the
+                        # one retry rather than paying for the same cut-off.
+                        thinking_level = "minimal"
                     log.warning(
                         "gemini_retry",
                         document_type_key=document_type_key,
                         attempt=attempt + 1,
-                        reason="parse_failure",
+                        reason="output_truncated" if truncated else "parse_failure",
                     )
                     await asyncio.sleep(1)
                     continue
@@ -232,6 +246,8 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         localized_fields = sum(1 for fr in field_results if fr.evidence_region is not None)
         page_localized_fields = sum(1 for fr in field_results if fr.page_no is not None)
 
+        thoughts_tokens = sum(u.thoughts_tokens for u in usages)
+        billed_output_tokens = sum(u.billed_output_tokens for u in usages)
         log.info(
             "gemini_response",
             document_type_key=document_type_key,
@@ -240,6 +256,11 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             duration_ms=duration_ms,
             prompt_tokens=prompt_tokens,
             response_tokens=response_tokens,
+            thoughts_tokens=thoughts_tokens,
+            billed_output_tokens=billed_output_tokens,
+            billed_prompt_tokens=sum(u.prompt_tokens for u in usages),
+            provider_calls=len(usages),
+            thinking_level=settings.docai_gemini_extraction_thinking_level or "model-default",
             fields_extracted=fields_found,
             fields_null=fields_null,
             fields_low_confidence=fields_low,
@@ -277,6 +298,12 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             "fields_with_evidence_region": localized_fields,
             "prompt_tokens": prompt_tokens,
             "response_tokens": response_tokens,
+            "thoughts_tokens": thoughts_tokens,
+            "billed_output_tokens": billed_output_tokens,
+            "billed_prompt_tokens": sum(u.prompt_tokens for u in usages),
+            "provider_calls": len(usages),
+            "thinking_level": settings.docai_gemini_extraction_thinking_level or None,
+            "finish_reason": usages[-1].finish_reason if usages else None,
             "duration_ms": duration_ms,
         }
 
@@ -302,8 +329,9 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
         f"Document type: {schema.display_name}",
         "",
         "Extract the following fields from this document.",
-        "Return ONLY valid JSON with exactly this structure:",
+        "Return ONLY valid JSON: one object whose keys are the fields listed below.",
         "Return one JSON object only. Do not wrap the object in an array.",
+        "Include ONLY the fields whose value you found; leave out every other field.",
         "{",
     ]
 
@@ -335,22 +363,20 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
         lines.append(
             f'  "{db_field.field_key}": '
             f'{{"value": <{field_type}>, "confidence": "high"|"medium"|"low", '
-            '"pageNo": <1-based integer|null>, '
-            '"box_2d": <[ymin,xmin,ymax,xmax] normalized 0..1000|null>}},'
+            '"pageNo": <1-based integer>, '
+            '"box_2d": <[ymin,xmin,ymax,xmax] normalized 0..1000>}},'
             f"  // {required_flag}{aliases_str} {description}".rstrip(),
         )
 
     lines += [
         "}",
         "",
-        (
-            'Use {"value": null, "confidence": "low", "pageNo": null, '
-            '"box_2d": null} for any field not found.'
-        ),
-        "Never guess — return null + low confidence if a value is uncertain.",
+        "Leave out any field that is not on the document; never return null placeholders.",
+        "Never guess — leave a field out if its value is uncertain.",
         (
             "For each FOUND value, return pageNo and box_2d only when you can localize "
-            "the exact printed or handwritten value on the source document."
+            "the exact printed or handwritten value on the source document; otherwise "
+            "leave pageNo and box_2d out."
         ),
         (
             "box_2d must be [ymin, xmin, ymax, xmax] with coordinates normalized from "
@@ -358,7 +384,7 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
         ),
         (
             "For a single image pageNo is 1. For a PDF pageNo is the 1-based PDF page. "
-            "If page or box location is uncertain, return null for that location metadata."
+            "If page or box location is uncertain, leave that location metadata out."
         ),
         "Never infer, approximate, or invent a page number or bounding box.",
     ]
@@ -372,7 +398,16 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
     return "\n".join(lines)
 
 
-def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict[str, Any]:
+def _build_payload(
+    artifact_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+    *,
+    thinking_level: str | None = None,
+    max_output_tokens: int | None = None,
+) -> dict[str, Any]:
+    """``thinking_level`` None uses the extraction setting; "" the model default."""
+    settings = get_settings()
     effective_mime = mime_type if mime_type else "application/octet-stream"
     image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
     return {
@@ -384,10 +419,16 @@ def _build_payload(artifact_bytes: bytes, mime_type: str, prompt: str) -> dict[s
                 ]
             }
         ],
-        "generationConfig": {
-            "temperature": 0,
-            "responseMimeType": "application/json",
-        },
+        "generationConfig": generation_config(
+            thinking_level=(
+                settings.docai_gemini_extraction_thinking_level
+                if thinking_level is None else thinking_level
+            ),
+            max_output_tokens=(
+                settings.docai_gemini_max_output_tokens
+                if max_output_tokens is None else max_output_tokens
+            ),
+        ),
     }
 
 
@@ -396,9 +437,19 @@ async def _call_gemini_instrumented(
     artifact_bytes: bytes,
     mime_type: str,
     prompt: str,
+    *,
+    thinking_level: str | None = None,
+    max_output_tokens: int | None = None,
+    on_usage: Callable[[GeminiUsage], None] | None = None,
 ) -> tuple[str, int, int, int]:
-    """Send document bytes + prompt to Gemini with token instrumentation."""
-    payload = _build_payload(artifact_bytes, mime_type, prompt)
+    """Send document bytes + prompt to Gemini with token instrumentation.
+
+    Returns (text, status, prompt tokens, answer tokens); ``on_usage``
+    receives the full accounting, thinking tokens included."""
+    payload = _build_payload(
+        artifact_bytes, mime_type, prompt,
+        thinking_level=thinking_level, max_output_tokens=max_output_tokens,
+    )
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
@@ -412,9 +463,11 @@ async def _call_gemini_instrumented(
         raise GeminiApiError(http_status, resp.text[:500])
 
     data = resp.json()
-    usage = data.get("usageMetadata", {})
-    prompt_tokens = usage.get("promptTokenCount", 0)
-    response_tokens = usage.get("candidatesTokenCount", 0)
+    usage = usage_from_response(data)
+    if on_usage is not None:
+        on_usage(usage)
+    prompt_tokens = usage.prompt_tokens
+    response_tokens = usage.response_tokens
 
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]

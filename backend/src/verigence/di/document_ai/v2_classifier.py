@@ -20,9 +20,11 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import structlog
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from verigence.di.document_ai.gemini_cost import generation_config, usage_from_response
 from verigence.di.document_ai.invoice_taxonomy import (
     GENERIC_INVOICE_TYPE_KEY,
     INVOICE_CLASSIFICATION_HINTS,
@@ -35,6 +37,7 @@ _GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{_GEMINI_MODEL}:generateContent"
 )
+_logger = structlog.get_logger(__name__)
 _GEMINI_CLIENT: httpx.AsyncClient | None = None
 _GEMINI_CLIENT_LOCK = asyncio.Lock()
 
@@ -174,10 +177,11 @@ async def classify_document_v2(
                 ]
             }
         ],
-        "generationConfig": {
-            "temperature": 0,
-            "responseMimeType": "application/json",
-        },
+        # The answer is a one-line JSON object: minimal thinking, small cap.
+        "generationConfig": generation_config(
+            thinking_level=settings.docai_gemini_classification_thinking_level,
+            max_output_tokens=min(settings.docai_gemini_max_output_tokens, 2048),
+        ),
     }
     client = await _gemini_client()
     response = await client.post(
@@ -191,6 +195,14 @@ async def classify_document_v2(
         )
 
     raw = response.json()
+    usage = usage_from_response(raw)
+    _logger.info(
+        "gemini_classification_usage",
+        gemini_model=_GEMINI_MODEL,
+        candidate_count=len(effective_candidates),
+        thinking_level=settings.docai_gemini_classification_thinking_level or "model-default",
+        **usage.as_metrics(),
+    )
     try:
         text = raw["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(text)
