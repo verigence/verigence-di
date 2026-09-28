@@ -15,11 +15,13 @@ from __future__ import annotations
 
 from verigence.di.document_ai.schemas._fallback import FALLBACK_SCHEMA
 from verigence.di.document_ai.schemas.aadhaar import AADHAAR_SCHEMA
+from verigence.di.document_ai.schemas.authorization_letter import AUTHORIZATION_LETTER_SCHEMA
 from verigence.di.document_ai.schemas.bank_approval_letter import BANK_APPROVAL_LETTER_SCHEMA
 from verigence.di.document_ai.schemas.bank_statement import BANK_STATEMENT_SCHEMA
 from verigence.di.document_ai.schemas.base import SchemaDefinition
 from verigence.di.document_ai.schemas.booking_form import BOOKING_FORM_SCHEMA
 from verigence.di.document_ai.schemas.corporate_id import CORPORATE_ID_SCHEMA
+from verigence.di.document_ai.schemas.cost_sheet import COST_SHEET_SCHEMA
 from verigence.di.document_ai.schemas.customer_kyc import CUSTOMER_KYC_SCHEMA
 from verigence.di.document_ai.schemas.customer_ledger import CUSTOMER_LEDGER_SCHEMA
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
@@ -40,14 +42,18 @@ from verigence.di.document_ai.schemas.invoice import (
     TAX_INVOICE_TALLY_SCHEMA,
     WHOLESALE_INVOICE_SCHEMA,
 )
+from verigence.di.document_ai.schemas.no_dues_certificate import NO_DUES_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.pan_card import PAN_CARD_SCHEMA
 from verigence.di.document_ai.schemas.payment_receipt import PAYMENT_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.purchase_order import PURCHASE_ORDER_SCHEMA
 from verigence.di.document_ai.schemas.rto_challan import RTO_CHALLAN_SCHEMA
 from verigence.di.document_ai.schemas.scrappage_certificate import SCRAPPAGE_CERTIFICATE_SCHEMA
+from verigence.di.document_ai.schemas.transfer_letter import TRANSFER_LETTER_SCHEMA
 from verigence.di.document_ai.schemas.upi_screenshot import UPI_SCREENSHOT_SCHEMA
 from verigence.di.document_ai.schemas.upi_transaction import UPI_TRANSACTION_SCHEMA
 from verigence.di.document_ai.schemas.valuation_report import VALUATION_REPORT_SCHEMA
+from verigence.di.document_ai.schemas.value_added_service import VALUE_ADDED_SERVICE_SCHEMA
+from verigence.di.document_ai.schemas.vehicle_rc import VEHICLE_RC_SCHEMA
 
 __all__ = [
     "SCHEMA_REGISTRY",
@@ -102,6 +108,17 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     # Form's scrappage_discount_amount (0033), previously unclassifiable
     # (see verigence-audit-core's BK_SCRAPPAGE_DOCUMENT_UNCLASSIFIED finding).
     "scrappage_certificate_of_deposit": SCRAPPAGE_CERTIFICATE_SCHEMA,
+    # Migration 0046 published extraction profiles for these UC03 types, but
+    # without a registry entry they were extracted by FALLBACK_SCHEMA's
+    # generic prompt at medium confidence. Dedicated schemas keep exactly the
+    # published profile keys (D25 consistency) and add document-specific
+    # prompts, types and normalisation.
+    "vehicle_rc": VEHICLE_RC_SCHEMA,
+    "transfer_letter": TRANSFER_LETTER_SCHEMA,
+    "authorization_letter": AUTHORIZATION_LETTER_SCHEMA,
+    "cost_sheet": COST_SHEET_SCHEMA,
+    "value_added_service_document": VALUE_ADDED_SERVICE_SCHEMA,
+    "no_dues_certificate": NO_DUES_CERTIFICATE_SCHEMA,
 }
 
 
