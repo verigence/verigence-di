@@ -36,9 +36,13 @@ from verigence.di.repositories.audit_links import (
 )
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
+    SUPERSEDED_ERROR_CODE,
+    cancel_superseded_job,
     claim_next_non_v2_job,
     claim_next_v2_job,
+    close_job_after_handler_error,
     complete_job,
+    document_processing_status,
     fail_job,
     retry_job,
     schedule_v2_fast_retry,
@@ -459,6 +463,17 @@ async def _execute_claimed_job(
     )
     job_log.info("job_claimed")
 
+    # A retry / nightly reprocess queued while the document was failing may
+    # run after another attempt already PROCESSED it: nothing to do.
+    if job_type != "INITIAL":
+        async with session_factory() as session, session.begin():
+            status = await document_processing_status(session, tenant_id=tenant_id, document_id=document_id)
+            if status == "PROCESSED":
+                await cancel_superseded_job(session, tenant_id=tenant_id, processing_job_id=job_id)
+        if status == "PROCESSED":
+            job_log.info("job_superseded", error_code=SUPERSEDED_ERROR_CODE)
+            return
+
     job_start = time.monotonic()
     async with session_factory() as session:
         try:
@@ -489,7 +504,7 @@ async def _execute_claimed_job(
                     total_duration_ms=total_ms,
                 )
             else:
-                await _handle_failure(
+                await _handle_failure_safely(
                     session_factory=session_factory,
                     tenant_id=tenant_id,
                     job_id=job_id,
@@ -512,7 +527,7 @@ async def _execute_claimed_job(
                 retryable=failure.retryable,
                 **safe_exception_context(exc),
             )
-            await _handle_failure(
+            await _handle_failure_safely(
                 session_factory=session_factory,
                 tenant_id=tenant_id,
                 job_id=job_id,
@@ -525,6 +540,28 @@ async def _execute_claimed_job(
                 attempt_no=int(job["attempt_no"]),
                 is_capture_v2=is_capture_v2,
                 job_log=job_log,
+            )
+
+
+async def _handle_failure_safely(**kwargs: Any) -> None:
+    """_handle_failure, and if recording the failure itself fails, close
+    the job anyway: left RUNNING, the stale-job reaper would reset and re-run
+    it every lease period, forever (seen live for NIGHTLY_REPROCESS)."""
+    try:
+        await _handle_failure(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        failure = technical_failure(exc, operation="worker")
+        kwargs["job_log"].error(
+            "job_failure_handling_failed",
+            error_code=failure.code,
+            **safe_exception_context(exc),
+        )
+        async with kwargs["session_factory"]() as session, session.begin():
+            await close_job_after_handler_error(
+                session,
+                tenant_id=kwargs["tenant_id"],
+                processing_job_id=kwargs["job_id"],
+                error_code=kwargs.get("error_code") or failure.code,
             )
 
 

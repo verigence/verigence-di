@@ -409,6 +409,14 @@ async def insert_nightly_reprocessing_jobs(
                   ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
                 WHERE d.upload_status = 'FIT'
                   AND d.processing_status = 'FAILED'
+                  -- one attempt at a time: a document whose earlier attempt
+                  -- is still pending or running gets no second job alongside
+                  AND NOT EXISTS (
+                      SELECT 1 FROM docintel.processing_jobs active
+                      WHERE active.tenant_id = d.tenant_id
+                        AND active.document_id = d.document_id
+                        AND active.job_status IN ('PENDING', 'RUNNING')
+                  )
             """),
             {"first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO},
         )
@@ -455,6 +463,66 @@ async def insert_nightly_reprocessing_jobs(
     return queued
 
 
+SUPERSEDED_ERROR_CODE = "SUPERSEDED_ALREADY_PROCESSED"
+
+
+async def document_processing_status(
+    session: AsyncSession, *, tenant_id: str, document_id: uuid.UUID,
+) -> str | None:
+    return (
+        await session.execute(
+            text(
+                "SELECT processing_status FROM docintel.documents "
+                "WHERE tenant_id = :tenant_id AND document_id = :document_id"
+            ),
+            {"tenant_id": tenant_id, "document_id": document_id},
+        )
+    ).scalar_one_or_none()
+
+
+async def cancel_superseded_job(
+    session: AsyncSession, *, tenant_id: str, processing_job_id: uuid.UUID,
+) -> None:
+    """A retry/reprocess job whose document another attempt already
+    PROCESSED: nothing to do, and re-running it would put a CONFIRMED
+    document back into PROCESSING (ck_documents_confirmation_invariants)."""
+    await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'CANCELLED',
+                completed_at_utc = :now,
+                error_code = :error_code,
+                error_detail = 'The document was already processed by another attempt.'
+            WHERE tenant_id = :tenant_id
+              AND processing_job_id = :job_id
+              AND job_status IN ('PENDING', 'RUNNING')
+        """),
+        {"now": datetime.now(UTC), "error_code": SUPERSEDED_ERROR_CODE,
+         "tenant_id": tenant_id, "job_id": processing_job_id},
+    )
+
+
+async def close_job_after_handler_error(
+    session: AsyncSession, *, tenant_id: str, processing_job_id: uuid.UUID, error_code: str,
+) -> None:
+    """Last resort when recording a failure itself failed: close the job
+    so the stale-job reaper does not re-run it every lease period."""
+    await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'FAILED',
+                completed_at_utc = :now,
+                error_code = :error_code,
+                error_detail = 'Recording the processing failure failed; see worker logs.'
+            WHERE tenant_id = :tenant_id
+              AND processing_job_id = :job_id
+              AND job_status = 'RUNNING'
+        """),
+        {"now": datetime.now(UTC), "error_code": _cap(error_code, _MAX_ERROR_CODE),
+         "tenant_id": tenant_id, "job_id": processing_job_id},
+    )
+
+
 async def fail_job(
     session: AsyncSession,
     *,
@@ -490,6 +558,10 @@ async def fail_job(
             "job_id": processing_job_id,
         },
     )
+    # A job that fails for a document another attempt already PROCESSED
+    # must not demote it: FAILED with that attempt's scores violates
+    # ck_documents_confirmation_invariants, and the failure handler itself
+    # raising left the job RUNNING for the stale-job reaper to retry forever.
     await session.execute(
         text("""
             UPDATE docintel.documents
@@ -500,6 +572,7 @@ async def fail_job(
                 updated_at_utc = :now
             WHERE tenant_id = :tenant_id
               AND document_id = :doc_id
+              AND processing_status <> 'PROCESSED'
         """),
         {
             "now": now,
