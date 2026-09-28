@@ -391,7 +391,7 @@ class CaptureV2ClassificationWorker:
                     {"tenant_id": tenant_id, "candidate_keys": candidate_keys},
                 )
             ).mappings().all()
-            threshold = (
+            threshold: object = (
                 await session.execute(
                     text(
                         "SELECT classification_acceptance_score "
