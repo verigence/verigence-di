@@ -149,7 +149,7 @@ async def create_document_type(
         ).mappings().one()
 
     logger.info(
-        "extraction_profile_created",
+        "document_type_created",
         tenant_id=tenant_id,
         actor_id=actor.actor_id,
         document_type_key=key,
@@ -261,10 +261,13 @@ async def update_document_type(
         ).mappings().one()
 
     logger.info(
-        "extraction_profile_created",
+        "document_type_updated",
         tenant_id=tenant_id,
         actor_id=actor.actor_id,
+        document_type_id=str(row[0]),
         document_type_key=document_type_key,
+        display_name_changed=display_name is not None,
+        description_changed=description is not None,
     )
     return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_doc_type(updated)).model_dump()
 
@@ -513,11 +516,12 @@ async def update_draft_extraction_profile(
         ).mappings().one()
 
     logger.info(
-        "extraction_profile_created",
+        "extraction_profile_updated",
         tenant_id=tenant_id,
         actor_id=actor.actor_id,
         profile_id=str(profile_id),
         document_type_key=document_type_key,
+        profile_name_changed=profile_name is not None,
     )
     return ApiResponse(errorCode="000", errorMessage="Success", data=_fmt_extraction_profile(updated)).model_dump()
 

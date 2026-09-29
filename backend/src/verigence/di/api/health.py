@@ -5,14 +5,17 @@
 """
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from verigence.di.repositories.database import AsyncSessionFactory
+from verigence.di.runtime_errors import safe_exception_context
 from verigence.di.settings import get_settings
 
 router = APIRouter(tags=["Health"])
+logger = structlog.get_logger(__name__)
 
 
 @router.get("/health/live", include_in_schema=False)
@@ -30,8 +33,14 @@ async def ready() -> JSONResponse:
         async with AsyncSessionFactory() as session:
             await session.execute(text("SELECT 1"))
         db_ready = True
-    except Exception:
+    except Exception as exc:
         db_ready = False
+        logger.warning(
+            "readiness_database_unreachable",
+            error_code="DATABASE_UNAVAILABLE",
+            error_category="DEPENDENCY",
+            **safe_exception_context(exc),
+        )
 
     ready_now = db_ready
     return JSONResponse(

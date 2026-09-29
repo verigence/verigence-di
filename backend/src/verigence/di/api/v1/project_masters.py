@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, File, Header, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import text
@@ -27,6 +28,7 @@ from verigence.di.application.config_imports import (
     REQUIREMENT_PROFILES,
     ConfigImportConflict,
     ConfigImportError,
+    ConfigImportNotFound,
     build_template,
     cancel_config_import,
     confirm_config_import,
@@ -45,6 +47,7 @@ router = APIRouter(
     prefix="/v1/tenants/{tenantId}/project-masters",
     tags=["UC02 Project Masters"],
 )
+logger = structlog.get_logger(__name__)
 
 _MASTER_CATALOG: dict[str, dict[str, Any]] = {
     DOCUMENT_TYPES: {
@@ -78,16 +81,30 @@ def _master_key_or_422(master_key: str) -> str:
     try:
         return normalize_master_key(master_key)
     except ConfigImportError as exc:
-        raise http_exception(ErrorCode.VALIDATION_ERROR, detail=str(exc)) from exc
+        raise http_exception(exc.error, detail=exc.detail) from exc
 
 
-def _import_error(exc: ConfigImportError) -> Exception:
-    if isinstance(exc, ConfigImportConflict):
-        return http_exception(ErrorCode.CONFLICT, detail=str(exc))
-    message = str(exc)
-    if "not found" in message.lower():
-        return http_exception(ErrorCode.DOCUMENT_NOT_FOUND, detail=message)
-    return http_exception(ErrorCode.VALIDATION_ERROR, detail=message)
+def _import_error(
+    exc: ConfigImportError,
+    *,
+    action: str,
+    tenant_id: str,
+    master_key: str,
+    actor_id: str,
+    target_id: uuid.UUID | None = None,
+) -> Exception:
+    """Map a typed import error to its Problem and record the rejected action."""
+    logger.info(
+        "project_master_action_rejected",
+        action=action,
+        tenant_id=tenant_id,
+        master_key=master_key,
+        target_id=str(target_id) if target_id else None,
+        actor_id=actor_id,
+        error_code=exc.error.code,
+        error_category=exc.error.error_category,
+    )
+    return http_exception(exc.error, detail=exc.detail)
 
 
 def _import_payload(header: dict[str, Any], rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -180,7 +197,20 @@ async def upload_project_master_import(
                 session, tenant_id=tenantId, import_id=header["import_id"]
             )
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="stage_import", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id,
+            ) from exc
+    logger.info(
+        "project_master_import_staged",
+        tenant_id=tenantId,
+        master_key=key,
+        import_id=str(header["import_id"]),
+        import_status=header["status"],
+        rows_parsed=header["rows_parsed"],
+        error_rows=header["error_rows"],
+        actor_id=admin.user_id,
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
@@ -195,16 +225,18 @@ async def get_project_master_import(
     importId: uuid.UUID,
     admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
 ) -> ApiResponse[dict[str, Any]]:
-    del admin
     key = _master_key_or_422(masterKey)
     async with tenant_session(tenantId) as session:
         try:
             header = await get_config_import(session, tenant_id=tenantId, import_id=importId)
             if header["master_key"] != key:
-                raise ConfigImportError("Configuration import not found for this master")
+                raise ConfigImportNotFound("Configuration import not found for this master")
             rows = await list_config_import_rows(session, tenant_id=tenantId, import_id=importId)
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="get_import", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id, target_id=importId,
+            ) from exc
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
@@ -219,16 +251,18 @@ async def download_project_master_error_report(
     importId: uuid.UUID,
     admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
 ) -> Response:
-    del admin
     key = _master_key_or_422(masterKey)
     async with tenant_session(tenantId) as session:
         try:
             header = await get_config_import(session, tenant_id=tenantId, import_id=importId)
             if header["master_key"] != key:
-                raise ConfigImportError("Configuration import not found for this master")
+                raise ConfigImportNotFound("Configuration import not found for this master")
             rows = await list_config_import_rows(session, tenant_id=tenantId, import_id=importId)
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="error_report", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id, target_id=importId,
+            ) from exc
     return Response(
         content=error_report_csv(rows),
         media_type="text/csv",
@@ -250,7 +284,7 @@ async def confirm_project_master_import(
         try:
             header = await get_config_import(session, tenant_id=tenantId, import_id=importId)
             if header["master_key"] != key:
-                raise ConfigImportError("Configuration import not found for this master")
+                raise ConfigImportNotFound("Configuration import not found for this master")
             header = await confirm_config_import(
                 session,
                 tenant_id=tenantId,
@@ -259,7 +293,19 @@ async def confirm_project_master_import(
             )
             rows = await list_config_import_rows(session, tenant_id=tenantId, import_id=importId)
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="confirm_import", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id, target_id=importId,
+            ) from exc
+    logger.info(
+        "project_master_import_confirmed",
+        tenant_id=tenantId,
+        master_key=key,
+        import_id=str(importId),
+        import_status=header["status"],
+        result_reference=header.get("result_reference"),
+        actor_id=admin.user_id,
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Import confirmed; DRAFT configuration created",
@@ -274,17 +320,26 @@ async def cancel_project_master_import(
     importId: uuid.UUID,
     admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
 ) -> ApiResponse[dict[str, Any]]:
-    del admin
     key = _master_key_or_422(masterKey)
     async with tenant_session(tenantId) as session:
         try:
             header = await get_config_import(session, tenant_id=tenantId, import_id=importId)
             if header["master_key"] != key:
-                raise ConfigImportError("Configuration import not found for this master")
+                raise ConfigImportNotFound("Configuration import not found for this master")
             await cancel_config_import(session, tenant_id=tenantId, import_id=importId)
             header = await get_config_import(session, tenant_id=tenantId, import_id=importId)
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="cancel_import", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id, target_id=importId,
+            ) from exc
+    logger.info(
+        "project_master_import_cancelled",
+        tenant_id=tenantId,
+        master_key=key,
+        import_id=str(importId),
+        actor_id=admin.user_id,
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Import cancelled",
@@ -429,7 +484,9 @@ async def _publish_version(
             )
         ).mappings().one_or_none()
         if row is None:
-            raise ConfigImportError("Document Type version not found")
+            raise ConfigImportNotFound(
+                "Document Type version not found", ErrorCode.DOCUMENT_TYPE_NOT_FOUND
+            )
         if row["status"] == "ACTIVE":
             return
         if row["status"] != "DRAFT":
@@ -481,7 +538,9 @@ async def _publish_version(
             )
         ).mappings().one_or_none()
         if row is None:
-            raise ConfigImportError("Extraction Profile version not found")
+            raise ConfigImportNotFound(
+                "Extraction Profile version not found", ErrorCode.EXTRACTION_PROFILE_NOT_FOUND
+            )
         if row["status"] == "PUBLISHED":
             return
         if row["status"] != "DRAFT":
@@ -536,7 +595,9 @@ async def _publish_version(
         )
     ).mappings().one_or_none()
     if row is None:
-        raise ConfigImportError("Requirement Profile version not found")
+        raise ConfigImportNotFound(
+            "Requirement Profile version not found", ErrorCode.REQUIREMENT_PROFILE_NOT_FOUND
+        )
     if row["status"] == "PUBLISHED":
         return
     if row["status"] != "DRAFT":
@@ -581,8 +642,19 @@ async def publish_project_master_version(
             await session.commit()
             versions = await _list_versions(session, tenant_id=tenantId, master_key=key)
         except ConfigImportError as exc:
-            raise _import_error(exc) from exc
+            raise _import_error(
+                exc, action="publish_version", tenant_id=tenantId, master_key=key,
+                actor_id=admin.user_id, target_id=versionId,
+            ) from exc
     published = next((item for item in versions if item["versionId"] == versionId), None)
+    logger.info(
+        "project_master_version_published",
+        tenant_id=tenantId,
+        master_key=key,
+        version_id=str(versionId),
+        version_status=published["status"] if published else None,
+        actor_id=admin.user_id,
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Published",

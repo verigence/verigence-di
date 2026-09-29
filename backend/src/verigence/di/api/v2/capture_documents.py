@@ -432,18 +432,28 @@ async def create_capture_upload_intents(
                 if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
                     error_code = str(exc.detail.get("code") or "UPLOAD_INTENT_FAILED")
                     detail = str(exc.detail.get("detail") or exc.detail.get("title") or error_code)
+                    logger.info(
+                        "capture_v2_upload_intent_item_rejected",
+                        tenant_id=tenantId,
+                        external_context_ref=externalContextRef,
+                        client_upload_id=item.clientUploadId,
+                        error_code=error_code,
+                        error_category="BUSINESS",
+                    )
                 else:
                     failure = technical_failure(exc, operation="api")
                     error_code = failure.code
                     detail = failure.detail
-                logger.warning(
-                    "capture_v2_upload_intent_item_failed",
-                    tenant_id=tenantId,
-                    external_context_ref=externalContextRef,
-                    client_upload_id=item.clientUploadId,
-                    error_code=error_code,
-                    **safe_exception_context(exc),
-                )
+                    logger.error(
+                        "capture_v2_upload_intent_item_failed",
+                        tenant_id=tenantId,
+                        external_context_ref=externalContextRef,
+                        client_upload_id=item.clientUploadId,
+                        error_code=error_code,
+                        error_category="TECHNICAL",
+                        retryable=failure.retryable,
+                        **safe_exception_context(exc),
+                    )
                 failures.append(
                     V2UploadIntentFailure(
                         clientUploadId=item.clientUploadId,
@@ -465,6 +475,18 @@ async def create_capture_upload_intents(
             )
         await session.commit()
 
+    logger.info(
+        "capture_v2_upload_intents_created",
+        tenant_id=tenantId,
+        actor_id=principal.service_id,
+        actor_type="SERVICE",
+        phase=command.phase,
+        classification_mode=command.classificationMode,
+        requested=len(command.files),
+        issued=len(intents),
+        failed=len(failures),
+        document_ids=[str(intent.documentId) for intent in intents],
+    )
     return V2UploadIntentResponse(
         externalContextRef=externalContextRef,
         failures=failures,
@@ -483,11 +505,19 @@ async def finalize_capture_document(
     documentId: UUID,
     principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
 ) -> V2CaptureDocumentStatus:
-    del principal
-    await _queue_if_object_exists(tenant_id=tenantId, document_id=documentId)
+    queued = await _queue_if_object_exists(tenant_id=tenantId, document_id=documentId)
     rows = await _status_rows(tenantId, externalContextRef, None, documentId)
     if not rows:
         raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    logger.info(
+        "capture_v2_document_finalized",
+        tenant_id=tenantId,
+        document_id=str(documentId),
+        actor_id=principal.service_id,
+        actor_type="SERVICE",
+        queued_for_classification=queued,
+        state=rows[0]["state"],
+    )
     return await _public_status(tenantId, rows[0])
 
 
@@ -545,8 +575,17 @@ async def _public_status(
             content_url = await get_storage_adapter().get_presigned_url(
                 str(row["logical_object_key"]), 30 * 60
             )
-        except Exception:
+        except Exception as exc:
+            # A missing preview URL must not fail the status read.
             content_url = None
+            logger.warning(
+                "capture_v2_content_url_not_generated",
+                tenant_id=tenant_id,
+                document_id=str(row["document_id"]),
+                error_code="STORAGE_READ_FAILED",
+                error_category="DEPENDENCY",
+                **safe_exception_context(exc),
+            )
     return V2CaptureDocumentStatus(
         documentId=row["document_id"],
         clientUploadId=row["client_upload_id"],
@@ -595,7 +634,6 @@ async def hard_delete_capture_document(
     documentId: UUID,
     principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
 ) -> None:
-    del principal
     storage = get_storage_adapter()
     async with tenant_session(tenantId) as session:
         row = (
@@ -620,6 +658,13 @@ async def hard_delete_capture_document(
             )
         ).mappings().one_or_none()
         if row is None:
+            logger.info(
+                "capture_v2_document_delete_not_found",
+                tenant_id=tenantId,
+                document_id=str(documentId),
+                actor_id=principal.service_id,
+                actor_type="SERVICE",
+            )
             return
         await session.execute(
             text(
@@ -643,3 +688,10 @@ async def hard_delete_capture_document(
             storage=storage,
         )
         await session.commit()
+    logger.info(
+        "capture_v2_document_deleted",
+        tenant_id=tenantId,
+        document_id=str(documentId),
+        actor_id=principal.service_id,
+        actor_type="SERVICE",
+    )

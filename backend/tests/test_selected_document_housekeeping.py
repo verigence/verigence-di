@@ -10,11 +10,22 @@ from verigence.di.api.v1.tenant_housekeeping import (
     SelectedDocumentPurgeCommand,
     purge_selected_document_data,
 )
+from verigence.di.auth.human_admin import HumanAdminRequest, SecurityAdminContext
 from verigence.di.domain.enums import RetentionDisposition, SubjectType
 from verigence.di.repositories.audit_storage_contexts import ensure_audit_storage_context
 from verigence.di.repositories.documents import create_document_receiving
 from verigence.di.repositories.subjects import create_subject
 from verigence.di.repositories.tenants import provision_retention_policy, provision_tenant
+
+_ADMIN = HumanAdminRequest(
+    user_id="00000000-0000-4000-8000-000000000001",
+    bearer_token="test-token",
+    admin_context=SecurityAdminContext(
+        user_id="00000000-0000-4000-8000-000000000001",
+        is_super_admin=True,
+        admin_scopes=(),
+    ),
+)
 
 
 @pytest.mark.asyncio
@@ -131,7 +142,7 @@ async def test_selected_document_housekeeping_purges_capture_v2_state(db_session
             confirmation="PURGE_SELECTED_DOCUMENTS",
             documentIds=[document_id],
         ),
-        None,  # type: ignore[arg-type]
+        _ADMIN,
         db_session,
     )
 

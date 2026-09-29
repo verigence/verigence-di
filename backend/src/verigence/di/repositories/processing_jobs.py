@@ -8,6 +8,12 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from verigence.di.runtime_errors import (
+    BUSINESS_FAILURE_CODES,
+    CONFIGURATION_FAILURE_CODES,
+    safe_exception_context,
+)
+
 logger = structlog.get_logger(__name__)
 
 _MAX_ERROR_DETAIL = 2000
@@ -363,6 +369,19 @@ async def schedule_v2_fast_retry(
 NIGHTLY_REPROCESS_MAX_ATTEMPTS = 3
 _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO = 3  # 1=INITIAL, 2=EOD_RETRY/V2_FAST_RETRY, 3.. = nightly
 
+# A document gets at most one nightly attempt per night. The trigger window
+# spans several ticks, so an attempt that fails within it must not be
+# re-queued by the next tick; 20h is comfortably shorter than a day and
+# longer than any window.
+NIGHTLY_REPROCESS_MIN_INTERVAL = timedelta(hours=20)
+
+# Failures a re-run cannot change: the document's own outcome (ambiguous,
+# unreadable, blank, unsupported, blocked), a configuration gap an admin must
+# fix, or a document that repeatedly killed the worker.
+NIGHTLY_NON_REPROCESSABLE_CODES = frozenset(
+    BUSINESS_FAILURE_CODES | CONFIGURATION_FAILURE_CODES | {"WORKER_LEASE_EXHAUSTED"}
+)
+
 
 async def insert_nightly_reprocessing_jobs(
     session: AsyncSession,
@@ -402,13 +421,17 @@ async def insert_nightly_reprocessing_jobs(
                               AND pj2.job_type = 'INITIAL'
                             ORDER BY pj2.created_at_utc DESC
                             LIMIT 1),
-                           gen_random_uuid()::text
+                           d.correlation_id
                        ) AS original_correlation_id
                 FROM docintel.documents d
                 JOIN docintel.tenant_settings ts
                   ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
                 WHERE d.upload_status = 'FIT'
                   AND d.processing_status = 'FAILED'
+                  -- only technical failures: a re-run cannot change a business
+                  -- outcome or a configuration gap
+                  AND (d.processing_failure_code IS NULL
+                       OR NOT (d.processing_failure_code = ANY(:non_reprocessable_codes)))
                   -- one attempt at a time: a document whose earlier attempt
                   -- is still pending or running gets no second job alongside
                   AND NOT EXISTS (
@@ -417,8 +440,20 @@ async def insert_nightly_reprocessing_jobs(
                         AND active.document_id = d.document_id
                         AND active.job_status IN ('PENDING', 'RUNNING')
                   )
+                  -- one nightly attempt per night, however quickly it failed
+                  AND NOT EXISTS (
+                      SELECT 1 FROM docintel.processing_jobs tonight
+                      WHERE tonight.tenant_id = d.tenant_id
+                        AND tonight.document_id = d.document_id
+                        AND tonight.job_type = 'NIGHTLY_REPROCESS'
+                        AND tonight.created_at_utc > :recent_cutoff
+                  )
             """),
-            {"first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO},
+            {
+                "first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO,
+                "non_reprocessable_codes": sorted(NIGHTLY_NON_REPROCESSABLE_CODES),
+                "recent_cutoff": now - NIGHTLY_REPROCESS_MIN_INTERVAL,
+            },
         )
     ).mappings().all()
 
@@ -427,7 +462,9 @@ async def insert_nightly_reprocessing_jobs(
         next_attempt_no = int(row["last_attempt_no"]) + 1
         if next_attempt_no > _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO + NIGHTLY_REPROCESS_MAX_ATTEMPTS - 1:
             continue
-        correlation_id = f"nightly.{uuid.uuid4()}"
+        # Keep the original request's correlation id so the attempt links back
+        # to Audit Core's upload; generate one only when none was recorded.
+        correlation_id = row["original_correlation_id"] or f"nightly.{uuid.uuid4()}"
         try:
             await session.execute(
                 text("""
@@ -457,7 +494,9 @@ async def insert_nightly_reprocessing_jobs(
                 "nightly_reprocess_job_insert_failed",
                 tenant_id=row["tenant_id"],
                 document_id=str(row["document_id"]),
-                error=str(exc),
+                correlation_id=correlation_id,
+                attempt_no=next_attempt_no,
+                **safe_exception_context(exc),
             )
 
     return queued

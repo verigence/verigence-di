@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from verigence.di.rules.normalizers import NormalizerResult, get_normalizer
 from verigence.di.rules.schema_v2_validators import get_schema_v2_validator
 from verigence.di.rules.validators import ValidatorRuleResult, get_validator
+from verigence.di.runtime_errors import safe_exception_context
 
 logger = structlog.get_logger(__name__)
 
@@ -152,11 +153,19 @@ async def normalize_and_validate(
                     vr = val_fn(norm_result.normalized_value, ef.raw_value_text, params_with_severity)
                     vr.rule_key = rule_key
                 except Exception as exc:
+                    # validation_results.message is persisted and shown to reviewers:
+                    # the exception text can carry the extracted value.
+                    logger.warning(
+                        "validation_rule_execution_error",
+                        rule_key=rule_key,
+                        implementation_key=impl_key,
+                        **safe_exception_context(exc),
+                    )
                     vr = ValidatorRuleResult(
                         rule_key=rule_key,
                         result="ERROR",
                         severity="ERROR",
-                        message=f"Validation rule execution error: {exc}",
+                        message=f"Validation rule execution error ({type(exc).__name__})",
                     )
 
             field_val_output.results.append(vr)
@@ -302,7 +311,12 @@ def _run_normalizers(
         try:
             result = norm_fn(current_value, params)
         except Exception as exc:
-            return _normalization_failure(raw, f"Normalizer {impl_key!r} raised: {exc}")
+            logger.warning(
+                "normalizer_execution_error",
+                implementation_key=impl_key,
+                **safe_exception_context(exc),
+            )
+            return _normalization_failure(raw, f"Normalizer {impl_key!r} raised {type(exc).__name__}")
 
         if not result.ok:
             return _normalization_failure(raw, result.message)

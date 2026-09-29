@@ -38,6 +38,7 @@ from verigence.di.repositories.documents import (
     list_subject_documents,
 )
 from verigence.di.repositories.subjects import subject_exists
+from verigence.di.runtime_errors import current_correlation_id
 from verigence.di.storage.adapter import get_storage_adapter
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Subject Documents"])
@@ -151,6 +152,7 @@ async def upload_subject_document(
                 uploadStatus=pub_upload,
                 processingStatus=None,
             ),
+            correlationId=correlation_id,
         )
 
     pub_processing = public_processing_status(doc.get("processing_status"), rejected)
@@ -390,7 +392,7 @@ async def get_subject_document_content(
 
     storage = get_storage_adapter()
     chunks: list[bytes] = []
-    stream = await storage.get_stream(art_row[0])
+    stream = storage.get_stream(art_row[0])
     async for chunk in stream:
         chunks.append(chunk)
     data = b"".join(chunks)
@@ -445,6 +447,7 @@ async def get_subject_document_fields(
                 errorCode=_EC_NOT_CONFIRMED,
                 errorMessage="Document is not yet confirmed — fields not available",
                 data=None,
+                correlationId=current_correlation_id(),
             )
 
         rows = (

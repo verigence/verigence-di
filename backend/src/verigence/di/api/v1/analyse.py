@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
@@ -21,6 +21,7 @@ from verigence.di.application.reconciliation import run_reconciliation
 from verigence.di.auth.dependencies import require_tenant_permission
 from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
+from verigence.di.errors import ErrorCode, http_exception
 from verigence.di.repositories.database import tenant_session
 
 router = APIRouter(prefix="/v1", tags=["Analysis"])
@@ -77,7 +78,7 @@ async def analyse_documents(
     async with tenant_session(tenant_id) as session:
         # ── Load indexed_fields rows from document_search_index ───────────────
         if not body.document_ids:
-            raise HTTPException(status_code=400, detail="documentIds must not be empty")
+            raise http_exception(ErrorCode.INVALID_REQUEST, detail="documentIds must not be empty")
 
         # Build placeholders for the IN clause
         placeholders = ", ".join(f":id_{i}" for i in range(len(body.document_ids)))
@@ -102,16 +103,16 @@ async def analyse_documents(
         ).mappings().all()
 
         if not rows:
-            raise HTTPException(
-                status_code=404,
+            raise http_exception(
+                ErrorCode.DOCUMENT_NOT_FOUND,
                 detail="No indexed documents found for the provided document IDs",
             )
 
         # ── Enforce single subject ────────────────────────────────────────────
         subject_ids = {str(r["subject_id"]) for r in rows if r.get("subject_id")}
         if len(subject_ids) > 1:
-            raise HTTPException(
-                status_code=422,
+            raise http_exception(
+                ErrorCode.VALIDATION_ERROR,
                 detail="All documents must belong to the same subject for reconciliation.",
             )
 

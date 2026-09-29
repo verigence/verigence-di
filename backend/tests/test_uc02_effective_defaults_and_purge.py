@@ -6,12 +6,23 @@ import pytest
 from sqlalchemy import text
 
 from verigence.di.api.v1.admin_provisioning import _effective_versions, purge_project_data
+from verigence.di.auth.human_admin import HumanAdminRequest, SecurityAdminContext
 from verigence.di.repositories.database import set_tenant_context
 from verigence.di.repositories.tenants import (
     provision_actor,
     provision_retention_policy,
     provision_tenant,
     provision_tenant_document_types,
+)
+
+_ADMIN = HumanAdminRequest(
+    user_id="00000000-0000-4000-8000-000000000001",
+    bearer_token="test-token",
+    admin_context=SecurityAdminContext(
+        user_id="00000000-0000-4000-8000-000000000001",
+        is_super_admin=True,
+        admin_scopes=(),
+    ),
 )
 
 
@@ -230,7 +241,7 @@ async def test_project_purge_removes_tenant_state_but_preserves_global_defaults(
         )
     ).scalar_one()
 
-    result = await purge_project_data(tenant_id, None, db_session)  # type: ignore[arg-type]
+    result = await purge_project_data(tenant_id, _ADMIN, db_session)
     assert result.data is not None
     assert result.data.purgeStatus == "REMOVED"
 
@@ -411,7 +422,7 @@ async def test_project_purge_breaks_documents_processing_run_cycle(db_session) -
     )
     await db_session.flush()
 
-    result = await purge_project_data(tenant_id, None, db_session)  # type: ignore[arg-type]
+    result = await purge_project_data(tenant_id, _ADMIN, db_session)
     assert result.data is not None
     assert result.data.purgeStatus == "REMOVED"
 

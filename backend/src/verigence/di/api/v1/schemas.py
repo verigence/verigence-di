@@ -12,7 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from verigence.di.domain.enums import (
     ConfirmationStatus,
@@ -33,10 +33,13 @@ class ApiResponse(BaseModel, Generic[T]):
     errorCode: "000" = success; "E001"–"E010"+ = failure (see DI_DECISIONS.md D8).
     errorMessage: human-readable. "File Uploaded Successfully" / "Success" on success.
     data: payload on success; null on failure.
+    correlationId: present on non-success (business rejection) envelopes so the
+        caller can quote it to support; omitted from success envelopes.
     """
     errorCode: str
     errorMessage: str
     data: T | None = None
+    correlationId: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     model_config = ConfigDict(from_attributes=True)
 

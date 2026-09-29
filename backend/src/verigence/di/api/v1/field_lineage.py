@@ -18,6 +18,7 @@ from verigence.di.auth.permissions import Permission
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.errors import ErrorCode, problem
 from verigence.di.repositories.database import tenant_session
+from verigence.di.runtime_errors import current_correlation_id
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Subject Documents"])
 
@@ -64,6 +65,7 @@ async def get_subject_document_field_lineage(
                 errorCode="E008",
                 errorMessage="Document is not yet confirmed — fields not available",
                 data=None,
+                correlationId=current_correlation_id(),
             )
 
         rows = (

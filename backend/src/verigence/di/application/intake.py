@@ -15,6 +15,7 @@ import io
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from fastapi import UploadFile
@@ -22,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.domain.enums import UploadStatus
+from verigence.di.errors import ErrorCode, ProblemException
 from verigence.di.quality.validator import validate_upload
 from verigence.di.repositories.documents import (
     create_document_receiving,
@@ -29,10 +31,23 @@ from verigence.di.repositories.documents import (
     update_document_upload_complete,
 )
 from verigence.di.repositories.processing_jobs import create_initial_job
+from verigence.di.runtime_errors import safe_exception_context, safe_persisted_detail
 from verigence.di.storage.adapter import StorageAdapter, build_original_key
 from verigence.di.storage.audit_keys import build_audit_original_key
 
 logger = structlog.get_logger(__name__)
+
+
+class IntakeError(ProblemException):
+    """Intake request that cannot be accepted; surfaces as one canonical Problem.
+
+    Business/validation rejections are 4xx and not retryable; a storage outage is
+    a retryable 503. None of them may surface as a generic 500 INTERNAL_ERROR.
+    """
+
+
+class _UploadTooLarge(Exception):
+    """The streamed upload exceeded the configured byte limit."""
 
 _DEFAULT_ALLOWED_MIME: frozenset[str] = frozenset({
     "image/jpeg", "image/png", "image/webp", "image/tiff", "image/gif", "image/bmp",
@@ -59,7 +74,7 @@ async def _stream_and_hash(upload: UploadFile, max_bytes: int) -> tuple[bytes, i
             break
         total += len(chunk)
         if total > max_bytes:
-            raise ValueError(f"Upload exceeds maximum size of {max_bytes} bytes")
+            raise _UploadTooLarge(f"Upload exceeds maximum size of {max_bytes} bytes")
         hasher.update(chunk)
         chunks.append(chunk)
     return b"".join(chunks), total, hasher.hexdigest()
@@ -83,9 +98,15 @@ async def intake_document(
     intake_start = time.monotonic()
     requirement_ref = audit_requirement_ref.strip() if audit_requirement_ref else None
     if requirement_ref is not None and (not requirement_ref or len(requirement_ref) > 160):
-        raise ValueError("Audit requirement reference is invalid")
+        raise IntakeError(
+            ErrorCode.VALIDATION_ERROR,
+            "requirementRef must be 1-160 characters.",
+        )
     if requirement_ref is not None and audit_storage_context is None:
-        raise ValueError("Audit requirement reference requires an Audit storage context")
+        raise IntakeError(
+            ErrorCode.VALIDATION_ERROR,
+            "requirementRef requires an established Audit storage context.",
+        )
 
     log = logger.bind(
         tenant_id=tenant_id,
@@ -95,11 +116,14 @@ async def intake_document(
         correlation_id=correlation_id,
         document_type_key=document_type_key or "unknown",
     )
-    log.info("upload_received", filename=upload.filename, declared_mime=upload.content_type)
+    log.debug("upload_received", declared_mime=upload.content_type)
 
     retention = await get_active_retention_policy(session, tenant_id=tenant_id)
     if retention is None:
-        raise ValueError("Tenant has no active retention policy configured")
+        raise IntakeError(
+            ErrorCode.RETENTION_POLICY_NOT_CONFIGURED,
+            "The Tenant has no active retention policy; complete Tenant provisioning first.",
+        )
 
     physical_form_type = "ADDITIONAL"
     requires_processing = False
@@ -125,14 +149,14 @@ async def intake_document(
             physical_form_type = tdt_row[0]
             requires_processing = tdt_row[1]
             resolved_document_type_id = tdt_row[2]
-            log.info(
+            log.debug(
                 "type_resolved",
                 document_type_key=document_type_key,
                 physical_form_type=physical_form_type,
                 requires_processing=requires_processing,
             )
         else:
-            log.info(
+            log.debug(
                 "type_resolved",
                 document_type_key=document_type_key,
                 physical_form_type="ADDITIONAL",
@@ -150,14 +174,20 @@ async def intake_document(
         )
     ).one_or_none()
     if subject_row is None:
-        raise ValueError("Subject does not exist in target Tenant")
+        raise IntakeError(ErrorCode.SUBJECT_NOT_FOUND, "Subject does not exist in this Tenant.")
     subject_display_name: str | None = subject_row[0]
 
     if audit_storage_context is not None:
         if audit_storage_context.get("tenant_id") != tenant_id:
-            raise ValueError("Audit storage context Tenant does not match intake Tenant")
+            raise IntakeError(
+                ErrorCode.CONFLICT,
+                "Audit storage context does not belong to this Tenant.",
+            )
         if audit_storage_context.get("subject_id") != subject_id:
-            raise ValueError("Audit storage context Subject does not match intake Subject")
+            raise IntakeError(
+                ErrorCode.CONFLICT,
+                "Audit storage context does not belong to this Subject.",
+            )
 
     doc = await create_document_receiving(
         session,
@@ -225,7 +255,7 @@ async def intake_document(
     artifact_id = uuid.uuid4()
     try:
         raw_bytes, byte_count, sha256_hex = await _stream_and_hash(upload, _MAX_BYTES_DEFAULT)
-    except ValueError as exc:
+    except _UploadTooLarge as exc:
         await update_document_upload_complete(
             session,
             tenant_id=tenant_id,
@@ -240,10 +270,11 @@ async def intake_document(
         await session.commit()
         doc["upload_status"] = UploadStatus.UPLOAD_FAILED
         doc["upload_issue_code"] = "FILE_TOO_LARGE"
+        _log_outcome(log, doc, intake_start)
         return doc
 
     detected_mime = _detect_mime(raw_bytes, upload.filename or "")
-    log.info(
+    log.debug(
         "mime_detected",
         declared_mime=upload.content_type,
         detected_mime=detected_mime,
@@ -266,6 +297,7 @@ async def intake_document(
         await session.commit()
         doc["upload_status"] = UploadStatus.CORRUPT
         doc["upload_issue_code"] = "MIME_TYPE_NOT_ALLOWED"
+        _log_outcome(log, doc, intake_start, detected_mime=detected_mime)
         return doc
 
     try:
@@ -280,7 +312,7 @@ async def intake_document(
             },
         )
         storage_id = storage_meta.storage_id
-        log.info(
+        log.debug(
             "storage_written",
             document_id=str(document_id),
             logical_key=logical_key,
@@ -289,12 +321,15 @@ async def intake_document(
         )
     except Exception as exc:
         log.error(
-            "intake_error",
+            "intake_storage_write_failed",
             step="storage_write",
             document_id=str(document_id),
-            exc_type=type(exc).__name__,
-            exc_msg=str(exc),
+            error_code=ErrorCode.STORAGE_WRITE_FAILED.code,
+            error_category=ErrorCode.STORAGE_WRITE_FAILED.error_category,
+            **safe_exception_context(exc),
         )
+        # Keep the failed attempt on record, then report the outage as a
+        # retryable technical failure rather than a business rejection.
         await update_document_upload_complete(
             session,
             tenant_id=tenant_id,
@@ -304,11 +339,13 @@ async def intake_document(
             detected_mime_type=detected_mime,
             upload_status=UploadStatus.UPLOAD_FAILED,
             upload_issue_code="STORAGE_ERROR",
-            upload_issue_detail=str(exc),
+            upload_issue_detail=safe_persisted_detail(ErrorCode.STORAGE_WRITE_FAILED.code),
         )
         await session.commit()
-        doc["upload_status"] = UploadStatus.UPLOAD_FAILED
-        return doc
+        raise IntakeError(
+            ErrorCode.STORAGE_WRITE_FAILED,
+            "Document storage is temporarily unavailable. Retry the upload.",
+        ) from exc
 
     now = datetime.now(UTC)
     await session.execute(
@@ -374,7 +411,7 @@ async def intake_document(
             document_id=document_id,
             correlation_id=correlation_id,
         )
-        log.info(
+        log.debug(
             "processing_job_created",
             document_id=str(document_id),
             processing_job_id=str(job),
@@ -384,7 +421,7 @@ async def intake_document(
             text("SELECT pg_notify('di_processing_jobs', :payload)"),
             {"payload": str(job)},
         )
-        log.info(
+        log.debug(
             "notify_sent",
             document_id=str(document_id),
             processing_job_id=str(job),
@@ -414,31 +451,41 @@ async def intake_document(
         ),
     })
 
-    duration_ms = round((time.monotonic() - intake_start) * 1000, 1)
     failed_rules = [
         result.rule_key
         for result in validator_result.quality_results
         if result.outcome == "FAIL"
     ]
-    if validator_result.upload_status == UploadStatus.FIT:
-        log.info(
-            "quality_verdict",
-            document_id=str(document_id),
-            upload_status=validator_result.upload_status.value,
-            rules_run=len(validator_result.quality_results),
-            rules_failed=len(failed_rules),
-            failed_rule_keys=failed_rules,
-            total_duration_ms=duration_ms,
-        )
-    else:
-        log.warning(
-            "upload_rejected",
-            document_id=str(document_id),
-            upload_status=validator_result.upload_status.value,
-            failed_rule_keys=failed_rules,
-            total_duration_ms=duration_ms,
-        )
+    _log_outcome(
+        log,
+        doc,
+        intake_start,
+        requires_processing=requires_processing,
+        rules_run=len(validator_result.quality_results),
+        rules_failed=len(failed_rules),
+        failed_rule_keys=failed_rules,
+    )
     return doc
+
+
+def _log_outcome(
+    log: Any,  # noqa: ANN401
+    doc: dict,  # type: ignore[type-arg]
+    intake_start: float,
+    **fields: object,
+) -> None:
+    """Emit the single INFO event that summarises one intake (accepted or rejected)."""
+    upload_status = doc["upload_status"]
+    status_value = upload_status.value if isinstance(upload_status, UploadStatus) else str(upload_status)
+    log.info(
+        "document_intake_completed",
+        outcome="accepted" if upload_status == UploadStatus.FIT else "rejected",
+        document_id=str(doc["document_id"]),
+        upload_status=status_value,
+        upload_issue_code=doc.get("upload_issue_code"),
+        total_duration_ms=round((time.monotonic() - intake_start) * 1000, 1),
+        **fields,
+    )
 
 
 def _context_uuid(context: dict[str, object], key: str) -> uuid.UUID:
@@ -459,8 +506,9 @@ def _detect_mime(data: bytes, filename: str) -> str:
     try:
         import magic
         return magic.from_buffer(data[:2048], mime=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        # libmagic is optional; fall back to signature/extension sniffing.
+        logger.debug("libmagic_unavailable", **safe_exception_context(exc))
     if data[:4] == b"%PDF":
         return "application/pdf"
     if data[:3] == b"\xff\xd8\xff":

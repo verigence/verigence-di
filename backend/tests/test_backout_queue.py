@@ -270,8 +270,10 @@ class TestHandleFailure:
         mock_retry.assert_called_once()
         mock_fail.assert_not_called()
         mock_backout.assert_not_called()
-        job_log.info.assert_called_once()
-        assert job_log.info.call_args[0][0] == "job_retry_pending"
+        # A retry follows, but the attempt still failed: WARNING, not INFO.
+        job_log.warning.assert_called_once()
+        assert job_log.warning.call_args[0][0] == "job_retry_pending"
+        job_log.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_retryable_attempt2_calls_backout_not_retry(self) -> None:
@@ -379,7 +381,7 @@ class TestHandleFailure:
 
     @pytest.mark.asyncio
     async def test_logs_job_failed_backout(self) -> None:
-        """Backout path logs job_failed_backout via job_log.warning."""
+        """A terminal technical failure logs job_failed_backout at ERROR."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -405,9 +407,10 @@ class TestHandleFailure:
                 job_log=job_log,
             )
 
-        job_log.warning.assert_called_once()
-        call_args = job_log.warning.call_args
+        job_log.error.assert_called_once()
+        call_args = job_log.error.call_args
         assert call_args[0][0] == "job_failed_backout"
+        assert call_args.kwargs["error_category"] == "DEPENDENCY"
 
     # ── V2 fast-retry path (root cause of Delivery docs stuck at Classified) ──
 

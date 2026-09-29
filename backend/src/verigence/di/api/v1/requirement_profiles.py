@@ -100,7 +100,7 @@ async def create_requirement_profile(
     """Create a DRAFT Requirement Profile version."""
     profile_key: str = body.get("profileKey", "")
     description: str | None = body.get("description")
-    items: list[dict] = body.get("items") or []
+    items: list[dict[str, Any]] = body.get("items") or []
     if not profile_key:
         raise problem(422, "profileKey is required", ErrorCode.VALIDATION_ERROR)
 
@@ -284,7 +284,7 @@ async def update_draft_requirement_profile(
         ).mappings().one()
 
     logger.info(
-        "requirement_profile_created",
+        "requirement_profile_updated",
         tenant_id=tenant_id,
         actor_id=actor.actor_id,
         profile_id=str(profile_id),
