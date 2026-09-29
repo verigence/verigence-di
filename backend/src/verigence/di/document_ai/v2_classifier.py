@@ -14,6 +14,7 @@ import asyncio
 import base64
 import io
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -51,7 +52,36 @@ class V2ClassificationResult:
 
 
 class V2ClassificationError(RuntimeError):
-    pass
+    """Classification failure carrying a stable code and retryability, so
+    ``technical_failure`` can tell a rate limit from a corrupt upload."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        technical_code: str,
+        retryable: bool,
+        status_code: int | None = None,
+    ) -> None:
+        self.technical_code = technical_code
+        self.retryable = retryable
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def _http_failure(status_code: int) -> V2ClassificationError:
+    if status_code == 429:
+        code, retryable = "DOCUMENT_AI_RATE_LIMITED", True
+    elif status_code in {408, 500, 502, 503, 504}:
+        code, retryable = "DOCUMENT_AI_UNAVAILABLE", True
+    else:
+        code, retryable = "DOCUMENT_AI_REQUEST_REJECTED", False
+    return V2ClassificationError(
+        f"Gemini classification failed with HTTP {status_code}",
+        technical_code=code,
+        retryable=retryable,
+        status_code=status_code,
+    )
 
 
 async def _gemini_client() -> httpx.AsyncClient:
@@ -78,10 +108,29 @@ async def close_v2_classifier_client() -> None:
 
 
 def _first_page_payload(document_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    try:
+        return _first_page_payload_unchecked(document_bytes, mime_type)
+    except V2ClassificationError:
+        raise
+    except Exception as exc:
+        # pypdf/PIL cannot open the file: the upload is unreadable, and will be
+        # just as unreadable on a retry.
+        raise V2ClassificationError(
+            f"Document could not be opened ({type(exc).__name__})",
+            technical_code="INVALID_FILE_CONTENT",
+            retryable=False,
+        ) from exc
+
+
+def _first_page_payload_unchecked(document_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
     if mime_type == "application/pdf":
         reader = PdfReader(io.BytesIO(document_bytes))
         if not reader.pages:
-            raise V2ClassificationError("PDF contains no pages")
+            raise V2ClassificationError(
+                "PDF contains no pages",
+                technical_code="INVALID_FILE_CONTENT",
+                retryable=False,
+            )
         writer = PdfWriter()
         writer.add_page(reader.pages[0])
         output = io.BytesIO()
@@ -149,7 +198,11 @@ async def classify_document_v2(
     candidates: list[tuple[str, str]],
 ) -> V2ClassificationResult:
     if not candidates:
-        raise V2ClassificationError("V2 classifier requires at least one candidate type")
+        raise V2ClassificationError(
+            "V2 classifier requires at least one candidate type",
+            technical_code="CLASSIFICATION_NO_CANDIDATES",
+            retryable=False,
+        )
 
     effective_candidates = _with_invoice_fallback(candidates)
     settings = get_settings()
@@ -183,33 +236,98 @@ async def classify_document_v2(
             max_output_tokens=min(settings.docai_gemini_max_output_tokens, 2048),
         ),
     }
-    client = await _gemini_client()
-    response = await client.post(
-        _GEMINI_API_URL,
-        headers={"x-goog-api-key": settings.docai_gemini_api_key},
-        json=body,
-    )
-    if response.status_code != 200:
-        raise V2ClassificationError(
-            f"Gemini classification failed with HTTP {response.status_code}"
-        )
-
-    raw = response.json()
-    usage = usage_from_response(raw)
-    _logger.info(
-        "gemini_classification_usage",
+    log = _logger.bind(
         gemini_model=_GEMINI_MODEL,
         candidate_count=len(effective_candidates),
+        payload_bytes=len(payload_bytes),
+        payload_mime=effective_mime,
+    )
+    client = await _gemini_client()
+    started = time.monotonic()
+    try:
+        response = await client.post(
+            _GEMINI_API_URL,
+            headers={"x-goog-api-key": settings.docai_gemini_api_key},
+            json=body,
+        )
+    except httpx.HTTPError as exc:
+        log.warning(
+            "gemini_classification_transport_error",
+            error_code="DOCUMENT_AI_UNAVAILABLE",
+            exception_type=type(exc).__name__,
+            duration_ms=_elapsed_ms(started),
+        )
+        raise V2ClassificationError(
+            f"Gemini classification transport failure ({type(exc).__name__})",
+            technical_code="DOCUMENT_AI_UNAVAILABLE",
+            retryable=True,
+        ) from exc
+    duration_ms = _elapsed_ms(started)
+    if response.status_code != 200:
+        failure = _http_failure(response.status_code)
+        log.warning(
+            "gemini_classification_http_error",
+            http_status=response.status_code,
+            error_code=failure.technical_code,
+            retryable=failure.retryable,
+            duration_ms=duration_ms,
+        )
+        raise failure
+
+    try:
+        raw = response.json()
+    except ValueError as exc:
+        log.warning(
+            "gemini_classification_invalid_response",
+            http_status=response.status_code,
+            error_code="DOCUMENT_AI_RESPONSE_INVALID",
+            reason="body_not_json",
+            duration_ms=duration_ms,
+        )
+        raise V2ClassificationError(
+            "Gemini returned a non-JSON classification body",
+            technical_code="DOCUMENT_AI_RESPONSE_INVALID",
+            retryable=True,
+        ) from exc
+    usage = usage_from_response(raw if isinstance(raw, dict) else {})
+    log.info(
+        "gemini_classification_usage",
+        http_status=response.status_code,
+        duration_ms=duration_ms,
         thinking_level=settings.docai_gemini_classification_thinking_level or "model-default",
         **usage.as_metrics(),
     )
+    if usage.blocked:
+        log.warning(
+            "gemini_classification_blocked",
+            error_code="DOCUMENT_AI_CONTENT_BLOCKED",
+            finish_reason=usage.finish_reason,
+            block_reason=usage.block_reason,
+        )
+        raise V2ClassificationError(
+            "Gemini declined to classify the document content",
+            technical_code="DOCUMENT_AI_CONTENT_BLOCKED",
+            retryable=False,
+        )
     try:
         text = raw["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(text)
         observed = str(parsed["documentTypeKey"]).strip()
         confidence = Decimal(str(parsed["confidence"]))
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise V2ClassificationError("Gemini returned an invalid classification payload") from exc
+    except (KeyError, IndexError, TypeError, ValueError, ArithmeticError) as exc:
+        log.warning(
+            "gemini_classification_invalid_response",
+            http_status=response.status_code,
+            error_code="DOCUMENT_AI_RESPONSE_INVALID",
+            reason="payload_unparseable",
+            exception_type=type(exc).__name__,
+            finish_reason=usage.finish_reason,
+        )
+        raise V2ClassificationError(
+            "Gemini returned an invalid classification payload",
+            technical_code="DOCUMENT_AI_RESPONSE_INVALID",
+            retryable=True,
+        ) from exc
 
     allowed = {key for key, _ in effective_candidates}
     if observed == "UNKNOWN":
@@ -221,11 +339,24 @@ async def classify_document_v2(
         confidence = Decimal("0")
 
     if confidence < 0 or confidence > 100:
-        raise V2ClassificationError("Gemini classification confidence is outside 0-100")
+        log.warning(
+            "gemini_classification_invalid_response",
+            error_code="DOCUMENT_AI_RESPONSE_INVALID",
+            reason="confidence_out_of_range",
+        )
+        raise V2ClassificationError(
+            "Gemini classification confidence is outside 0-100",
+            technical_code="DOCUMENT_AI_RESPONSE_INVALID",
+            retryable=True,
+        )
 
     return V2ClassificationResult(
         document_type_key=selected,
         confidence=confidence,
-        provider_request_id=str(uuid.uuid4()),
+        provider_request_id=usage.response_id or str(uuid.uuid4()),
         raw_provider_response=raw,
     )
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.monotonic() - start) * 1000, 1)

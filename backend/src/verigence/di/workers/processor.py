@@ -48,12 +48,16 @@ from verigence.di.repositories.processing_jobs import (
     schedule_v2_fast_retry,
 )
 from verigence.di.runtime_errors import (
+    BUSINESS,
+    CONFIGURATION,
     correlation_id_or_new,
+    failure_category,
     safe_exception_context,
     safe_persisted_detail,
     technical_failure,
 )
 from verigence.di.settings import get_settings
+from verigence.di.workers.heartbeat import WorkerStats
 from verigence.di.workers.job_runner import run_processing_job
 
 logger = structlog.get_logger(__name__)
@@ -90,6 +94,7 @@ class _NotifyWorker:
         self._notify_event = asyncio.Event()
         self._notify_conn: Any | None = None
         self._runtime_correlation_id = correlation_id_or_new()
+        self.stats = WorkerStats()
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -137,7 +142,7 @@ class _NotifyWorker:
             payload: str,
         ) -> None:
             del connection, pid
-            logger.info(
+            logger.debug(
                 "notify_received",
                 channel=channel,
                 payload=payload,
@@ -210,6 +215,7 @@ class ProcessingWorker(_NotifyWorker):
 
         try:
             while not self._stop_event.is_set():
+                self.stats.cycles += 1
                 try:
                     # Link delivery remains independent of extraction. One pending
                     # link per loop preserves the existing V1 behaviour.
@@ -317,12 +323,13 @@ class ProcessingWorker(_NotifyWorker):
             if job is None:
                 return False
 
-        await _execute_claimed_job(
+        outcome = await _execute_claimed_job(
             session_factory=session_factory,
             job=job,
             ai_adapter=ai_adapter,
             log=log,
         )
+        self.stats.record(outcome)
         return True
 
 
@@ -372,6 +379,7 @@ class V2ProcessingWorker(_NotifyWorker):
         )
         try:
             while not self._stop_event.is_set():
+                self.stats.cycles += 1
                 try:
                     did_work = await self._process_one(
                         session_factory=session_factory,
@@ -423,7 +431,7 @@ class V2ProcessingWorker(_NotifyWorker):
             document_type_key=document_type_key,
             confidence=classification_confidence,
         )
-        await _execute_claimed_job(
+        outcome = await _execute_claimed_job(
             session_factory=session_factory,
             job=job,
             ai_adapter=adapter,
@@ -433,6 +441,7 @@ class V2ProcessingWorker(_NotifyWorker):
                 classification_reused=True,
             ),
         )
+        self.stats.record(outcome)
         return True
 
 
@@ -442,25 +451,52 @@ async def _execute_claimed_job(
     job: dict[str, Any],
     ai_adapter: DocumentAIAdapter,
     log: Any,
-) -> None:
+) -> str:
+    """Run one claimed job; returns ``completed``, ``failed`` or ``superseded``.
+
+    The job context is also bound to structlog contextvars for the duration of
+    the job so adapter, repository and rules logs carry it without threading
+    it through every call.
+    """
+    correlation_id = correlation_id_or_new(job.get("correlation_id"))
+    context: dict[str, Any] = {
+        "tenant_id": str(job["tenant_id"]),
+        "document_id": str(job["document_id"]),
+        "processing_job_id": str(job["processing_job_id"]),
+        "correlation_id": correlation_id,
+        "job_type": str(job["job_type"]),
+        "attempt_no": int(job["attempt_no"]),
+    }
+    with structlog.contextvars.bound_contextvars(**context):
+        return await _execute_claimed_job_in_context(
+            session_factory=session_factory,
+            job=job,
+            ai_adapter=ai_adapter,
+            log=log.bind(**context),
+            correlation_id=correlation_id,
+        )
+
+
+async def _execute_claimed_job_in_context(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    job: dict[str, Any],
+    ai_adapter: DocumentAIAdapter,
+    log: Any,
+    correlation_id: str,
+) -> str:
     tenant_id: str = str(job["tenant_id"])
     job_id: uuid.UUID = job["processing_job_id"]
     document_id: uuid.UUID = job["document_id"]
-    correlation_id: str = correlation_id_or_new(job.get("correlation_id"))
     job_type: str = str(job["job_type"])
+    attempt_no = int(job["attempt_no"])
     # Only claim_next_v2_job's LEFT JOIN populates this key with a non-NULL
     # value (the document has a Capture V2 upload row); claim_next_non_v2_job
     # explicitly excludes such documents, so this is a reliable signal for
     # which retry policy a first failure should get, below.
     is_capture_v2 = job.get("capture_v2_document_type_key") is not None
 
-    job_log = log.bind(
-        tenant_id=tenant_id,
-        document_id=str(document_id),
-        processing_job_id=str(job_id),
-        correlation_id=correlation_id,
-        job_type=job_type,
-    )
+    job_log = log
     job_log.info("job_claimed")
 
     # A retry / nightly reprocess queued while the document was failing may
@@ -472,7 +508,7 @@ async def _execute_claimed_job(
                 await cancel_superseded_job(session, tenant_id=tenant_id, processing_job_id=job_id)
         if status == "PROCESSED":
             job_log.info("job_superseded", error_code=SUPERSEDED_ERROR_CODE)
-            return
+            return "superseded"
 
     job_start = time.monotonic()
     async with session_factory() as session:
@@ -503,21 +539,24 @@ async def _execute_claimed_job(
                     human_verification_status=result.human_verification_status,
                     total_duration_ms=total_ms,
                 )
-            else:
-                await _handle_failure_safely(
-                    session_factory=session_factory,
-                    tenant_id=tenant_id,
-                    job_id=job_id,
-                    document_id=document_id,
-                    correlation_id=correlation_id,
-                    processing_run_id=result.processing_run_id,
-                    error_code=result.error_code,
-                    error_detail=result.error_detail,
-                    retryable=result.retryable,
-                    attempt_no=int(job["attempt_no"]),
-                    is_capture_v2=is_capture_v2,
-                    job_log=job_log,
-                )
+                return "completed"
+
+            await _handle_failure_safely(
+                session_factory=session_factory,
+                tenant_id=tenant_id,
+                job_id=job_id,
+                document_id=document_id,
+                correlation_id=correlation_id,
+                processing_run_id=result.processing_run_id,
+                error_code=result.error_code,
+                error_detail=result.error_detail,
+                retryable=result.retryable,
+                attempt_no=attempt_no,
+                is_capture_v2=is_capture_v2,
+                job_log=job_log,
+                duration_ms=round((time.monotonic() - job_start) * 1000, 1),
+            )
+            return "failed"
 
         except Exception as exc:  # noqa: BLE001
             failure = technical_failure(exc, operation="worker")
@@ -525,6 +564,8 @@ async def _execute_claimed_job(
                 "job_runner_unexpected_escape",
                 error_code=failure.code,
                 retryable=failure.retryable,
+                error_category=failure.category,
+                duration_ms=round((time.monotonic() - job_start) * 1000, 1),
                 **safe_exception_context(exc),
             )
             await _handle_failure_safely(
@@ -537,10 +578,12 @@ async def _execute_claimed_job(
                 error_code=failure.code,
                 error_detail=failure.detail,
                 retryable=failure.retryable,
-                attempt_no=int(job["attempt_no"]),
+                attempt_no=attempt_no,
                 is_capture_v2=is_capture_v2,
                 job_log=job_log,
+                duration_ms=round((time.monotonic() - job_start) * 1000, 1),
             )
+            return "failed"
 
 
 async def _handle_failure_safely(**kwargs: Any) -> None:
@@ -579,6 +622,7 @@ async def _handle_failure(
     attempt_no: int,
     is_capture_v2: bool,
     job_log: Any,
+    duration_ms: float | None = None,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -588,6 +632,7 @@ async def _handle_failure(
     safe_code = error_code or "WORKER_INTERNAL_ERROR"
     safe_detail = safe_persisted_detail(safe_code)
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
+    error_category = failure_category(safe_code)
 
     if retryable and attempt_no == 1:
         async with session_factory() as session, session.begin():
@@ -610,10 +655,13 @@ async def _handle_failure(
                     document_id=document_id,
                     correlation_id=correlation_id,
                 )
-        job_log.info(
+        job_log.warning(
             "job_retry_pending",
             error_class=error_class,
             error_code=safe_code,
+            error_category=error_category,
+            attempt_no=attempt_no,
+            duration_ms=duration_ms,
             is_capture_v2=is_capture_v2,
             fast_retry_scheduled=is_capture_v2,
         )
@@ -662,10 +710,21 @@ async def _handle_failure(
             ttl_hours=ttl_hours,
         )
 
-    job_log.warning(
+    # A business outcome (ambiguous, unreadable, blocked ...) is the expected
+    # answer for that document, not an incident; configuration needs an admin.
+    if error_category == BUSINESS:
+        backout_log = job_log.info
+    elif error_category == CONFIGURATION:
+        backout_log = job_log.warning
+    else:
+        backout_log = job_log.error
+    backout_log(
         "job_failed_backout",
         error_class=error_class,
         error_code=safe_code,
+        error_category=error_category,
+        attempt_no=attempt_no,
+        duration_ms=duration_ms,
         ttl_hours=ttl_hours,
     )
 

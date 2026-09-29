@@ -131,6 +131,10 @@ class ErrorCode:
     RESOURCE_NOT_FOUND               = _ErrorDef("RESOURCE_NOT_FOUND",               404, False, "RESOURCE",         "Requested resource does not exist or is not visible.")  # observability-api
     PROVISIONING_INCOMPLETE          = _ErrorDef("PROVISIONING_INCOMPLETE",          500, True,  "INTERNAL",         "Tenant provisioning did not reach the verified READY state.")  # observability-api
     HOUSEKEEPING_INCOMPLETE          = _ErrorDef("HOUSEKEEPING_INCOMPLETE",          500, True,  "INTERNAL",         "Deletion did not reach the verified zero state.")  # observability-api
+    # observability-pipeline
+    DOCUMENT_AI_REQUEST_REJECTED     = _ErrorDef("DOCUMENT_AI_REQUEST_REJECTED",     502, False, "DEPENDENCY",       "Document AI provider rejected the request.")
+    DOCUMENT_AI_CONTENT_BLOCKED      = _ErrorDef("DOCUMENT_AI_CONTENT_BLOCKED",      422, False, "CLASSIFICATION",   "Document AI provider declined to process the document content.")
+    WORKER_LEASE_EXHAUSTED           = _ErrorDef("WORKER_LEASE_EXHAUSTED",           500, False, "INTERNAL",         "Processing repeatedly stopped before completing and was abandoned.")
 
 
 def error_for_http_status(status_code: int) -> _ErrorDef:
