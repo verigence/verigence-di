@@ -30,6 +30,12 @@ def upgrade() -> None:
         ADD COLUMN IF NOT EXISTS classification_mode varchar(32) NOT NULL DEFAULT 'CLASSIFY'
         """
     )
+    # Drop first so a database that already carries the constraint (schema ahead
+    # of its version stamp) can still finish the upgrade.
+    op.execute(
+        "ALTER TABLE docintel.document_capture_v2_uploads "
+        "DROP CONSTRAINT IF EXISTS ck_capture_v2_uploads_classification_mode"
+    )
     op.execute(
         """
         ALTER TABLE docintel.document_capture_v2_uploads
