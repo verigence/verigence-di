@@ -29,6 +29,7 @@ PAYMENT_RECEIPT_SCHEMA = SchemaDefinition(
         FieldSpec(key="bank_name", field_type="string", required=False, description="Bank name if printed"),
         FieldSpec(key="bank_location", field_type="string", required=False, description="Bank branch/location if printed"),
         FieldSpec(key="invoice_reference_number", field_type="string", required=False, description="Linked invoice/bill number this receipt is against, if printed (Delivery receipts are typically raised against an invoice, not a booking)"),
+        FieldSpec(key="booking_reference_number", field_type="string", required=False, description="Linked booking/order/reference number if printed"),
         FieldSpec(key="remarks", field_type="string", required=False, description="Receipt remarks exactly as printed"),
         FieldSpec(key="amount_in_words", field_type="string", required=False, description="Amount in words if printed"),
     ],
