@@ -89,6 +89,23 @@ def _rule_mime_type_allowed(
     )
 
 
+def _image_bytes(data: bytes) -> bytes:
+    """What the image rules measure: the upload itself, or, for a PDF page
+    that is a scan (embedded images, no text), the largest embedded image.
+    A PDF without one is returned as is, and the rule skips as before."""
+    if data[:4] != b"%PDF":
+        return data
+    try:
+        from pypdf import PdfReader  # type: ignore[import]
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        images = [image for page in reader.pages[:1] for image in page.images]
+        if not images:
+            return data
+        return max(images, key=lambda image: len(image.data)).data
+    except Exception:
+        return data
+
+
 def _rule_image_min_dimensions(
     data: bytes,
     rule_key: str,
@@ -101,7 +118,7 @@ def _rule_image_min_dimensions(
 
     try:
         from PIL import Image  # type: ignore[import]
-        img = Image.open(io.BytesIO(data))
+        img = Image.open(io.BytesIO(_image_bytes(data)))
         w, h = img.size
         outcome = "PASS" if w >= min_width and h >= min_height else "FAIL"
         msg = None if outcome == "PASS" else f"Image {w}×{h} below minimum {min_width}×{min_height}"
@@ -139,7 +156,7 @@ def _rule_image_blur_score(
         import cv2  # type: ignore[import]
         import numpy as np  # type: ignore[import]
 
-        img_array = np.frombuffer(data, dtype=np.uint8)
+        img_array = np.frombuffer(_image_bytes(data), dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
         if img is None:
             return QualityRuleResult(

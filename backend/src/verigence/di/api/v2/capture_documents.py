@@ -97,6 +97,10 @@ class V2CaptureDocumentStatus(BaseModel):
     originalFilename: str
     contentUrl: str | None = None
     processingStatus: str | None = None
+    # Why a FAILED upload failed (a quality rule, a corrupt file, ...), so
+    # the caller can tell the person what to do instead of "retry".
+    failureCode: str | None = None
+    failureDetail: str | None = None
 
 
 class V2CaptureDocumentList(BaseModel):
@@ -514,8 +518,8 @@ async def _status_rows(
                     f"""
                     SELECT u.document_id, u.client_upload_id, u.state,
                            u.classified_document_type_key, u.original_filename,
-                           u.logical_object_key, d.processing_status,
-                           d.content_state
+                           u.logical_object_key, u.failure_code, u.failure_detail,
+                           d.processing_status, d.content_state
                     FROM docintel.document_capture_v2_uploads u
                     JOIN docintel.documents d
                       ON d.tenant_id=u.tenant_id AND d.document_id=u.document_id
@@ -551,6 +555,8 @@ async def _public_status(
         originalFilename=row["original_filename"],
         contentUrl=content_url,
         processingStatus=row["processing_status"],
+        failureCode=row["failure_code"],
+        failureDetail=row["failure_detail"],
     )
 
 
