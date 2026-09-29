@@ -1,18 +1,22 @@
 """repositories/tenants.py — Tenant provisioning."""
+
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from verigence.di.quality.policy import DEFAULT_QUALITY_POLICY
+
 _DEFAULT_CLASSIFICATION_SCORE = 70.00
 _DEFAULT_SUBJECT_MATCHING_CONFIDENCE = 80.00
 _DEFAULT_UPLOAD_TIMEOUT_MINUTES = 30
 _DEFAULT_MAX_UPLOAD_BYTES = 31_457_280
 _DEFAULT_ALLOWED_MIME_TYPES = '["application/pdf","image/jpeg","image/png","image/tiff"]'
-_DEFAULT_QUALITY_POLICY = '[]'
+_DEFAULT_QUALITY_POLICY = json.dumps(DEFAULT_QUALITY_POLICY)
 _ALLOWED_ACTOR_TYPES = frozenset({"USER", "SYSTEM", "SERVICE"})
 
 

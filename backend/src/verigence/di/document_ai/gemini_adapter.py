@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import time
 import uuid
@@ -24,6 +25,7 @@ from typing import Any
 
 import httpx
 import structlog
+from PIL import Image
 
 from verigence.di.document_ai.adapter import (
     AIInvocationResult,
@@ -157,6 +159,9 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         schema = get_schema(document_type_key or "")
         required_count = sum(1 for f in schema.fields if f.required)
         prompt = _build_prompt(schema, fields)
+        artifact_bytes, mime_type = capped_image(
+            artifact_bytes, mime_type, get_settings().docai_gemini_extraction_max_edge
+        )
 
         log.debug("gemini_prompt", document_type_key=document_type_key, prompt=prompt)
         log.info(
@@ -485,6 +490,28 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
             lines.append(f"- {note}")
 
     return "\n".join(lines)
+
+
+def capped_image(artifact_bytes: bytes, mime_type: str, max_edge: int) -> tuple[bytes, str]:
+    """An image larger than ``max_edge`` on its long side, downscaled to it as
+    a JPEG; anything else (a PDF, a small image, an undecodable file, or
+    ``max_edge`` 0) exactly as given."""
+    if max_edge <= 0 or not (mime_type or "").startswith("image/"):
+        return artifact_bytes, mime_type
+    try:
+        with Image.open(io.BytesIO(artifact_bytes)) as source:
+            longest = max(source.width, source.height)
+            if longest <= max_edge:
+                return artifact_bytes, mime_type
+            ratio = max_edge / longest
+            image = source.convert("RGB").resize(
+                (max(1, int(source.width * ratio)), max(1, int(source.height * ratio)))
+            )
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=85, optimize=True)
+            return output.getvalue(), "image/jpeg"
+    except Exception:
+        return artifact_bytes, mime_type
 
 
 def _build_payload(

@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     # Hard cap on a single answer (thinking included) so a runaway response
     # cannot bill unbounded output; far above any schema's normal answer.
     docai_gemini_max_output_tokens: int = 16384
+    # An image wider or taller than this is downscaled to it before
+    # extraction: the model bills a 768px tile at a time, so a phone photo
+    # is ~24 tiles and 1536px is 4. A PDF page is never touched (the model
+    # counts it as one page). Evidence boxes are normalised, so positions
+    # are unaffected. 0 sends every image as uploaded.
+    docai_gemini_extraction_max_edge: int = 1536
 
     # Sentry
     sentry_dsn: str = ""
