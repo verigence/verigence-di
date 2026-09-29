@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from jose import ExpiredSignatureError, JWTError, jwt  # type: ignore[import]
+from jose import ExpiredSignatureError, JWTError, jwt
 from jose.exceptions import JWTClaimsError
 
 from verigence.di.auth.jwks import JWKSUnavailableError, get_jwks_cache

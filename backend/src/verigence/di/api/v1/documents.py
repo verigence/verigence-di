@@ -392,7 +392,7 @@ async def get_subject_document_content(
 
     storage = get_storage_adapter()
     chunks: list[bytes] = []
-    stream = await storage.get_stream(art_row[0])
+    stream = storage.get_stream(art_row[0])
     async for chunk in stream:
         chunks.append(chunk)
     data = b"".join(chunks)

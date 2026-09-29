@@ -162,7 +162,7 @@ async def get_unassigned_document_content(
 
     storage = get_storage_adapter()
     chunks = []
-    async for chunk in await storage.get_stream(art_row[0]):
+    async for chunk in storage.get_stream(art_row[0]):
         chunks.append(chunk)
     data = b"".join(chunks)
 

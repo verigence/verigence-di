@@ -11,8 +11,8 @@ from typing import Any
 
 import httpx
 import structlog
-from jose import jwk  # type: ignore[import]
-from jose.backends.base import Key  # type: ignore[import]
+from jose import jwk
+from jose.backends.base import Key
 
 from verigence.di.runtime_errors import correlation_headers, safe_exception_context
 
