@@ -1,7 +1,7 @@
 """Once-per-night scheduler run markers; bounded stale-lease reclaims.
 
-Revision ID: 0049
-Revises: 0048
+Revision ID: 0050
+Revises: 0049
 Create Date: 2026-09-29
 
 1. docintel.scheduler_runs: the Nightly Reprocessing trigger window (±90s)
@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0049"
-down_revision = "0048"
+revision = "0050"
+down_revision = "0049"
 branch_labels = None
 depends_on = None
 
