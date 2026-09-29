@@ -366,7 +366,7 @@ async def _fetch_unassigned_doc(session: Any, tenant_id: str, document_id: uuid.
 
 async def _fetch_field_values(
     session: Any, tenant_id: str, document_id: uuid.UUID
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     rows = (
         await session.execute(
             text("""
