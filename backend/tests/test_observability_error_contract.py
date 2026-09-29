@@ -23,6 +23,15 @@ from verigence.di.api.v1.schemas import ApiResponse, UploadData
 from verigence.di.application import intake
 from verigence.di.application.intake import IntakeError, intake_document
 from verigence.di.auth import jwks, verifier
+
+# conftest's session-scoped _patch_jwks_cache replaces JWKSCache.get_key for the rest of the run
+# once any smoke test uses it; these tests exercise the real method, captured at import.
+_REAL_GET_KEY = jwks.JWKSCache.get_key
+
+
+@pytest.fixture
+def real_jwks_get_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jwks.JWKSCache, "get_key", _REAL_GET_KEY)
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.domain.enums import ActorType, UploadStatus
 from verigence.di.errors import ErrorCode, ProblemException
@@ -447,6 +456,7 @@ async def test_invalid_token_is_401_with_challenge() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_jwks_get_key")
 async def test_jwks_outage_is_503_not_401(monkeypatch: pytest.MonkeyPatch) -> None:
     cache = _failing_jwks(monkeypatch)
     monkeypatch.setattr(verifier, "get_jwks_cache", lambda: cache)
@@ -463,6 +473,7 @@ async def test_jwks_outage_is_503_not_401(monkeypatch: pytest.MonkeyPatch) -> No
     assert body["errorCategory"] == "DEPENDENCY"
 
 
+@pytest.mark.usefixtures("real_jwks_get_key")
 def test_jwks_outage_keeps_serving_cached_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     cache = _failing_jwks(monkeypatch)
     cached_key = object()
@@ -473,6 +484,7 @@ def test_jwks_outage_keeps_serving_cached_keys(monkeypatch: pytest.MonkeyPatch) 
         cache.get_key("kid-unknown")
 
 
+@pytest.mark.usefixtures("real_jwks_get_key")
 def test_jwks_fetch_propagates_correlation_id(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, str] = {}
 
