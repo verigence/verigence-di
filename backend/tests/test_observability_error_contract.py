@@ -23,6 +23,11 @@ from verigence.di.api.v1.schemas import ApiResponse, UploadData
 from verigence.di.application import intake
 from verigence.di.application.intake import IntakeError, intake_document
 from verigence.di.auth import jwks, verifier
+from verigence.di.auth.principal import ActorPrincipal
+from verigence.di.domain.enums import ActorType, UploadStatus
+from verigence.di.errors import ErrorCode, ProblemException
+from verigence.di.main import CORRELATION_ID_HEADER, PROBLEM_MEDIA_TYPE, create_app
+from verigence.di.settings import get_settings
 
 # conftest's session-scoped _patch_jwks_cache replaces JWKSCache.get_key for the rest of the run
 # once any smoke test uses it; these tests exercise the real method, captured at import.
@@ -32,11 +37,6 @@ _REAL_GET_KEY = jwks.JWKSCache.get_key
 @pytest.fixture
 def real_jwks_get_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jwks.JWKSCache, "get_key", _REAL_GET_KEY)
-from verigence.di.auth.principal import ActorPrincipal
-from verigence.di.domain.enums import ActorType, UploadStatus
-from verigence.di.errors import ErrorCode, ProblemException
-from verigence.di.main import CORRELATION_ID_HEADER, PROBLEM_MEDIA_TYPE, create_app
-from verigence.di.settings import get_settings
 
 pytestmark = pytest.mark.no_docker
 
