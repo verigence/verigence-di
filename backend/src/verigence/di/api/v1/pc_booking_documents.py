@@ -42,6 +42,7 @@ from verigence.di.errors import ErrorCode, http_exception
 from verigence.di.repositories.audit_storage_contexts import get_audit_storage_context_by_ref
 from verigence.di.repositories.database import tenant_session
 from verigence.di.repositories.tenants import provision_actor
+from verigence.di.runtime_errors import safe_exception_context
 from verigence.di.storage.adapter import StorageAdapter, get_storage_adapter
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["PC Booking Documents"])
@@ -233,11 +234,22 @@ async def upload_pc_booking_document(
                         "pc_booking_content_url_not_generated_after_upload",
                         tenant_id=tenantId,
                         document_id=str(doc["document_id"]),
-                        error=str(exc),
+                        **safe_exception_context(exc),
                     )
 
     public_upload, rejected = _accepted_upload(doc)
+    logger.info(
+        "pc_booking_document_uploaded",
+        tenant_id=tenantId,
+        document_id=str(doc["document_id"]),
+        document_type_key=documentTypeKey,
+        actor_id=authorization.user_id,
+        actor_type="USER",
+        outcome="rejected" if rejected else "accepted",
+        upload_issue_code=doc.get("upload_issue_code"),
+    )
     return ApiResponse(
+        correlationId=correlation_id if rejected else None,
         errorCode="000" if not rejected else "E005",
         errorMessage="File Uploaded Successfully" if not rejected else "Document intake rejected",
         data=PcBookingUploadData(
@@ -338,7 +350,7 @@ async def list_pc_booking_documents(
                     "pc_booking_content_url_not_generated_for_list",
                     tenant_id=tenantId,
                     document_id=str(row["document_id"]),
-                    error=str(exc),
+                    **safe_exception_context(exc),
                 )
         documents.append(
             PcBookingDocumentStatus(

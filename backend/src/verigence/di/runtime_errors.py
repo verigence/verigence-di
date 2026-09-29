@@ -48,6 +48,23 @@ def correlation_id_or_new(candidate: object | None = None) -> str:
     return str(uuid.uuid4())
 
 
+CORRELATION_ID_HEADER = "X-Correlation-ID"
+
+
+def current_correlation_id() -> str | None:
+    """Return the correlation id bound for the current request/job, if any."""
+    value = structlog.contextvars.get_contextvars().get("correlation_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:128]
+    return None
+
+
+def correlation_headers() -> dict[str, str]:
+    """Outbound headers that propagate the bound correlation id to a dependency."""
+    correlation_id = current_correlation_id()
+    return {CORRELATION_ID_HEADER: correlation_id} if correlation_id else {}
+
+
 def safe_exception_context(
     exc: BaseException,
     *,

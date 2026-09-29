@@ -10,6 +10,7 @@ from verigence.di.api.v1.tenant_housekeeping import (
     _transaction_status,
     purge_tenant_transaction_data,
 )
+from verigence.di.auth.human_admin import HumanAdminRequest, SecurityAdminContext
 from verigence.di.domain.enums import RetentionDisposition, SubjectType
 from verigence.di.repositories.audit_storage_contexts import ensure_audit_storage_context
 from verigence.di.repositories.database import set_tenant_context
@@ -19,6 +20,16 @@ from verigence.di.repositories.tenants import (
     provision_retention_policy,
     provision_tenant,
     provision_tenant_document_types,
+)
+
+_ADMIN = HumanAdminRequest(
+    user_id="00000000-0000-4000-8000-000000000001",
+    bearer_token="test-token",
+    admin_context=SecurityAdminContext(
+        user_id="00000000-0000-4000-8000-000000000001",
+        is_super_admin=True,
+        admin_scopes=(),
+    ),
 )
 
 
@@ -131,7 +142,7 @@ async def test_transaction_housekeeping_preserves_tenant_configuration(db_sessio
             confirmTenantId=tenant_id,
             confirmation="PURGE_TRANSACTION_DATA",
         ),
-        None,  # type: ignore[arg-type]
+        _ADMIN,
         db_session,
     )
 

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # Logging — D27
     log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
     log_stdout: bool = True            # emit structured logs to stdout
+    log_format: str = ""               # json | console; default console for local, json otherwise
     log_axiom: bool = False            # Deprecated: direct Axiom drain removed.
     axiom_token: str = ""              # Deprecated: OTLP headers own credentials.
     axiom_dataset: str = "verigence-di"  # Deprecated: OTLP headers own datasets.

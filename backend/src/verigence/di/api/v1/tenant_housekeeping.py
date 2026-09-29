@@ -10,15 +10,20 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+import structlog
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from verigence.di.api.v1.admin_provisioning import delete_purge_storage_objects
 from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.human_admin import HumanAdminRequest, require_uc02_super_admin
+from verigence.di.errors import ErrorCode, ProblemException, http_exception
 from verigence.di.repositories.database import get_db_session, set_tenant_context
-from verigence.di.storage.adapter import get_storage_adapter
+from verigence.di.runtime_errors import safe_exception_context
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(
     prefix="/v1/tenants/{tenantId}/admin/housekeeping",
@@ -284,14 +289,13 @@ async def purge_tenant_transaction_data(
     Storage objects are deleted first. Database cleanup is idempotent, so a retry is
     safe if the request is interrupted after object deletion but before DB commit.
     """
-    del admin
     if command.confirmTenantId != tenantId:
-        raise HTTPException(
-            status_code=400,
+        raise http_exception(
+            ErrorCode.INVALID_REQUEST,
             detail="Tenant confirmation does not match the Tenant being purged.",
         )
     if command.confirmation != _CONFIRMATION:
-        raise HTTPException(status_code=400, detail="Invalid purge confirmation.")
+        raise http_exception(ErrorCode.INVALID_REQUEST, detail="Invalid purge confirmation.")
 
     await set_tenant_context(session, tenantId)
     status_before = await _transaction_status(session, tenantId)
@@ -308,11 +312,28 @@ async def purge_tenant_transaction_data(
         ).scalars().all()
     ]
 
-    storage = get_storage_adapter()
-    for logical_key in artifact_keys:
-        await storage.delete(logical_key)
+    logger.info(
+        "tenant_transaction_purge_started",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        documents=status_before.documents,
+        storage_objects=len(artifact_keys),
+    )
+    await delete_purge_storage_objects(
+        artifact_keys, tenant_id=tenantId, actor_id=admin.user_id, operation="tenant_purge"
+    )
 
-    await _delete_transaction_rows(session, tenantId)
+    try:
+        await _delete_transaction_rows(session, tenantId)
+    except Exception as exc:
+        logger.error(
+            "tenant_transaction_purge_db_failed",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            deleted_storage_objects=len(artifact_keys),
+            **safe_exception_context(exc),
+        )
+        raise
     status_after = await _transaction_status(session, tenantId)
     if any(
         (
@@ -325,8 +346,26 @@ async def purge_tenant_transaction_data(
             status_after.processorInvocations,
         )
     ):
-        raise RuntimeError("DI Tenant transaction housekeeping did not reach zero state")
+        logger.error(
+            "tenant_transaction_purge_incomplete",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            remaining=status_after.model_dump(exclude={"tenantId"}),
+            error_code=ErrorCode.HOUSEKEEPING_INCOMPLETE.code,
+            error_category=ErrorCode.HOUSEKEEPING_INCOMPLETE.error_category,
+        )
+        raise ProblemException(
+            ErrorCode.HOUSEKEEPING_INCOMPLETE,
+            "Tenant transaction data was not fully removed. The purge is idempotent; retry it.",
+        )
 
+    logger.info(
+        "tenant_transaction_data_purged",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        deleted_documents=status_before.documents,
+        deleted_storage_objects=len(artifact_keys),
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
@@ -350,14 +389,13 @@ async def purge_selected_document_data(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[SelectedDocumentPurgeData]:
     """Purge selected DI documents, used by Audit Core Journey housekeeping."""
-    del admin
     if command.confirmTenantId != tenantId:
-        raise HTTPException(
-            status_code=400,
+        raise http_exception(
+            ErrorCode.INVALID_REQUEST,
             detail="Tenant confirmation does not match the Tenant being purged.",
         )
     if command.confirmation != _SELECTED_DOCUMENT_CONFIRMATION:
-        raise HTTPException(status_code=400, detail="Invalid purge confirmation.")
+        raise http_exception(ErrorCode.INVALID_REQUEST, detail="Invalid purge confirmation.")
 
     document_ids = list(dict.fromkeys(command.documentIds))
     params = {"tid": tenantId, "document_ids": document_ids}
@@ -389,12 +427,30 @@ async def purge_selected_document_data(
         ).scalars().all()
     ]
 
-    storage = get_storage_adapter()
-    for logical_key in artifact_keys:
-        await storage.delete(logical_key)
+    logger.info(
+        "selected_document_purge_started",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        requested_documents=len(document_ids),
+        existing_documents=len(existing_document_ids),
+        storage_objects=len(artifact_keys),
+    )
+    await delete_purge_storage_objects(
+        artifact_keys, tenant_id=tenantId, actor_id=admin.user_id, operation="document_purge"
+    )
 
     if existing_document_ids:
-        await _delete_selected_document_rows(session, tenantId, existing_document_ids)
+        try:
+            await _delete_selected_document_rows(session, tenantId, existing_document_ids)
+        except Exception as exc:
+            logger.error(
+                "selected_document_purge_db_failed",
+                tenant_id=tenantId,
+                actor_id=admin.user_id,
+                deleted_storage_objects=len(artifact_keys),
+                **safe_exception_context(exc),
+            )
+            raise
 
     remaining = int(
         (
@@ -409,8 +465,28 @@ async def purge_selected_document_data(
         ).scalar_one()
     )
     if remaining:
-        raise RuntimeError("DI selected-document housekeeping did not reach zero state")
+        logger.error(
+            "selected_document_purge_incomplete",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            remaining_documents=remaining,
+            error_code=ErrorCode.HOUSEKEEPING_INCOMPLETE.code,
+            error_category=ErrorCode.HOUSEKEEPING_INCOMPLETE.error_category,
+        )
+        raise ProblemException(
+            ErrorCode.HOUSEKEEPING_INCOMPLETE,
+            f"{remaining} selected document(s) were not removed. The purge is idempotent; retry it.",
+        )
 
+    logger.info(
+        "selected_documents_purged",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        requested_documents=len(document_ids),
+        deleted_documents=len(existing_document_ids),
+        deleted_storage_objects=len(artifact_keys),
+        document_ids=[str(item) for item in existing_document_ids],
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",

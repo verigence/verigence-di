@@ -22,10 +22,11 @@ import httpx
 import structlog
 from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 
-from verigence.di.auth.jwks import get_jwks_cache
+from verigence.di.auth.jwks import JWKSUnavailableError, get_jwks_cache
 from verigence.di.errors import ErrorCode, http_exception
+from verigence.di.runtime_errors import correlation_headers
 from verigence.di.settings import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
@@ -81,6 +82,10 @@ security_human_bearer = HTTPBearer(
 )
 
 
+def _reject(reason: str) -> None:
+    logger.warning("uc02_human_jwt_verification_failed", reason=reason)
+
+
 def verify_security_human_token(token: str) -> HumanPrincipal | None:
     """Validate the current minimal Security human JWT contract.
 
@@ -88,18 +93,22 @@ def verify_security_human_token(token: str) -> HumanPrincipal | None:
     embedded Tenant, role, permission, location, or delegation claims as
     control-plane authority. Device identity may be carried as non-authority
     session evidence and is not used for authorization here.
+
+    Raises ``JWKSUnavailableError`` when Security signing keys cannot be fetched.
     """
 
     if not token or token.startswith("mock."):
+        _reject("mock_or_empty_token")
         return None
     try:
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
         if not isinstance(kid, str) or not kid:
+            _reject("missing_kid")
             return None
         key = get_jwks_cache().get_key(kid)
         if key is None:
-            logger.warning("uc02_human_jwks_key_not_found", kid=kid)
+            logger.warning("uc02_human_jwks_key_not_found", kid=kid[:64])
             return None
         claims: dict[str, Any] = jwt.decode(
             token,
@@ -108,23 +117,31 @@ def verify_security_human_token(token: str) -> HumanPrincipal | None:
             audience=_AUDIENCE,
             issuer=_ISSUER,
         )
+    except ExpiredSignatureError:
+        _reject("token_expired")
+        return None
     except (JWTError, ValueError, TypeError):
-        logger.warning("uc02_human_jwt_verification_failed")
+        logger.warning("uc02_human_jwt_verification_failed", reason="invalid_token")
         return None
 
     if not _REQUIRED_HUMAN_CLAIMS.issubset(claims):
+        _reject("missing_required_claims")
         return None
     if claims.get("actor_type") != "USER":
+        _reject("wrong_actor_type")
         return None
     if _FORBIDDEN_AUTHORITY_CLAIMS.intersection(claims):
+        _reject("authority_claims_present")
         return None
 
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject.strip():
+        _reject("missing_sub")
         return None
     try:
         user_id = str(UUID(subject))
     except ValueError:
+        _reject("sub_not_uuid")
         return None
     return HumanPrincipal(user_id=user_id)
 
@@ -171,7 +188,10 @@ class SecurityAdminClient:
         try:
             response = self._client.get(
                 "/security/v1/platform/admin-context",
-                headers={"Authorization": f"Bearer {human_bearer_token}"},
+                headers={
+                    "Authorization": f"Bearer {human_bearer_token}",
+                    **correlation_headers(),
+                },
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -191,6 +211,12 @@ class SecurityAdminClient:
         try:
             payload: Any = response.json()
         except ValueError as exc:
+            logger.warning(
+                "security_admin_call_failed",
+                reason="invalid_json",
+                http_status=response.status_code,
+                path="/security/v1/platform/admin-context",
+            )
             raise SecurityAdminError("Security administrative response is not valid JSON") from exc
         return _parse_admin_context(payload)
 
@@ -263,7 +289,13 @@ def require_uc02_super_admin(
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise http_exception(ErrorCode.UNAUTHORIZED, detail="Security human access token is required.")
     bearer_token = credentials.credentials.strip()
-    principal = verify_security_human_token(bearer_token)
+    try:
+        principal = verify_security_human_token(bearer_token)
+    except JWKSUnavailableError as exc:
+        raise http_exception(
+            ErrorCode.SECURITY_INTEGRATION_FAILED,
+            detail="Token signing keys are temporarily unavailable. Retry shortly.",
+        ) from exc
     if principal is None:
         raise http_exception(ErrorCode.UNAUTHORIZED, detail="Security human access token is invalid.")
 
@@ -283,16 +315,29 @@ def require_uc02_super_admin(
         with SecurityAdminClient(base_url=base_url) as security:
             admin_context = security.get_admin_context(human_bearer_token=bearer_token)
     except SecurityAdminError:
-        logger.warning("uc02_superadmin_attestation_failed", reason="security_unavailable_or_denied")
+        logger.warning(
+            "uc02_superadmin_attestation_failed",
+            reason="security_unavailable_or_denied",
+            actor_id=principal.user_id,
+        )
         raise http_exception(
             ErrorCode.FORBIDDEN,
             detail="Current SuperAdmin authorization could not be confirmed.",
         ) from None
 
     if admin_context.user_id != principal.user_id:
-        logger.warning("uc02_superadmin_attestation_failed", reason="user_mismatch")
+        logger.warning(
+            "uc02_superadmin_attestation_failed",
+            reason="user_mismatch",
+            actor_id=principal.user_id,
+        )
         raise http_exception(ErrorCode.FORBIDDEN, detail="Security administrator identity mismatch.")
     if not admin_context.is_super_admin:
+        logger.warning(
+            "uc02_superadmin_attestation_failed",
+            reason="not_super_admin",
+            actor_id=principal.user_id,
+        )
         raise http_exception(ErrorCode.FORBIDDEN, detail="SuperAdmin authority is required.")
 
     return HumanAdminRequest(

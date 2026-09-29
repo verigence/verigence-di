@@ -36,10 +36,12 @@ from verigence.di.repositories.database import get_db_session, set_tenant_contex
 from verigence.di.repositories.documents import get_document
 from verigence.di.repositories.subjects import subject_exists
 from verigence.di.repositories.tenants import provision_actor
+from verigence.di.runtime_errors import current_correlation_id
 from verigence.di.storage.adapter import StorageAdapter, get_storage_adapter
 from verigence.di.storage.audit_keys import frozen_audit_slugs
 
 router = APIRouter(prefix="/v1/tenants/{tenantId}", tags=["Audit Storage Contexts"])
+logger = structlog.get_logger(__name__)
 
 
 class _AsyncStreamingStorage(Protocol):
@@ -208,8 +210,22 @@ async def ensure_storage_context(
         )
         await session.commit()
     except AuditStorageContextConflict as exc:
-        raise http_exception(ErrorCode.CONFLICT, detail=str(exc)) from exc
+        raise http_exception(
+            ErrorCode.CONFLICT,
+            detail=(
+                "externalContextRef already identifies a different Audit business "
+                "context; it cannot be re-pointed."
+            ),
+        ) from exc
 
+    logger.info(
+        "audit_storage_context_ensured",
+        tenant_id=tenantId,
+        storage_context_id=str(_context_uuid(context, "storage_context_id")),
+        subject_id=str(request.subjectId),
+        actor_id=service.service_id,
+        actor_type="SERVICE",
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
@@ -277,18 +293,30 @@ async def upload_audit_context_document(
     internal_upload: UploadStatus = doc["upload_status"]
     public_upload = public_upload_status(internal_upload)
     rejected = public_upload == "REJECTED"
+    error_code = (
+        "000"
+        if not rejected
+        else _upload_error_code(internal_upload, doc.get("upload_issue_code"))
+    )
+    logger.info(
+        "audit_context_document_uploaded",
+        tenant_id=tenantId,
+        document_id=str(doc["document_id"]),
+        document_type_key=documentTypeKey,
+        actor_id=service.service_id,
+        actor_type="SERVICE",
+        outcome="rejected" if rejected else "accepted",
+        result_code=error_code,
+    )
     return ApiResponse(
-        errorCode=(
-            "000"
-            if not rejected
-            else _upload_error_code(internal_upload, doc.get("upload_issue_code"))
-        ),
+        errorCode=error_code,
         errorMessage=("File Uploaded Successfully" if not rejected else "Document intake rejected"),
         data=UploadData(
             documentId=doc["document_id"],
             uploadStatus=public_upload,
             processingStatus=public_processing_status(doc.get("processing_status"), rejected),
         ),
+        correlationId=correlation_id if rejected else None,
     )
 
 
@@ -341,6 +369,7 @@ async def get_audit_context_document_fields(
                 errorCode="E008",
                 errorMessage="Document is not yet confirmed — fields not available",
                 data=None,
+                correlationId=current_correlation_id(),
             )
         rows = (
             await session.execute(

@@ -5,18 +5,28 @@ Thread-safe lazy refresh on cache miss or TTL expiry.
 """
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from typing import Any
 
 import httpx
+import structlog
 from jose import jwk  # type: ignore[import]
 from jose.backends.base import Key  # type: ignore[import]
 
-logger = logging.getLogger(__name__)
+from verigence.di.runtime_errors import correlation_headers, safe_exception_context
+
+logger = structlog.get_logger(__name__)
 
 _TTL_SECONDS = 3600  # Refresh keys at most once per hour
+
+
+class JWKSUnavailableError(RuntimeError):
+    """The Security JWKS could not be fetched and no usable key is cached.
+
+    This is a dependency outage, not an invalid token: callers must answer 503,
+    never 401.
+    """
 
 
 class JWKSCache:
@@ -33,25 +43,53 @@ class JWKSCache:
         self._fetched_at: float = 0.0
 
     def get_key(self, kid: str) -> Key | None:
-        """Return the public Key for *kid*, refreshing if needed."""
+        """Return the public Key for *kid*, refreshing if needed.
+
+        Returns ``None`` when the JWKS was fetched but does not contain *kid*
+        (an invalid token). Raises ``JWKSUnavailableError`` when the JWKS could
+        not be fetched and *kid* is not cached.
+        """
         with self._lock:
             if kid in self._keys and not self._is_stale():
                 return self._keys[kid]
-            self._refresh()
-            return self._keys.get(kid)
+            refreshed = self._refresh()
+            key = self._keys.get(kid)
+            if refreshed:
+                return key
+            if key is not None:
+                logger.warning(
+                    "jwks_stale_keys_in_use",
+                    reason="refresh_failed",
+                    key_count=len(self._keys),
+                    stale_seconds=round(time.monotonic() - self._fetched_at),
+                )
+                return key
+            raise JWKSUnavailableError("Security JWKS is unavailable")
 
     def _is_stale(self) -> bool:
         return (time.monotonic() - self._fetched_at) > _TTL_SECONDS
 
-    def _refresh(self) -> None:
-        """Fetch JWKS and rebuild the key map.  Must be called under _lock."""
+    def _refresh(self) -> bool:
+        """Fetch JWKS and rebuild the key map.  Must be called under _lock.
+
+        Returns False (keeping any previously cached keys) on a fetch failure.
+        """
         try:
-            resp = httpx.get(self._url, timeout=5.0)
+            resp = httpx.get(self._url, timeout=5.0, headers=correlation_headers())
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
         except Exception as exc:
-            logger.warning("jwks_refresh_failed", extra={"url": self._url, "error": str(exc)})
-            return  # keep stale keys rather than clearing on transient error
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "jwks_refresh_failed",
+                reason="http_status" if status_code is not None else "fetch_failed",
+                http_status=status_code,
+                cached_key_count=len(self._keys),
+                **safe_exception_context(exc),
+            )
+            return False  # keep stale keys rather than clearing on transient error
 
         new_keys: dict[str, Key] = {}
         for key_data in data.get("keys", []):
@@ -59,10 +97,15 @@ class JWKSCache:
             try:
                 new_keys[kid] = jwk.construct(key_data)
             except Exception as exc:
-                logger.warning("jwks_key_construct_failed", extra={"kid": kid, "error": str(exc)})
+                logger.warning(
+                    "jwks_key_construct_failed",
+                    kid=str(kid)[:64],
+                    **safe_exception_context(exc),
+                )
         self._keys = new_keys
         self._fetched_at = time.monotonic()
-        logger.info("jwks_refreshed", extra={"key_count": len(new_keys)})
+        logger.info("jwks_refreshed", key_count=len(new_keys))
+        return True
 
 
 # Module-level singleton — instantiated lazily in get_jwks_cache()

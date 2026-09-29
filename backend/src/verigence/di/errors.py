@@ -6,6 +6,10 @@ The baseline catalogue remains unchanged.  A small set of additive transport and
 runtime aliases is defined below it so framework/dependency failures can use the
 same stable Problem contract instead of leaking raw exception text.
 
+Every Problem body carries ``category`` (the fine-grained baseline catalogue
+domain, unchanged) and ``errorCategory`` (the coarse class clients and operators
+branch on: VALIDATION | BUSINESS | SECURITY | DEPENDENCY | TECHNICAL).
+
 Usage::
 
     from verigence.di.errors import problem_response, ErrorCode
@@ -28,6 +32,26 @@ class _ErrorDef:
     retryable: bool
     category: str
     title: str
+
+    @property
+    def error_category(self) -> str:
+        """Coarse business-vs-technical class used by clients and log queries.
+
+        ``category`` is the fine-grained baseline catalogue domain and stays
+        unchanged; this derived class is one of VALIDATION, BUSINESS, SECURITY,
+        DEPENDENCY or TECHNICAL.
+        """
+        if self.category in {"AUTHENTICATION", "AUTHORIZATION"}:
+            return "SECURITY"
+        if self.http_status >= 500:
+            return "TECHNICAL" if self.category == "INTERNAL" else "DEPENDENCY"
+        if self.category in {"REQUEST", "UPLOAD"}:
+            return "VALIDATION"
+        return "BUSINESS"
+
+
+# Public name for type annotations outside this module.
+ErrorDef = _ErrorDef
 
 
 class ErrorCode:
@@ -104,6 +128,9 @@ class ErrorCode:
     EXTRACTION_PROVIDER_ERROR        = _ErrorDef("EXTRACTION_PROVIDER_ERROR",        503, True,  "DEPENDENCY",       "Document extraction provider request failed.")
     CLASSIFICATION_FAILED            = _ErrorDef("CLASSIFICATION_FAILED",            503, True,  "CLASSIFICATION",   "Document classification could not be completed.")
     WORKER_INTERNAL_ERROR            = _ErrorDef("WORKER_INTERNAL_ERROR",            500, True,  "INTERNAL",         "Document processing failed due to an internal technical error.")
+    RESOURCE_NOT_FOUND               = _ErrorDef("RESOURCE_NOT_FOUND",               404, False, "RESOURCE",         "Requested resource does not exist or is not visible.")  # observability-api
+    PROVISIONING_INCOMPLETE          = _ErrorDef("PROVISIONING_INCOMPLETE",          500, True,  "INTERNAL",         "Tenant provisioning did not reach the verified READY state.")  # observability-api
+    HOUSEKEEPING_INCOMPLETE          = _ErrorDef("HOUSEKEEPING_INCOMPLETE",          500, True,  "INTERNAL",         "Deletion did not reach the verified zero state.")  # observability-api
 
 
 def error_for_http_status(status_code: int) -> _ErrorDef:
@@ -136,6 +163,38 @@ def error_for_http_status(status_code: int) -> _ErrorDef:
     return ErrorCode.INTERNAL_ERROR
 
 
+def error_for_app_status(status_code: int) -> _ErrorDef:
+    """Code for an application-raised HTTPException that only carries a string.
+
+    Unlike framework routing failures, a route raising ``HTTPException(404, ...)``
+    means a missing business resource, not a missing API route.
+    """
+    if status_code == 404:
+        return ErrorCode.RESOURCE_NOT_FOUND
+    return error_for_http_status(status_code)
+
+
+def error_for_code(code: object) -> _ErrorDef | None:
+    """Return the catalogue entry for a stable code string, if one exists."""
+    if not isinstance(code, str) or not code:
+        return None
+    candidate = getattr(ErrorCode, code, None)
+    return candidate if isinstance(candidate, _ErrorDef) and candidate.code == code else None
+
+
+class ProblemException(Exception):
+    """Raise from any layer to surface exactly one canonical Problem response.
+
+    ``detail`` must be caller-safe (no exception text, document values or request
+    payloads). The API layer renders it with the request correlation id.
+    """
+
+    def __init__(self, error: _ErrorDef, detail: str | None = None) -> None:
+        super().__init__(detail or error.title)
+        self.error = error
+        self.detail = detail or error.title
+
+
 def problem_response(
     error: _ErrorDef,
     *,
@@ -157,6 +216,7 @@ def problem_response(
         "status": error.http_status,
         "retryable": error.retryable,
         "category": error.category,
+        "errorCategory": error.error_category,
     }
     if detail:
         body["detail"] = detail

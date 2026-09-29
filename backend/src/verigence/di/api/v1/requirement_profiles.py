@@ -284,7 +284,7 @@ async def update_draft_requirement_profile(
         ).mappings().one()
 
     logger.info(
-        "requirement_profile_created",
+        "requirement_profile_updated",
         tenant_id=tenant_id,
         actor_id=actor.actor_id,
         profile_id=str(profile_id),

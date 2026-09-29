@@ -19,17 +19,19 @@ Mock token protocol (local + dev only — not available in production):
 """
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from jose import JWTError, jwt  # type: ignore[import]
+import structlog
+from jose import ExpiredSignatureError, JWTError, jwt  # type: ignore[import]
+from jose.exceptions import JWTClaimsError
 
-from verigence.di.auth.jwks import get_jwks_cache
+from verigence.di.auth.jwks import JWKSUnavailableError, get_jwks_cache
 from verigence.di.auth.permissions import ROLE_PERMISSIONS
 from verigence.di.auth.principal import ActorPrincipal
 from verigence.di.domain.enums import ActorType
+from verigence.di.runtime_errors import safe_exception_context
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # ── Security JWT contract constants ───────────────────────────────────────────
 _ISSUER = "verigence-security"
@@ -58,12 +60,23 @@ def _permissions_for_roles(roles: list[str]) -> frozenset[str]:
     return frozenset(perms)
 
 
+def _reject(reason: str, **fields: Any) -> None:
+    """Log why a token was refused. Never log the token or its claims payload."""
+    logger.warning("jwt_rejected", reason=reason, **fields)
+
+
 def verify_token(token: str, *, system: bool = False) -> ActorPrincipal | None:
-    """Verify *token* and return an ActorPrincipal, or None on any failure."""
+    """Verify *token* and return an ActorPrincipal, or None if it is not valid.
+
+    Raises ``JWKSUnavailableError`` when the Security JWKS cannot be reached, so
+    callers answer 503 for a dependency outage instead of 401.
+    """
     try:
         return _verify(token, system=system)
+    except JWKSUnavailableError:
+        raise
     except Exception as exc:
-        logger.debug("jwt_verification_error", extra={"error": str(exc)})
+        _reject("verification_error", system=system, **safe_exception_context(exc))
         return None
 
 
@@ -75,7 +88,7 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
     # ── Mock token — local and dev only, never production ─────────────────────
     if token.startswith("mock."):
         if settings.is_production:
-            logger.warning("mock_token_rejected_in_production")
+            _reject("mock_token_in_production")
             return None
         # "mock.<tenant>.<actor>.<ROLE1>[.<ROLE2>...]"
         parts = token.split(".", maxsplit=3)
@@ -111,15 +124,15 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
     # ── Real Security JWKS verification ───────────────────────────────────────
     try:
         unverified_header = jwt.get_unverified_header(token)
-    except JWTError as exc:
-        logger.debug("jwt_bad_header", extra={"error": str(exc)})
+    except JWTError:
+        _reject("malformed_token")
         return None
 
     kid = unverified_header.get("kid", "")
     cache = get_jwks_cache()
     key = cache.get_key(kid)
     if key is None:
-        logger.warning("jwks_key_not_found", extra={"kid": kid})
+        _reject("unknown_signing_key", kid=str(kid)[:64])
         return None
 
     try:
@@ -130,8 +143,14 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
             audience=_AUDIENCE,
             issuer=_ISSUER,
         )
-    except JWTError as exc:
-        logger.debug("jwt_decode_failed", extra={"error": str(exc)})
+    except ExpiredSignatureError:
+        _reject("token_expired")
+        return None
+    except JWTClaimsError:
+        _reject("invalid_claims")
+        return None
+    except JWTError:
+        _reject("invalid_signature")
         return None
 
     # ── Extract canonical claims ───────────────────────────────────────────────
@@ -145,36 +164,34 @@ def _verify(token: str, *, system: bool) -> ActorPrincipal | None:
     location_id: str | None = claims.get(_CLAIM_LOCATION_ID)
 
     if not actor_id:
-        logger.warning("jwt_missing_sub")
+        _reject("missing_sub")
         return None
 
     if not isinstance(raw_actor_type, str) or not raw_actor_type:
-        logger.warning("jwt_missing_actor_type", extra={"actor_id": actor_id})
+        _reject("missing_actor_type", actor_id=actor_id)
         return None
 
     try:
         actor_type = ActorType(raw_actor_type)
     except ValueError:
-        logger.warning(
-            "jwt_unknown_actor_type",
-            extra={"actor_id": actor_id, "actor_type": raw_actor_type},
-        )
+        _reject("unknown_actor_type", actor_id=actor_id, actor_type=raw_actor_type[:64])
         return None
 
     # Dedicated system endpoints require a canonical SYSTEM actor. Security may
     # issue SYSTEM identities with a Tenant scope, so tenant_id is allowed here.
     if system:
         if actor_type is not ActorType.SYSTEM:
-            logger.warning(
-                "jwt_system_endpoint_wrong_actor_type",
-                extra={"actor_id": actor_id, "actor_type": actor_type.value},
+            _reject(
+                "system_endpoint_wrong_actor_type",
+                actor_id=actor_id,
+                actor_type=actor_type.value,
             )
             return None
     else:
         # Normal DI business/Admin operations are Tenant-scoped for all canonical
         # actor types (USER, SYSTEM and SERVICE_INTEGRATION).
         if not tenant_id:
-            logger.warning("jwt_missing_tenant_id", extra={"actor_id": actor_id})
+            _reject("missing_tenant_id", actor_id=actor_id)
             return None
 
     return ActorPrincipal(

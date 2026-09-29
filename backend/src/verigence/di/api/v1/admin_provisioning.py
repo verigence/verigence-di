@@ -3,20 +3,25 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+import structlog
+from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.api.v1.schemas import ApiResponse
 from verigence.di.auth.human_admin import HumanAdminRequest, require_uc02_super_admin
+from verigence.di.errors import ErrorCode, ProblemException, http_exception
 from verigence.di.repositories.database import get_db_session, set_tenant_context
 from verigence.di.repositories.tenants import (
     provision_retention_policy,
     provision_tenant,
     provision_tenant_document_types,
 )
+from verigence.di.runtime_errors import safe_exception_context
 from verigence.di.storage.adapter import get_storage_adapter
+
+logger = structlog.get_logger(__name__)
 
 admin_router = APIRouter(prefix="/v1/tenants/{tenantId}/admin", tags=["UC02 Administration"])
 effective_master_router = APIRouter(
@@ -46,6 +51,39 @@ class ProjectPurgeData(BaseModel):
     tenantId: str
     purgeStatus: Literal["REMOVED"]
     deletedStorageObjects: int
+
+
+async def delete_purge_storage_objects(
+    logical_keys: list[str],
+    *,
+    tenant_id: str,
+    actor_id: str,
+    operation: str,
+) -> None:
+    """Delete stored objects before DB state; report a mid-way outage as retryable."""
+    storage = get_storage_adapter()
+    deleted = 0
+    try:
+        for logical_key in logical_keys:
+            await storage.delete(logical_key)
+            deleted += 1
+    except Exception as exc:
+        logger.error(
+            "purge_storage_delete_failed",
+            operation=operation,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            deleted_before_failure=deleted,
+            total_objects=len(logical_keys),
+            error_code=ErrorCode.STORAGE_WRITE_FAILED.code,
+            error_category=ErrorCode.STORAGE_WRITE_FAILED.error_category,
+            **safe_exception_context(exc),
+        )
+        raise ProblemException(
+            ErrorCode.STORAGE_WRITE_FAILED,
+            f"Object storage deletion stopped after {deleted} of {len(logical_keys)} objects. "
+            "No database rows were removed; the purge is idempotent and may be retried.",
+        ) from exc
 
 
 async def _status(session: AsyncSession, tenant_id: str) -> ProvisioningData:
@@ -132,14 +170,33 @@ async def ensure_provisioning(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
 ) -> ApiResponse[ProvisioningData]:
-    del admin, idempotency_key
+    del idempotency_key
     await set_tenant_context(session, tenantId)
     await provision_tenant(session, tenantId)
     await provision_retention_policy(session, tenantId)
     await provision_tenant_document_types(session, tenantId)
     data = await _status(session, tenantId)
     if data.provisioningStatus != "READY":
-        raise RuntimeError("DI Tenant provisioning did not reach READY state")
+        failed_checks = [check.key for check in data.checks if check.status != "PASS"]
+        logger.error(
+            "tenant_provisioning_incomplete",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            failed_checks=failed_checks,
+            error_code=ErrorCode.PROVISIONING_INCOMPLETE.code,
+            error_category=ErrorCode.PROVISIONING_INCOMPLETE.error_category,
+        )
+        raise ProblemException(
+            ErrorCode.PROVISIONING_INCOMPLETE,
+            "Tenant provisioning did not reach READY "
+            f"(failed checks: {', '.join(failed_checks)}). The request is idempotent; retry it.",
+        )
+    logger.info(
+        "tenant_provisioning_ensured",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        provisioning_status=data.provisioningStatus,
+    )
     return ApiResponse(errorCode="000", errorMessage="Success", data=data)
 
 
@@ -161,7 +218,6 @@ async def remove_provisioning(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[ProvisioningCleanupData]:
     """Narrow compensation for failed new-Project provisioning only."""
-    del admin
     await set_tenant_context(session, tenantId)
     has_documents = bool(
         (
@@ -172,8 +228,14 @@ async def remove_provisioning(
         ).scalar_one()
     )
     if has_documents:
-        raise HTTPException(
-            status_code=409,
+        logger.info(
+            "tenant_provisioning_compensation_refused",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            reason="operational_data_exists",
+        )
+        raise http_exception(
+            ErrorCode.CONFLICT,
             detail="Tenant provisioning cannot be compensated after operational data exists.",
         )
 
@@ -213,8 +275,25 @@ async def remove_provisioning(
         ).scalar_one()
     )
     if remaining != 0:
-        raise RuntimeError("DI Tenant provisioning compensation did not reach zero state")
+        logger.error(
+            "tenant_provisioning_compensation_incomplete",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            remaining_rows=remaining,
+            error_code=ErrorCode.HOUSEKEEPING_INCOMPLETE.code,
+            error_category=ErrorCode.HOUSEKEEPING_INCOMPLETE.error_category,
+        )
+        raise ProblemException(
+            ErrorCode.HOUSEKEEPING_INCOMPLETE,
+            "Provisioning compensation did not remove every provisioning row. "
+            "The request is idempotent; retry it.",
+        )
 
+    logger.info(
+        "tenant_provisioning_compensated",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
@@ -377,7 +456,7 @@ async def _effective_versions(
             for row in rows
         ]
 
-    raise HTTPException(status_code=422, detail="Unsupported DI Project Master key.")
+    raise http_exception(ErrorCode.VALIDATION_ERROR, detail="Unsupported DI Project Master key.")
 
 
 @effective_master_router.get("/{masterKey}/versions")
@@ -397,36 +476,8 @@ async def list_effective_project_master_versions(
     )
 
 
-@admin_router.delete("/project-data", response_model=ApiResponse[ProjectPurgeData])
-async def purge_project_data(
-    tenantId: str,
-    admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> ApiResponse[ProjectPurgeData]:
-    """Hard-delete Project-owned DI state. Audit Core owns the zero-Journey gate.
-
-    This endpoint is deliberately SuperAdmin-only and idempotent. Object storage
-    is deleted before database state so retries remain safe after partial failure.
-    Global Verigence Document Types and extraction profiles are never deleted.
-    """
-    del admin
-    await set_tenant_context(session, tenantId)
-    artifact_keys = [
-        str(value)
-        for value in (
-            await session.execute(
-                text(
-                    "SELECT logical_object_key FROM docintel.document_artifacts "
-                    "WHERE tenant_id=:tid AND logical_object_key IS NOT NULL"
-                ),
-                {"tid": tenantId},
-            )
-        ).scalars().all()
-    ]
-    storage = get_storage_adapter()
-    for logical_key in artifact_keys:
-        await storage.delete(logical_key)
-
+async def _delete_project_rows(session: AsyncSession, tenant_id: str) -> None:
+    """Delete Project-owned DI rows (object storage is already gone)."""
     # tenant_settings points at its active retention policy while the retention
     # policy also belongs to the same Tenant. Break this deliberate ownership cycle
     # before generic FK child-first cleanup, mirroring provisioning compensation.
@@ -435,7 +486,7 @@ async def purge_project_data(
             "UPDATE docintel.tenant_settings "
             "SET active_retention_policy_id=NULL WHERE tenant_id=:tid"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
 
     # documents.current_processing_run_id points at processing_runs, while every
@@ -453,7 +504,7 @@ async def purge_project_data(
             "UPDATE docintel.documents "
             "SET current_processing_run_id=NULL WHERE tenant_id=:tid"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
 
     # Delete tenant-scoped operational/link tables first. This is intentionally
@@ -536,7 +587,7 @@ async def purge_project_data(
             f"  WHERE epf.profile_id IN ({target_profiles_sql})"
             ")"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
     await session.execute(
         text(
@@ -546,14 +597,14 @@ async def purge_project_data(
             f"  WHERE epf.profile_id IN ({target_profiles_sql})"
             ")"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
     await session.execute(
         text(
             "DELETE FROM docintel.extraction_profile_fields "
             f"WHERE profile_id IN ({target_profiles_sql})"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
     await session.execute(
         text(
@@ -562,24 +613,78 @@ async def purge_project_data(
             "WHERE dt.document_type_id=ep.document_type_id "
             "AND (ep.scope_tenant_id=:tid OR dt.owner_tenant_id=:tid)"
         ),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
 
     # Tenant custom vocabularies/Document Types are Project-owned definitions.
     # Global Verigence defaults have NULL owner_tenant_id and are untouched.
     await session.execute(
         text("DELETE FROM docintel.canonical_fields WHERE owner_tenant_id=:tid"),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
     await session.execute(
         text("DELETE FROM docintel.document_types WHERE owner_tenant_id=:tid"),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
     await session.execute(
         text("DELETE FROM docintel.tenant_settings WHERE tenant_id=:tid"),
-        {"tid": tenantId},
+        {"tid": tenant_id},
     )
 
+
+@admin_router.delete("/project-data", response_model=ApiResponse[ProjectPurgeData])
+async def purge_project_data(
+    tenantId: str,
+    admin: Annotated[HumanAdminRequest, Depends(require_uc02_super_admin)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[ProjectPurgeData]:
+    """Hard-delete Project-owned DI state. Audit Core owns the zero-Journey gate.
+
+    This endpoint is deliberately SuperAdmin-only and idempotent. Object storage
+    is deleted before database state so retries remain safe after partial failure.
+    Global Verigence Document Types and extraction profiles are never deleted.
+    """
+    await set_tenant_context(session, tenantId)
+    artifact_keys = [
+        str(value)
+        for value in (
+            await session.execute(
+                text(
+                    "SELECT logical_object_key FROM docintel.document_artifacts "
+                    "WHERE tenant_id=:tid AND logical_object_key IS NOT NULL"
+                ),
+                {"tid": tenantId},
+            )
+        ).scalars().all()
+    ]
+    logger.info(
+        "project_data_purge_started",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        storage_objects=len(artifact_keys),
+    )
+    await delete_purge_storage_objects(
+        artifact_keys, tenant_id=tenantId, actor_id=admin.user_id, operation="project_purge"
+    )
+
+    try:
+        await _delete_project_rows(session, tenantId)
+    except Exception as exc:
+        logger.error(
+            "project_data_purge_db_failed",
+            tenant_id=tenantId,
+            actor_id=admin.user_id,
+            deleted_storage_objects=len(artifact_keys),
+            **safe_exception_context(exc),
+        )
+        raise
+
+    logger.info(
+        "project_data_purged",
+        tenant_id=tenantId,
+        actor_id=admin.user_id,
+        deleted_storage_objects=len(artifact_keys),
+    )
     return ApiResponse(
         errorCode="000",
         errorMessage="Success",
