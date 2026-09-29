@@ -20,6 +20,12 @@ from typing import Any
 
 MAX_TOKENS_FINISH_REASON = "MAX_TOKENS"
 
+# Finish reasons meaning the provider refused the content itself: the same
+# document at temperature 0 is refused again, so these are not retried.
+BLOCKED_FINISH_REASONS = frozenset(
+    {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "LANGUAGE"}
+)
+
 
 def generation_config(*, thinking_level: str, max_output_tokens: int) -> dict[str, Any]:
     """``generationConfig`` for a JSON answer at temperature 0."""
@@ -42,6 +48,9 @@ class GeminiUsage:
     cached_tokens: int = 0
     total_tokens: int = 0
     finish_reason: str | None = None
+    block_reason: str | None = None
+    response_id: str | None = None
+    model_version: str | None = None
 
     @property
     def billed_output_tokens(self) -> int:
@@ -51,6 +60,10 @@ class GeminiUsage:
     @property
     def truncated(self) -> bool:
         return self.finish_reason == MAX_TOKENS_FINISH_REASON
+
+    @property
+    def blocked(self) -> bool:
+        return self.block_reason is not None or self.finish_reason in BLOCKED_FINISH_REASONS
 
     def as_metrics(self) -> dict[str, Any]:
         return {**asdict(self), "billed_output_tokens": self.billed_output_tokens}
@@ -67,6 +80,8 @@ def usage_from_response(data: dict[str, Any]) -> GeminiUsage:
     usage = data.get("usageMetadata") or {}
     candidates = data.get("candidates") or []
     finish = candidates[0].get("finishReason") if candidates and isinstance(candidates[0], dict) else None
+    feedback = data.get("promptFeedback") or {}
+    block = feedback.get("blockReason") if isinstance(feedback, dict) else None
     return GeminiUsage(
         prompt_tokens=_int(usage.get("promptTokenCount")),
         response_tokens=_int(usage.get("candidatesTokenCount")),
@@ -74,4 +89,11 @@ def usage_from_response(data: dict[str, Any]) -> GeminiUsage:
         cached_tokens=_int(usage.get("cachedContentTokenCount")),
         total_tokens=_int(usage.get("totalTokenCount")),
         finish_reason=str(finish) if finish else None,
+        block_reason=str(block) if block else None,
+        response_id=_str_or_none(data.get("responseId")),
+        model_version=_str_or_none(data.get("modelVersion")),
     )
+
+
+def _str_or_none(value: Any) -> str | None:
+    return str(value)[:128] if isinstance(value, str) and value else None

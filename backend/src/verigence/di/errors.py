@@ -104,6 +104,10 @@ class ErrorCode:
     EXTRACTION_PROVIDER_ERROR        = _ErrorDef("EXTRACTION_PROVIDER_ERROR",        503, True,  "DEPENDENCY",       "Document extraction provider request failed.")
     CLASSIFICATION_FAILED            = _ErrorDef("CLASSIFICATION_FAILED",            503, True,  "CLASSIFICATION",   "Document classification could not be completed.")
     WORKER_INTERNAL_ERROR            = _ErrorDef("WORKER_INTERNAL_ERROR",            500, True,  "INTERNAL",         "Document processing failed due to an internal technical error.")
+    # observability-pipeline
+    DOCUMENT_AI_REQUEST_REJECTED     = _ErrorDef("DOCUMENT_AI_REQUEST_REJECTED",     502, False, "DEPENDENCY",       "Document AI provider rejected the request.")
+    DOCUMENT_AI_CONTENT_BLOCKED      = _ErrorDef("DOCUMENT_AI_CONTENT_BLOCKED",      422, False, "CLASSIFICATION",   "Document AI provider declined to process the document content.")
+    WORKER_LEASE_EXHAUSTED           = _ErrorDef("WORKER_LEASE_EXHAUSTED",           500, False, "INTERNAL",         "Processing repeatedly stopped before completing and was abandoned.")
 
 
 def error_for_http_status(status_code: int) -> _ErrorDef:

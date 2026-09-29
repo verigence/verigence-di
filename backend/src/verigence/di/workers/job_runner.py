@@ -53,6 +53,13 @@ from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
 from verigence.di.repositories.search_index import upsert_search_index
 from verigence.di.rules.runner import ExtractedFieldInput, normalize_and_validate
+from verigence.di.runtime_errors import (
+    failure_category,
+    safe_exception_context,
+    safe_exception_detail,
+    safe_persisted_detail,
+    technical_failure,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -172,6 +179,8 @@ async def run_processing_job(
         log.warning("processing_run_failed",
                     retryable=exc.retryable,
                     error_code=exc.code,
+                    error_category=failure_category(exc.code),
+                    duration_ms=round((time.monotonic() - _job_start) * 1000, 1),
                     error_detail=exc.detail)
         return JobRunResult(
             success=False,
@@ -181,7 +190,7 @@ async def run_processing_job(
             retryable=exc.retryable,
         )
     except Exception as exc:
-        err_detail = f"Unexpected worker error: {exc}"
+        err_detail = safe_exception_detail("WORKER_INTERNAL_ERROR", exc)
         await _fail_processing_run(
             session=session,
             tenant_id=tenant_id,
@@ -190,7 +199,13 @@ async def run_processing_job(
             error_code="WORKER_INTERNAL_ERROR",
             error_detail=err_detail,
         )
-        log.exception("processing_run_unexpected_error")
+        log.error(
+            "processing_run_unexpected_error",
+            error_code="WORKER_INTERNAL_ERROR",
+            error_category=failure_category("WORKER_INTERNAL_ERROR"),
+            duration_ms=round((time.monotonic() - _job_start) * 1000, 1),
+            **safe_exception_context(exc),
+        )
         return JobRunResult(
             success=False,
             processing_run_id=processing_run_id,
@@ -363,9 +378,10 @@ async def _execute_steps(
             correlation_id=correlation_id,
         )
     except Exception as exc:
+        failure_error = _provider_processing_error(exc, operation="classification_provider")
         await _update_invocation(session, tenant_id, classify_invocation_id,
-                                 "FAILED", error_detail=str(exc))
-        raise RetryableError("CLASSIFICATION_PROVIDER_ERROR", str(exc)) from exc
+                                 "FAILED", error_detail=failure_error.detail)
+        raise failure_error from exc
 
     await _update_invocation(
         session, tenant_id, classify_invocation_id, "SUCCESS",
@@ -377,10 +393,12 @@ async def _execute_steps(
 
     accepted = _accept_classification(classifications, candidates, acceptance_score)
     if accepted is None:
-        scores = [(c["document_type_key"], c.get("classification_score")) for c in candidates]
+        scores = _classification_scores(classifications)
         log.warning(
             "classification_failed",
             reason="AMBIGUOUS",
+            error_code="CLASSIFICATION_AMBIGUOUS",
+            error_category=failure_category("CLASSIFICATION_AMBIGUOUS"),
             candidate_keys=[c["document_type_key"] for c in candidates],
             scores=scores,
         )
@@ -471,9 +489,18 @@ async def _execute_steps(
             document_type_key=accepted_document_type_key,
         )
     except Exception as exc:
+        failure_error = _provider_processing_error(exc, operation="extraction_provider")
         await _update_invocation(session, tenant_id, extract_invocation_id,
-                                 "FAILED", error_detail=str(exc))
-        raise RetryableError("EXTRACTION_PROVIDER_ERROR", str(exc)) from exc
+                                 "FAILED", error_detail=failure_error.detail)
+        log.warning(
+            "extraction_provider_failed",
+            error_code=failure_error.code,
+            retryable=failure_error.retryable,
+            error_category=failure_category(failure_error.code),
+            duration_ms=round((time.monotonic() - _extract_start) * 1000, 1),
+            **safe_exception_context(exc),
+        )
+        raise failure_error from exc
 
     await _update_invocation(
         session, tenant_id, extract_invocation_id, "SUCCESS",
@@ -658,7 +685,9 @@ async def _execute_steps(
             # A profile that declares scored fields but still produces no positive
             # denominator remains a genuine configuration error.  Only profiles
             # with no score_included fields are intentionally non-scoring.
-            raise NonRetryableError("SCORING_DENOMINATOR_ZERO", str(exc)) from exc
+            raise NonRetryableError(
+                "SCORING_DENOMINATOR_ZERO", safe_persisted_detail("SCORING_DENOMINATOR_ZERO"),
+            ) from exc
         confidence_score = conf_result.confidence_score
         threshold_applied = conf_result.verification_threshold_applied
         hvs = conf_result.human_verification_status
@@ -925,6 +954,19 @@ def _build_candidate_snapshot(
     return snapshot
 
 
+def _provider_processing_error(exc: BaseException, *, operation: str) -> ProcessingError:
+    """Keep the adapter's own code and retryability (rate limit, rejected
+    request, invalid response, content block) instead of one generic code."""
+    failure = technical_failure(exc, operation=operation)
+    return ProcessingError(failure.code, failure.detail, retryable=failure.retryable)
+
+
+def _classification_scores(
+    classifications: list[ClassificationCandidate],
+) -> list[tuple[str, str]]:
+    return [(c.document_type_key, str(c.confidence)) for c in classifications]
+
+
 def _accept_classification(
     classifications: list[ClassificationCandidate],
     candidates: list[dict[str, Any]],
@@ -1008,10 +1050,26 @@ async def _load_original_artifact(
 
     from verigence.di.storage.adapter import get_storage_adapter
     storage = get_storage_adapter()
+    started = time.monotonic()
     try:
         data = b"".join([chunk async for chunk in storage.get_stream(logical_key)])
     except Exception as exc:
-        raise RetryableError("STORAGE_READ_ERROR", f"Cannot read original artifact: {exc}") from exc
+        logger.warning(
+            "artifact_download_failed",
+            error_code="STORAGE_READ_ERROR",
+            error_category=failure_category("STORAGE_READ_ERROR"),
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+            **safe_exception_context(exc),
+        )
+        raise RetryableError(
+            "STORAGE_READ_ERROR", safe_exception_detail("STORAGE_READ_ERROR", exc),
+        ) from exc
+    logger.info(
+        "artifact_downloaded",
+        file_bytes=len(data),
+        file_mime=mime_type,
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+    )
 
     return data, mime_type
 

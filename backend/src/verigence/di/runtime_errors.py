@@ -23,6 +23,73 @@ import structlog
 
 _MAX_STACK_FRAMES = 4
 
+_PROVIDER_OPERATIONS = frozenset({"classification_provider", "extraction_provider"})
+
+# Failure categories recorded as ``error_category`` on failure events.
+#   BUSINESS       the document itself decided the outcome (ambiguous, unreadable,
+#                  blank, unsupported, blocked); retrying cannot change it.
+#   CONFIGURATION  tenant/profile/type setup prevents processing; an admin fix is
+#                  needed, not a retry.
+#   DEPENDENCY     a downstream service (provider, storage, database, Audit Core)
+#                  failed; normally transient.
+#   TECHNICAL      anything else inside DI.
+BUSINESS = "BUSINESS"
+CONFIGURATION = "CONFIGURATION"
+DEPENDENCY = "DEPENDENCY"
+TECHNICAL = "TECHNICAL"
+
+BUSINESS_FAILURE_CODES = frozenset(
+    {
+        "CLASSIFICATION_AMBIGUOUS",
+        "CLASSIFICATION_NO_CANDIDATES",
+        "DOCUMENT_AI_CONTENT_BLOCKED",
+        "FILE_EMPTY",
+        "FILE_TOO_LARGE",
+        "INVALID_FILE_CONTENT",
+        "MIME_TYPE_NOT_ALLOWED",
+        "ORIGINAL_ARTIFACT_MISSING",
+        "UPLOAD_NOT_FIT",
+    }
+)
+CONFIGURATION_FAILURE_CODES = frozenset(
+    {
+        "DOCUMENT_TYPE_NOT_FOUND",
+        "EXTRACTION_PROFILE_EMPTY",
+        "EXTRACTION_PROFILE_NOT_FOUND",
+        "INVALID_CONFIGURATION",
+        "QUALITY_POLICY_NOT_CONFIGURED",
+        "SCORING_DENOMINATOR_ZERO",
+        "TENANT_NOT_FOUND",
+    }
+)
+DEPENDENCY_FAILURE_CODES = frozenset(
+    {
+        "AUDIT_CORE_INTEGRATION_FAILED",
+        "CLASSIFICATION_PROVIDER_ERROR",
+        "DATABASE_UNAVAILABLE",
+        "DEPENDENCY_UNAVAILABLE",
+        "DOCUMENT_AI_RATE_LIMITED",
+        "DOCUMENT_AI_REQUEST_REJECTED",
+        "DOCUMENT_AI_RESPONSE_INVALID",
+        "DOCUMENT_AI_UNAVAILABLE",
+        "EXTRACTION_PROVIDER_ERROR",
+        "SECURITY_INTEGRATION_FAILED",
+        "STORAGE_READ_ERROR",
+        "STORAGE_READ_FAILED",
+    }
+)
+
+
+def failure_category(code: str | None) -> str:
+    """BUSINESS / CONFIGURATION / DEPENDENCY / TECHNICAL for a failure code."""
+    if code in BUSINESS_FAILURE_CODES:
+        return BUSINESS
+    if code in CONFIGURATION_FAILURE_CODES:
+        return CONFIGURATION
+    if code in DEPENDENCY_FAILURE_CODES:
+        return DEPENDENCY
+    return TECHNICAL
+
 
 @dataclass(frozen=True)
 class TechnicalFailure:
@@ -31,6 +98,31 @@ class TechnicalFailure:
     code: str
     detail: str
     retryable: bool
+
+    @property
+    def category(self) -> str:
+        return failure_category(self.code)
+
+
+class CodedError(RuntimeError):
+    """An exception that already knows its stable code and retryability.
+
+    ``technical_failure`` honours ``technical_code``/``retryable``, so raising
+    this keeps a precise classification through generic ``except Exception``
+    handlers. The message is the caller-safe catalogue detail, never raw text.
+    """
+
+    def __init__(
+        self,
+        technical_code: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+    ) -> None:
+        self.technical_code = technical_code
+        self.retryable = retryable
+        self.status_code = status_code
+        super().__init__(_detail_for_code(technical_code))
 
 
 def correlation_id_or_new(candidate: object | None = None) -> str:
@@ -102,24 +194,25 @@ def technical_failure(
         )
 
     status_code = getattr(exc, "status_code", None)
-    if isinstance(status_code, int):
-        if status_code == 429 and operation in {
-            "classification_provider",
-            "extraction_provider",
-        }:
+    if isinstance(status_code, int) and operation in _PROVIDER_OPERATIONS:
+        if status_code == 429:
             return TechnicalFailure(
                 "DOCUMENT_AI_RATE_LIMITED",
                 _detail_for_code("DOCUMENT_AI_RATE_LIMITED"),
                 True,
             )
-        if status_code in {408, 500, 502, 503, 504} and operation in {
-            "classification_provider",
-            "extraction_provider",
-        }:
+        if status_code in {408, 500, 502, 503, 504}:
             return TechnicalFailure(
                 "DOCUMENT_AI_UNAVAILABLE",
                 _detail_for_code("DOCUMENT_AI_UNAVAILABLE"),
                 True,
+            )
+        if 400 <= status_code < 500:
+            # The same request will be rejected again: never retry it.
+            return TechnicalFailure(
+                "DOCUMENT_AI_REQUEST_REJECTED",
+                _detail_for_code("DOCUMENT_AI_REQUEST_REJECTED"),
+                False,
             )
 
     exc_module = type(exc).__module__.lower()
@@ -131,6 +224,12 @@ def technical_failure(
             True if retryable is None else retryable,
         )
     if "httpx" in exc_module or isinstance(exc, (ConnectionError, TimeoutError)):
+        if operation in _PROVIDER_OPERATIONS:
+            return TechnicalFailure(
+                "DOCUMENT_AI_UNAVAILABLE",
+                _detail_for_code("DOCUMENT_AI_UNAVAILABLE"),
+                True if retryable is None else retryable,
+            )
         return TechnicalFailure(
             "DEPENDENCY_UNAVAILABLE",
             _detail_for_code("DEPENDENCY_UNAVAILABLE"),
@@ -158,6 +257,11 @@ def technical_failure(
 def safe_persisted_detail(code: str) -> str:
     """Return a bounded, caller-safe detail suitable for persisted failure state."""
     return _detail_for_code(code)[:500]
+
+
+def safe_exception_detail(code: str, exc: BaseException) -> str:
+    """Persistable detail for ``code`` naming the exception type, never its text."""
+    return f"{safe_persisted_detail(code)} ({type(exc).__name__})"[:500]
 
 
 def validation_problem_detail(
@@ -210,6 +314,11 @@ def _detail_for_code(code: str) -> str:
         "DOCUMENT_AI_UNAVAILABLE": "The Document AI provider is temporarily unavailable. Processing may be retried automatically.",
         "DOCUMENT_AI_RATE_LIMITED": "The Document AI provider is temporarily rate limited. Processing may be retried automatically.",
         "DOCUMENT_AI_RESPONSE_INVALID": "The Document AI provider returned an unusable response. Processing may be retried automatically.",
+        "DOCUMENT_AI_REQUEST_REJECTED": "The Document AI provider rejected the request. It will not be retried automatically.",
+        "DOCUMENT_AI_CONTENT_BLOCKED": "The Document AI provider declined to process this document's content.",
+        "WORKER_LEASE_EXHAUSTED": "Processing repeatedly stopped before completing and was abandoned.",
+        "STORAGE_READ_ERROR": "The stored document could not be read. Processing may be retried automatically.",
+        "INVALID_FILE_CONTENT": "The document file is unreadable or has no pages.",
         "CLASSIFICATION_PROVIDER_ERROR": "The document classification provider request failed. Processing may be retried automatically.",
         "EXTRACTION_PROVIDER_ERROR": "The document extraction provider request failed. Processing may be retried automatically.",
         "CLASSIFICATION_FAILED": "Document classification could not be completed after the permitted attempts.",
