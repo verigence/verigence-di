@@ -14,11 +14,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+import structlog
 from fastapi import FastAPI
 from opentelemetry import trace
 from opentelemetry._logs import SeverityNumber
@@ -287,8 +290,77 @@ def _configure_traces(
         return False
 
 
+_outbound_logger = structlog.get_logger("verigence.di.outbound")
+_OUTBOUND_LOGGING_INSTALLED = False
+
+
+def _dependency_name(host: str) -> str:
+    lowered = host.lower()
+    if "googleapis" in lowered:
+        return "GEMINI"
+    if "security" in lowered:
+        return "SECURITY"
+    if "audit" in lowered:
+        return "AUDIT_CORE"
+    return host
+
+
+def _log_outbound(request: httpx.Request, *, started: float, response: httpx.Response | None, error: BaseException | None) -> None:
+    """One line per outbound API call (decision 2026-09-30): the model, Security
+    or Audit Core, how long it took and what came back. Path only, never
+    headers or the query string, so keys and signatures stay out of the log."""
+    duration_ms = round((time.perf_counter() - started) * 1000.0, 1)
+    fields = {
+        "dependency": _dependency_name(request.url.host),
+        "method": request.method,
+        "host": request.url.host,
+        "path": request.url.path,
+        "duration_ms": duration_ms,
+    }
+    if error is not None:
+        _outbound_logger.warning("outbound_request_failed", error_type=type(error).__name__, **fields)
+    elif response is not None and response.status_code >= 400:
+        _outbound_logger.warning("outbound_request", status_code=response.status_code, **fields)
+    elif response is not None:
+        _outbound_logger.info("outbound_request", status_code=response.status_code, **fields)
+
+
+def install_outbound_request_logging() -> None:
+    """Log every outbound httpx call once, whether or not OTLP export is on."""
+    global _OUTBOUND_LOGGING_INSTALLED
+    if _OUTBOUND_LOGGING_INSTALLED:
+        return
+    sync_send = httpx.Client.send
+    async_send = httpx.AsyncClient.send
+
+    def send(self: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        started = time.perf_counter()
+        try:
+            response = sync_send(self, request, *args, **kwargs)
+        except BaseException as exc:
+            _log_outbound(request, started=started, response=None, error=exc)
+            raise
+        _log_outbound(request, started=started, response=response, error=None)
+        return response
+
+    async def asend(self: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        started = time.perf_counter()
+        try:
+            response = await async_send(self, request, *args, **kwargs)
+        except BaseException as exc:
+            _log_outbound(request, started=started, response=None, error=exc)
+            raise
+        _log_outbound(request, started=started, response=response, error=None)
+        return response
+
+    httpx.Client.send = send  # type: ignore[method-assign]
+    httpx.AsyncClient.send = asend  # type: ignore[method-assign]
+    _OUTBOUND_LOGGING_INSTALLED = True
+
+
 def configure_observability(app: FastAPI | None, settings: Settings) -> ObservabilityState:
     """Initialize only the DI telemetry capabilities explicitly enabled."""
+    install_outbound_request_logging()
     resource = _resource(settings)
     logs_enabled, errors_enabled = _configure_logs(settings, resource)
     return ObservabilityState(
