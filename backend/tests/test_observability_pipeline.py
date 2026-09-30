@@ -631,13 +631,13 @@ async def test_non_retryable_classification_failure_is_not_retried(monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A quota hit waits (1, 3, 10, 20 minutes) rather than failing the page
-    after one quick retry; only the fifth failure is final."""
+    """A quota hit waits five minutes for one more attempt rather than
+    failing the page after one quick retry; the second failure is final."""
     failure = technical_failure(
         v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
         operation="capture_v2_classification",
     )
-    for attempt_no, delay in enumerate((60, 180, 600, 1200), start=1):
+    for attempt_no, delay in enumerate((300,), start=1):
         holder, log = _capture_fail_harness(monkeypatch)
         await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
             tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=attempt_no,

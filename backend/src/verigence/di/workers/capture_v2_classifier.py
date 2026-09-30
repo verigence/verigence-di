@@ -51,14 +51,12 @@ _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 # Attempts a retryable classification failure (or an expired lease, see
 # scheduler/beat.py) gets before the upload is FAILED.
-# A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) is a
-# reason to wait, never to fail the page: under a burst of uploads the
-# quota comes back on its own. Retries are spaced 1, 3, 10 and 20 minutes
-# apart (about 34 minutes, five attempts in all), inside Audit Core's
-# one-hour page deadline, before the page is given up on and the nightly
-# reprocess takes over. Nothing here spends more on the model: a retry
-# only follows a call Gemini rejected or that never completed.
-_RETRYABLE_RETRY_DELAYS_SECONDS = (60, 180, 600, 1200)
+# A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) gets
+# exactly one more attempt, five minutes later (decision 2026-09-30: two
+# attempts in all, never a burst of retries against the model). A page
+# that fails both is left alone; Audit Core's nightly sweep sends it once
+# more the next night. A non-retryable failure fails at once.
+_RETRYABLE_RETRY_DELAYS_SECONDS = (300,)
 CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
 
 
