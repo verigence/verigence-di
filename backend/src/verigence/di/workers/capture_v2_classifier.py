@@ -43,6 +43,16 @@ from verigence.di.settings import get_settings
 from verigence.di.storage.adapter import get_storage_adapter
 
 logger = structlog.get_logger(__name__)
+
+# A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) is a
+# reason to wait, never to fail the page: under a burst of uploads the
+# quota comes back on its own. Retries are spaced 1, 3, 10 and 20 minutes
+# apart (about 34 minutes, five attempts in all), inside Audit Core's
+# one-hour page deadline, before the page is given up on and the nightly
+# reprocess takes over. Nothing here spends more on the model: a retry
+# only follows a call Gemini rejected or that never completed. A
+# non-retryable failure keeps its single quick retry.
+_RETRYABLE_RETRY_DELAYS_SECONDS = (60, 180, 600, 1200)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 
@@ -670,7 +680,8 @@ class CaptureV2ClassificationWorker:
     ) -> None:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
-            if attempt_no < 2:
+            retry_delay = _retry_delay_seconds(attempt_no, retryable=failure.retryable)
+            if retry_delay is not None:
                 retry_code = "CLASSIFICATION_RETRY"
                 retry_detail = safe_persisted_detail(retry_code)
                 logger.warning(
@@ -681,6 +692,8 @@ class CaptureV2ClassificationWorker:
                     attempt_no=attempt_no,
                     technical_error_code=failure.code,
                     error_code=retry_code,
+                    retryable=failure.retryable,
+                    retry_in_seconds=retry_delay,
                     correlation_id=correlation_id,
                 )
                 await session.execute(
@@ -697,7 +710,7 @@ class CaptureV2ClassificationWorker:
                     {
                         "tenant_id": tenant_id,
                         "job_id": job_id,
-                        "due": now + timedelta(seconds=1),
+                        "due": now + timedelta(seconds=retry_delay),
                         "error_code": retry_code,
                         "detail": retry_detail,
                         "now": now,
@@ -734,6 +747,17 @@ class CaptureV2ClassificationWorker:
                     detail=safe_persisted_detail(final_code),
                 )
             await session.commit()
+
+
+def _retry_delay_seconds(attempt_no: int, *, retryable: bool) -> int | None:
+    """How long to wait before the next classification attempt, or None
+    when the page has had its chances (``attempt_no`` is the attempt that
+    just failed, starting at 1)."""
+    if retryable:
+        if attempt_no <= len(_RETRYABLE_RETRY_DELAYS_SECONDS):
+            return _RETRYABLE_RETRY_DELAYS_SECONDS[attempt_no - 1]
+        return None
+    return 1 if attempt_no < 2 else None
 
 
 _worker = CaptureV2ClassificationWorker()
