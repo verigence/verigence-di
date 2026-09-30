@@ -392,7 +392,7 @@ async def defer_job_after_rate_limit(
     then records an ordinary retryable failure)."""
     now = datetime.now(UTC)
     delay = RATE_LIMIT_DEFER_SECONDS + random.randint(0, RATE_LIMIT_DEFER_JITTER_SECONDS)  # noqa: S311
-    result = await session.execute(
+    deferred = await session.execute(
         text("""
             UPDATE docintel.processing_jobs
             SET job_status = 'PENDING',
@@ -406,6 +406,7 @@ async def defer_job_after_rate_limit(
               AND processing_job_id = :job_id
               AND job_status = 'RUNNING'
               AND created_at_utc > :oldest
+            RETURNING processing_job_id
         """),
         {
             "due": now + timedelta(seconds=delay),
@@ -416,7 +417,7 @@ async def defer_job_after_rate_limit(
             "oldest": now - timedelta(seconds=RATE_LIMIT_DEFER_MAX_SECONDS),
         },
     )
-    return delay if result.rowcount == 1 else None
+    return delay if deferred.scalar_one_or_none() is not None else None
 
 
 NIGHTLY_REPROCESS_MAX_ATTEMPTS = 3
