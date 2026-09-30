@@ -191,6 +191,39 @@ async def test_http_request_log_carries_the_path_ids_and_response_time(monkeypat
     assert isinstance(fields["duration_ms"], float) and fields["duration_ms"] >= 0
 
 
+@pytest.mark.asyncio
+async def test_error_lines_name_the_module_the_detail_and_the_correlation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-09-30: every error line carries the error code, the caller-safe
+    detail, the route, the correlation id and, for a technical failure, the
+    module it came from (innermost redacted frame)."""
+    app = create_app()
+
+    @app.get("/__err/tenants/{tenant_id}/boom")
+    async def _boom(tenant_id: str) -> None:
+        raise RuntimeError("PAN ABCDE1234F must never reach the log")
+
+    @app.get("/__err/tenants/{tenant_id}/down")
+    async def _down(tenant_id: str) -> None:
+        raise HTTPException(status_code=503, detail="Downstream unavailable")
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(main, "logger", recorder)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        boom = await client.get("/__err/tenants/t-7/boom")
+        await client.get("/__err/tenants/t-7/down")
+
+    [(level, fields)] = [(level, f) for level, event, f in recorder.events if event == "api_request_failed"]
+    assert level == "error" and fields["http_status"] == 500
+    assert fields["route"] == "/__err/tenants/{tenant_id}/boom" and fields["tenant_id"] == "t-7"
+    assert fields["correlation_id"] == boom.headers[CORRELATION_ID_HEADER]
+    assert fields["error_code"] and fields["detail"] and fields["module"].startswith("test_observability_error_contract.py:")
+    assert "ABCDE1234F" not in repr(fields)
+
+    [(level, fields)] = [(level, f) for level, event, f in recorder.events if event == "di_technical_error"]
+    assert level == "error" and fields["detail"] == "Downstream unavailable" and fields["tenant_id"] == "t-7"
+    assert fields["route"] == "/__err/tenants/{tenant_id}/down" and fields["correlation_id"]
+
+
 # ── 2. Error responses ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

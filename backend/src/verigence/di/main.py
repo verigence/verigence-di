@@ -66,6 +66,13 @@ def _route_template(request: Request) -> str:
 _PATH_CONTEXT_KEYS = ("tenant_id", "subject_id", "document_id", "external_context_ref", "job_id")
 
 
+def _failing_module(context: Mapping[str, Any]) -> str | None:
+    """The innermost frame of the redacted stack ("file.py:line:function"): the
+    module the error came from, readable without the full stack."""
+    frames = context.get("stack_summary")
+    return str(frames[-1]) if isinstance(frames, list) and frames else None
+
+
 def _path_context(request: Request) -> dict[str, str]:
     """The business ids in the matched route's path, so a request line can be
     read per tenant or document without parsing the path."""
@@ -129,11 +136,15 @@ def _log_problem(
         "http_status": status_code,
         "method": request.method,
         "route": _route_template(request),
+        # The caller-safe message the client received; never the raw exception text.
+        "detail": body.get("detail"),
         "correlation_id": correlation_id,
+        **_path_context(request),
     }
     if status_code >= 500:
         if cause is not None:
             fields.update(safe_exception_context(cause))
+            fields["module"] = _failing_module(fields)
         logger.error("di_technical_error", **fields)
     elif status_code in (401, 403):
         logger.warning("di_security_rejection", **fields)
@@ -396,6 +407,7 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             failure = technical_failure(exc, operation="api")
             duration_ms = round((time.perf_counter() - start) * 1000, 1)
+            context = safe_exception_context(exc)
             logger.error(
                 "api_request_failed",
                 error_code=failure.code,
@@ -403,9 +415,13 @@ def create_app() -> FastAPI:
                 http_status=500,
                 method=request.method,
                 path=request.url.path,
+                route=_route_template(request),
+                detail=failure.detail,
+                module=_failing_module(context),
                 duration_ms=duration_ms,
                 correlation_id=correlation_id,
-                **safe_exception_context(exc),
+                **_path_context(request),
+                **context,
             )
             body = problem_response(
                 ErrorCode.INTERNAL_ERROR,
