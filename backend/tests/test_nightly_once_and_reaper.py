@@ -31,6 +31,7 @@ from verigence.di.repositories.tenants import (
     provision_tenant_document_types,
 )
 from verigence.di.scheduler import beat
+from verigence.di.workers.capture_v2_classifier import CLASSIFICATION_MAX_ATTEMPTS
 
 
 class _Log:
@@ -329,13 +330,14 @@ async def test_stale_classification_job_gets_another_attempt(db_session: AsyncSe
 @pytest.mark.asyncio
 async def test_stale_classification_job_out_of_attempts_fails_the_upload(db_session: AsyncSession) -> None:
     tenant_id = f"reaper-v2-{uuid.uuid4().hex[:10]}"
-    await _classifying_upload(db_session, tenant_id, attempt_no=2)
+    # The last allowed attempt (five since the retry ladder of 2026-09-30).
+    await _classifying_upload(db_session, tenant_id, attempt_no=CLASSIFICATION_MAX_ATTEMPTS)
     log = _Log()
 
     await beat._reclaim_stale_classification_jobs(db_session, datetime.now(UTC), log=log)
 
     assert await _classification_state(db_session, tenant_id) == (
-        "FAILED", 2, None, "FAILED", "CLASSIFICATION_FAILED",
+        "FAILED", CLASSIFICATION_MAX_ATTEMPTS, None, "FAILED", "CLASSIFICATION_FAILED",
     )
     failed = [e for e in log.events if e[1] == "stale_classification_job_failed"]
     assert failed and failed[0][0] == "error"
