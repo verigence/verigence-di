@@ -86,32 +86,35 @@ def test_missing_fields_are_not_found_and_null_is_still_accepted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_truncated_answer_is_retried_once_with_minimal_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_truncated_answer_is_one_request_and_a_retryable_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No request is retried within five minutes (decision 2026-09-30): a
+    truncated answer is not re-asked from inside the call; it fails as a
+    retryable provider result and the job's own rules space the next
+    attempt out."""
     calls: list[dict[str, Any]] = []
 
     async def fake_call(**kwargs: Any) -> tuple[str, int, int, int]:
         calls.append(kwargs)
-        if len(calls) == 1:
-            kwargs["on_usage"](GeminiUsage(prompt_tokens=1000, response_tokens=500, thoughts_tokens=15000,
-                                           finish_reason="MAX_TOKENS"))
-            return '{"customer_name": {"value": "A", "conf', 200, 1000, 500
-        kwargs["on_usage"](GeminiUsage(prompt_tokens=1000, response_tokens=60, thoughts_tokens=40,
-                                       finish_reason="STOP"))
-        return '{"customer_name": {"value": "A", "confidence": "high"}}', 200, 1000, 60
+        kwargs["on_usage"](GeminiUsage(prompt_tokens=1000, response_tokens=500, thoughts_tokens=15000,
+                                       finish_reason="MAX_TOKENS"))
+        return '{"customer_name": {"value": "A", "conf', 200, 1000, 500
+
+    slept: list[float] = []
+
+    async def no_sleep(seconds: float) -> None:
+        slept.append(seconds)
 
     monkeypatch.setattr(gemini_adapter, "_call_gemini_instrumented", fake_call)
-    monkeypatch.setattr(gemini_adapter.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(gemini_adapter.asyncio, "sleep", no_sleep)
     adapter = gemini_adapter.GeminiDocumentAIAdapter("AQ.test")
-    result = await adapter.extract(b"pdf", "application/pdf", [ExtractionField(field_key="customer_name")],
-                                   document_type_key="booking_form")
+    with pytest.raises(gemini_adapter.GeminiResponseInvalidError) as raised:
+        await adapter.extract(b"pdf", "application/pdf", [ExtractionField(field_key="customer_name")],
+                              document_type_key="booking_form")
 
-    assert [c["thinking_level"] for c in calls] == ["low", "minimal"]
-    assert all(c["max_output_tokens"] == get_settings().docai_gemini_max_output_tokens for c in calls)
-    usage = result.usage_metrics
-    assert usage["provider_calls"] == 2
-    assert usage["thoughts_tokens"] == 15040
-    assert usage["billed_output_tokens"] == 15600
-    assert usage["finish_reason"] == "STOP"
+    assert raised.value.retryable is True
+    assert len(calls) == 1 and calls[0]["thinking_level"] == "low"
+    assert calls[0]["max_output_tokens"] == get_settings().docai_gemini_max_output_tokens
+    assert slept == []
 
 
 async def _no_sleep(_: float) -> None:

@@ -140,7 +140,10 @@ async def test_rejected_request_is_not_retried_and_keeps_its_code(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_unavailable_is_warning_while_retrying_then_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_unavailable_is_one_request_then_a_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No request is retried within five minutes (decision 2026-09-30): an
+    outage is one request, logged as an error, handed back retryable for
+    the job's own rules to space the next attempt out."""
     calls: list[dict[str, Any]] = []
 
     async def unavailable(_n: int, _kw: dict[str, Any]) -> tuple[str, int, int, int]:
@@ -150,7 +153,9 @@ async def test_unavailable_is_warning_while_retrying_then_error(monkeypatch: pyt
     with pytest.raises(DocumentAIProviderError) as caught:
         await _extract_safely()
     assert (caught.value.technical_code, caught.value.retryable) == ("DOCUMENT_AI_UNAVAILABLE", True)
-    assert [level for level, _ in log.find("gemini_api_error")] == ["warning", "error"]
+    assert len(calls) == 1
+    assert [level for level, _ in log.find("gemini_api_error")] == ["error"]
+    assert not log.find("gemini_retry")
     assert all("duration_ms" in fields and "total_duration_ms" in fields
                for _, fields in log.find("gemini_api_error"))
 
@@ -167,9 +172,9 @@ async def test_unparseable_output_becomes_response_invalid(monkeypatch: pytest.M
     with pytest.raises(DocumentAIProviderError) as caught:
         await _extract_safely()
     assert (caught.value.technical_code, caught.value.retryable) == ("DOCUMENT_AI_RESPONSE_INVALID", True)
-    assert len(calls) == 2
+    assert len(calls) == 1  # one request per call (2026-09-30)
     levels = [level for level, _ in log.find("gemini_parse_failure")]
-    assert levels == ["warning", "error"]
+    assert levels == ["error"]
     assert log.find("gemini_parse_failure")[0][1]["finish_reason"] == "STOP"
 
 

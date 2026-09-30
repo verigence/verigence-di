@@ -27,7 +27,9 @@ _MAX_ERROR_CODE = 128
 # the legacy EOD Retry Scheduler, which can leave a document showing
 # nothing more than "still processing" for up to ~24h (see
 # schedule_v2_fast_retry below).
-V2_FAST_RETRY_DELAY_SECONDS = 120
+# Five minutes (decision 2026-09-30): no request is retried within five
+# minutes, so the fast second attempt waits that long.
+V2_FAST_RETRY_DELAY_SECONDS = 300
 
 
 def _cap(value: str | None, limit: int) -> str | None:

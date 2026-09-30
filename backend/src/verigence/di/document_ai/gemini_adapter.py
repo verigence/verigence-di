@@ -55,6 +55,9 @@ _GEMINI_API_URL = (
 )
 
 
+_IN_CALL_ATTEMPTS = 1
+
+
 class GeminiApiError(RuntimeError):
     """Gemini request-level failure that must not become fake NOT_FOUND facts."""
 
@@ -186,7 +189,12 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         prompt_tokens = 0
         response_tokens = 0
         http_status = 0
-        max_attempts = 2
+        # One request per call (decision 2026-09-30: no request is retried
+        # within five minutes). A failure goes back to the job, whose own
+        # rules space the next attempt out: a quota hit waits five minutes
+        # without counting, other retryable failures get one attempt five
+        # minutes later. Never a quick second request from in here.
+        max_attempts = _IN_CALL_ATTEMPTS
 
         for attempt in range(max_attempts):
             attempt_no = attempt + 1
