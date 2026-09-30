@@ -51,7 +51,20 @@ _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 # Attempts a retryable classification failure (or an expired lease, see
 # scheduler/beat.py) gets before the upload is FAILED.
-CLASSIFICATION_MAX_ATTEMPTS = 2
+# A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) is a
+# reason to wait, never to fail the page: under a burst of uploads the
+# quota comes back on its own. Retries are spaced 1, 3, 10 and 20 minutes
+# apart (about 34 minutes, five attempts in all), inside Audit Core's
+# one-hour page deadline, before the page is given up on and the nightly
+# reprocess takes over. Nothing here spends more on the model: a retry
+# only follows a call Gemini rejected or that never completed.
+_RETRYABLE_RETRY_DELAYS_SECONDS = (60, 180, 600, 1200)
+CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
+
+
+def _retry_delay_seconds(attempt_no: int) -> int:
+    """Seconds to wait after the attempt that just failed (numbered from 1)."""
+    return _RETRYABLE_RETRY_DELAYS_SECONDS[min(attempt_no, len(_RETRYABLE_RETRY_DELAYS_SECONDS)) - 1]
 
 
 def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
@@ -717,6 +730,7 @@ class CaptureV2ClassificationWorker:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
             if failure.retryable and attempt_no < CLASSIFICATION_MAX_ATTEMPTS:
+                retry_delay = _retry_delay_seconds(attempt_no)
                 retry_code = "CLASSIFICATION_RETRY"
                 retry_detail = safe_persisted_detail(retry_code)
                 logger.warning(
@@ -729,6 +743,7 @@ class CaptureV2ClassificationWorker:
                     error_code=retry_code,
                     error_category=failure.category,
                     duration_ms=duration_ms,
+                    retry_in_seconds=retry_delay,
                     correlation_id=correlation_id,
                 )
                 await session.execute(
@@ -745,7 +760,7 @@ class CaptureV2ClassificationWorker:
                     {
                         "tenant_id": tenant_id,
                         "job_id": job_id,
-                        "due": now + timedelta(seconds=1),
+                        "due": now + timedelta(seconds=retry_delay),
                         "error_code": retry_code,
                         "detail": retry_detail,
                         "now": now,
