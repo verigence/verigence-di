@@ -171,6 +171,26 @@ async def test_http_request_log_skips_health_probes(monkeypatch: pytest.MonkeyPa
     assert paths == ["/__missing_route"]
 
 
+@pytest.mark.asyncio
+async def test_http_request_log_carries_the_path_ids_and_response_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-09-30: every request line has its duration and the tenant /
+    document ids from the route, so latency can be read per tenant."""
+    app = create_app()
+
+    @app.get("/__ctx/tenants/{tenant_id}/documents/{document_id}")
+    async def _ctx(tenant_id: str, document_id: str) -> dict[str, str]:
+        return {"ok": tenant_id}
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(main, "logger", recorder)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.get("/__ctx/tenants/t-9/documents/d-1")
+    [fields] = [fields for _, event, fields in recorder.events if event == "http_request"]
+    assert fields["route"] == "/__ctx/tenants/{tenant_id}/documents/{document_id}"
+    assert (fields["tenant_id"], fields["document_id"], fields["status"]) == ("t-9", "d-1", 200)
+    assert isinstance(fields["duration_ms"], float) and fields["duration_ms"] >= 0
+
+
 # ── 2. Error responses ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

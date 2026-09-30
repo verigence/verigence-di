@@ -63,6 +63,16 @@ def _route_template(request: Request) -> str:
     return str(path) if path else "unmatched"
 
 
+_PATH_CONTEXT_KEYS = ("tenant_id", "subject_id", "document_id", "external_context_ref", "job_id")
+
+
+def _path_context(request: Request) -> dict[str, str]:
+    """The business ids in the matched route's path, so a request line can be
+    read per tenant or document without parsing the path."""
+    params = getattr(request, "path_params", None) or {}
+    return {key: str(params[key]) for key in _PATH_CONTEXT_KEYS if params.get(key) is not None}
+
+
 def _problem_json(
     status_code: int,
     body: dict[str, Any],
@@ -428,6 +438,8 @@ def create_app() -> FastAPI:
             record_metric("di.http.errors", labels=metric_labels)
 
         if not is_probe_path(request.url.path):
+            # One line per request with its response time (2026-09-30), plus
+            # the business ids from the path.
             logger.info(
                 "http_request",
                 method=request.method,
@@ -435,6 +447,7 @@ def create_app() -> FastAPI:
                 route=route,
                 status=response.status_code,
                 duration_ms=duration_ms,
+                **_path_context(request),
             )
         return response
 
