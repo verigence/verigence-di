@@ -630,24 +630,30 @@ async def test_non_retryable_classification_failure_is_not_retried(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_retryable_classification_failure_is_retried_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    holder, log = _capture_fail_harness(monkeypatch)
+async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quota hit waits (1, 3, 10, 20 minutes) rather than failing the page
+    after one quick retry; only the fifth failure is final."""
     failure = technical_failure(
         v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
         operation="capture_v2_classification",
     )
-    await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
-        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=1,
-        correlation_id="c", failure=failure,
-    )
-    assert any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
-    assert log.find("capture_v2_classification_retry")[0][0] == "warning"
+    for attempt_no, delay in enumerate((60, 180, 600, 1200), start=1):
+        holder, log = _capture_fail_harness(monkeypatch)
+        await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
+            tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=attempt_no,
+            correlation_id="c", failure=failure,
+        )
+        [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
+        assert (params["due"] - params["now"]).total_seconds() == delay
+        [(level, fields)] = log.find("capture_v2_classification_retry")
+        assert level == "warning" and fields["retry_in_seconds"] == delay
 
     holder, log = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
-        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=2,
-        correlation_id="c", failure=failure,
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
+        attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
     )
+    assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
     assert any(params.get("code") == "CLASSIFICATION_FAILED" for _, params in _executed_sql(holder))
     assert log.find("capture_v2_classification_failed")[0][0] == "error"
 
