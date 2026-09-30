@@ -36,12 +36,14 @@ from verigence.di.repositories.audit_links import (
 )
 from verigence.di.repositories.backout import insert_backout_job
 from verigence.di.repositories.processing_jobs import (
+    RATE_LIMITED_CODE,
     SUPERSEDED_ERROR_CODE,
     cancel_superseded_job,
     claim_next_non_v2_job,
     claim_next_v2_job,
     close_job_after_handler_error,
     complete_job,
+    defer_job_after_rate_limit,
     document_processing_status,
     fail_job,
     retry_job,
@@ -633,6 +635,25 @@ async def _handle_failure(
     safe_detail = safe_persisted_detail(safe_code)
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
     error_category = failure_category(safe_code)
+
+    # A quota hit is the burst's doing, not the document's: wait it out
+    # without spending the attempt (see defer_job_after_rate_limit).
+    if safe_code == RATE_LIMITED_CODE:
+        async with session_factory() as session, session.begin():
+            deferred_for = await defer_job_after_rate_limit(
+                session, tenant_id=tenant_id, processing_job_id=job_id,
+            )
+        if deferred_for is not None:
+            job_log.warning(
+                "job_rate_limited_deferred",
+                error_code=safe_code,
+                error_category=error_category,
+                attempt_no=attempt_no,
+                duration_ms=duration_ms,
+                retry_in_seconds=deferred_for,
+                is_capture_v2=is_capture_v2,
+            )
+            return
 
     if retryable and attempt_no == 1:
         async with session_factory() as session, session.begin():

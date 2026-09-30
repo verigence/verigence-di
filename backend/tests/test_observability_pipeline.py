@@ -631,10 +631,10 @@ async def test_non_retryable_classification_failure_is_not_retried(monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A quota hit waits five minutes for one more attempt rather than
+    """An outage waits five minutes for one more attempt rather than
     failing the page after one quick retry; the second failure is final."""
     failure = technical_failure(
-        v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
+        v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_UNAVAILABLE", retryable=True),
         operation="capture_v2_classification",
     )
     for attempt_no, delay in enumerate((300,), start=1):
@@ -645,8 +645,9 @@ async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch
         )
         [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
         assert (params["due"] - params["now"]).total_seconds() == delay
+        assert params["attempt_step"] == 1
         [(level, fields)] = log.find("capture_v2_classification_retry")
-        assert level == "warning" and fields["retry_in_seconds"] == delay
+        assert level == "warning" and fields["retry_in_seconds"] == delay and fields["attempt_counted"] is True
 
     holder, log = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
@@ -656,6 +657,42 @@ async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch
     assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
     assert any(params.get("code") == "CLASSIFICATION_FAILED" for _, params in _executed_sql(holder))
     assert log.find("capture_v2_classification_failed")[0][0] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_quota_hit_is_waited_out_without_spending_the_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Load is never a failure (2026-09-30): a 429 puts the job back in the
+    queue five minutes or so later at the same attempt number, however many
+    times, until the job has waited on the quota for six hours; after that
+    it counts like any other retryable failure."""
+    from datetime import UTC, datetime, timedelta
+
+    failure = technical_failure(
+        v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
+        operation="capture_v2_classification",
+    )
+    holder, log = _capture_fail_harness(monkeypatch)
+    holder.session.execute.return_value.scalar_one_or_none = MagicMock(
+        return_value=datetime.now(UTC) - timedelta(hours=1))
+    await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
+        attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
+    )
+    [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
+    assert params["attempt_step"] == 0
+    assert 300 <= (params["due"] - params["now"]).total_seconds() <= 360
+    [(level, fields)] = log.find("capture_v2_classification_retry")
+    assert level == "warning" and fields["attempt_counted"] is False
+
+    holder, log = _capture_fail_harness(monkeypatch)
+    holder.session.execute.return_value.scalar_one_or_none = MagicMock(
+        return_value=datetime.now(UTC) - timedelta(hours=7))
+    await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
+        attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
+    )
+    assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
+    assert any(params.get("code") == "CLASSIFICATION_FAILED" for _, params in _executed_sql(holder))
 
 
 def test_capture_v2_unknown_is_info_and_missing_type_is_configuration() -> None:

@@ -1,6 +1,7 @@
 """repositories/processing_jobs.py — Processing job repository."""
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -12,6 +13,7 @@ from verigence.di.runtime_errors import (
     BUSINESS_FAILURE_CODES,
     CONFIGURATION_FAILURE_CODES,
     safe_exception_context,
+    safe_persisted_detail,
 )
 
 logger = structlog.get_logger(__name__)
@@ -364,6 +366,57 @@ async def schedule_v2_fast_retry(
             "now": now,
         },
     )
+
+
+# A quota hit (429) during extraction is the burst's doing, not the
+# document's: the job goes back in the queue for five minutes, spread a
+# little, and the attempt is not counted. Once the job has been waiting on
+# the quota for RATE_LIMIT_DEFER_MAX_SECONDS it counts like any other
+# retryable failure (decision 2026-09-30: load is never a failure).
+RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
+RATE_LIMIT_DEFER_SECONDS = 300
+RATE_LIMIT_DEFER_JITTER_SECONDS = 60
+RATE_LIMIT_DEFER_MAX_SECONDS = 6 * 3600
+
+
+async def defer_job_after_rate_limit(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    processing_job_id: uuid.UUID,
+) -> int | None:
+    """Put a RUNNING job back in the queue after a quota hit, same attempt
+    number, due in five minutes or so. The document keeps its PROCESSING
+    status, so callers see it as still in hand. Returns the delay, or None
+    when the job has been waiting on the quota for too long (the caller
+    then records an ordinary retryable failure)."""
+    now = datetime.now(UTC)
+    delay = RATE_LIMIT_DEFER_SECONDS + random.randint(0, RATE_LIMIT_DEFER_JITTER_SECONDS)  # noqa: S311
+    result = await session.execute(
+        text("""
+            UPDATE docintel.processing_jobs
+            SET job_status = 'PENDING',
+                due_at_utc = :due,
+                locked_by = NULL,
+                locked_at_utc = NULL,
+                started_at_utc = NULL,
+                error_code = :error_code,
+                error_detail = :error_detail
+            WHERE tenant_id = :tenant_id
+              AND processing_job_id = :job_id
+              AND job_status = 'RUNNING'
+              AND created_at_utc > :oldest
+        """),
+        {
+            "due": now + timedelta(seconds=delay),
+            "error_code": RATE_LIMITED_CODE,
+            "error_detail": _cap(safe_persisted_detail(RATE_LIMITED_CODE), _MAX_ERROR_DETAIL),
+            "tenant_id": tenant_id,
+            "job_id": processing_job_id,
+            "oldest": now - timedelta(seconds=RATE_LIMIT_DEFER_MAX_SECONDS),
+        },
+    )
+    return delay if result.rowcount == 1 else None
 
 
 NIGHTLY_REPROCESS_MAX_ATTEMPTS = 3

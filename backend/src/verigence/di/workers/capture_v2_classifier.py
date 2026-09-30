@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import random
 import socket
 import time
 import uuid
@@ -59,10 +60,24 @@ _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 _RETRYABLE_RETRY_DELAYS_SECONDS = (300,)
 CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
 
+# A quota hit (429) is the burst's doing, not the page's: the job waits five
+# minutes, spread a little so a burst does not come back all at once, and
+# the attempt is not counted. Only once the job has been waiting on the
+# quota for _RATE_LIMIT_WAIT_MAX_SECONDS does a quota hit count like any
+# other retryable failure (decision 2026-09-30: load is never a failure).
+_RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
+_RATE_LIMIT_WAIT_SECONDS = 300
+_RATE_LIMIT_WAIT_JITTER_SECONDS = 60
+_RATE_LIMIT_WAIT_MAX_SECONDS = 6 * 3600
+
 
 def _retry_delay_seconds(attempt_no: int) -> int:
     """Seconds to wait after the attempt that just failed (numbered from 1)."""
     return _RETRYABLE_RETRY_DELAYS_SECONDS[min(attempt_no, len(_RETRYABLE_RETRY_DELAYS_SECONDS)) - 1]
+
+
+def _rate_limit_wait_seconds() -> int:
+    return _RATE_LIMIT_WAIT_SECONDS + random.randint(0, _RATE_LIMIT_WAIT_JITTER_SECONDS)  # noqa: S311
 
 
 def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
@@ -714,6 +729,24 @@ class CaptureV2ClassificationWorker:
         )
         del detail
 
+    async def _within_rate_limit_wait(
+        self, session: AsyncSession, *, tenant_id: str, job_id: uuid.UUID, now: datetime
+    ) -> bool:
+        """True while the job is young enough for a quota hit to be waited
+        out rather than counted as an attempt."""
+        created = (
+            await session.execute(
+                text(
+                    """
+                    SELECT created_at_utc FROM docintel.document_capture_v2_classification_jobs
+                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id
+                    """
+                ),
+                {"tenant_id": tenant_id, "job_id": job_id},
+            )
+        ).scalar_one_or_none()
+        return isinstance(created, datetime) and (now - created).total_seconds() < _RATE_LIMIT_WAIT_MAX_SECONDS
+
     async def _fail_job(
         self,
         *,
@@ -727,8 +760,11 @@ class CaptureV2ClassificationWorker:
     ) -> None:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
-            if failure.retryable and attempt_no < CLASSIFICATION_MAX_ATTEMPTS:
-                retry_delay = _retry_delay_seconds(attempt_no)
+            deferred = failure.code == _RATE_LIMITED_CODE and await self._within_rate_limit_wait(
+                session, tenant_id=tenant_id, job_id=job_id, now=now
+            )
+            if deferred or (failure.retryable and attempt_no < CLASSIFICATION_MAX_ATTEMPTS):
+                retry_delay = _rate_limit_wait_seconds() if deferred else _retry_delay_seconds(attempt_no)
                 retry_code = "CLASSIFICATION_RETRY"
                 retry_detail = safe_persisted_detail(retry_code)
                 logger.warning(
@@ -737,6 +773,7 @@ class CaptureV2ClassificationWorker:
                     document_id=str(document_id),
                     classification_job_id=str(job_id),
                     attempt_no=attempt_no,
+                    attempt_counted=not deferred,
                     technical_error_code=failure.code,
                     error_code=retry_code,
                     error_category=failure.category,
@@ -748,7 +785,7 @@ class CaptureV2ClassificationWorker:
                     text(
                         """
                         UPDATE docintel.document_capture_v2_classification_jobs
-                        SET job_status='PENDING', attempt_no=attempt_no+1,
+                        SET job_status='PENDING', attempt_no=attempt_no+:attempt_step,
                             due_at_utc=:due, locked_by=NULL, locked_at_utc=NULL,
                             error_code=:error_code, error_detail=:detail,
                             updated_at_utc=:now
@@ -758,6 +795,7 @@ class CaptureV2ClassificationWorker:
                     {
                         "tenant_id": tenant_id,
                         "job_id": job_id,
+                        "attempt_step": 0 if deferred else 1,
                         "due": now + timedelta(seconds=retry_delay),
                         "error_code": retry_code,
                         "detail": retry_detail,

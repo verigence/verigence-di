@@ -454,6 +454,43 @@ class TestHandleFailure:
         assert call_kwargs["correlation_id"] == "corr-1"
 
     @pytest.mark.asyncio
+    async def test_a_quota_hit_defers_the_job_without_spending_the_attempt(self) -> None:
+        """Load is never a failure (2026-09-30): a 429 puts the job back in
+        the queue at the same attempt number; nothing is retried, failed or
+        backed out. Once the job has waited on the quota too long the
+        deferral is refused and the ordinary retry rule applies."""
+        from verigence.di.workers.processor import _handle_failure
+
+        factory = self._make_session_factory()
+        job_log = MagicMock()
+        common = dict(
+            session_factory=factory, tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
+            correlation_id="corr-1", processing_run_id=uuid.uuid4(), error_code="DOCUMENT_AI_RATE_LIMITED",
+            error_detail="gemini 429", retryable=True, attempt_no=2, is_capture_v2=True, job_log=job_log,
+        )
+        with (
+            patch("verigence.di.workers.processor.defer_job_after_rate_limit",
+                  new_callable=AsyncMock, return_value=317) as mock_defer,
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+        ):
+            await _handle_failure(**common)
+        mock_defer.assert_called_once()
+        mock_retry.assert_not_called()
+        mock_fail.assert_not_called()
+        assert job_log.warning.call_args[0][0] == "job_rate_limited_deferred"
+        assert job_log.warning.call_args.kwargs["retry_in_seconds"] == 317
+
+        with (
+            patch("verigence.di.workers.processor.defer_job_after_rate_limit",
+                  new_callable=AsyncMock, return_value=None),
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+            patch("verigence.di.workers.processor.insert_backout_job", new_callable=AsyncMock),
+        ):
+            await _handle_failure(**common)
+        mock_fail.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_legacy_retryable_attempt1_does_not_schedule_fast_retry(self) -> None:
         """A non-V2 (legacy) document's first retryable failure is unaffected --
         it still waits on the once-daily EOD Retry Scheduler as before."""
