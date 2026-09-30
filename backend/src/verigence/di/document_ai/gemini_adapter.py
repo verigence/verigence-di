@@ -17,6 +17,7 @@ import asyncio
 import base64
 import io
 import json
+import time
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -62,6 +63,45 @@ class GeminiApiError(RuntimeError):
         self.retryable = status_code in {408, 429, 500, 502, 503, 504}
         super().__init__(f"Gemini API error {status_code}: {detail}")
 
+    @property
+    def technical_code(self) -> str:
+        if self.status_code == 429:
+            return "DOCUMENT_AI_RATE_LIMITED"
+        if self.retryable:
+            return "DOCUMENT_AI_UNAVAILABLE"
+        return "DOCUMENT_AI_REQUEST_REJECTED"
+
+
+class GeminiResponseInvalidError(ValueError):
+    """Gemini answered 200 but the answer is not the JSON object we asked for."""
+
+    technical_code = "DOCUMENT_AI_RESPONSE_INVALID"
+    retryable = True
+
+
+class GeminiContentBlockedError(ValueError):
+    """Gemini refused the content (prompt blocked or a safety finish reason).
+
+    A ValueError so schema authoring keeps answering 422 for such a sample;
+    extract() handles it before its generic parse-failure retry."""
+
+    technical_code = "DOCUMENT_AI_CONTENT_BLOCKED"
+    retryable = False
+
+    def __init__(self, *, block_reason: str | None, finish_reason: str | None) -> None:
+        self.block_reason = block_reason
+        self.finish_reason = finish_reason
+        super().__init__(
+            f"Gemini blocked the content (blockReason={block_reason}, finishReason={finish_reason})"
+        )
+
+
+def _adapter_key_for_model(model: str) -> str:
+    """Lineage key recorded in processor_invocations, derived from the model
+    actually called (``gemini-3-flash-preview`` -> ``gemini_3_flash_preview_v1``)."""
+    slug = model.removeprefix("gemini-").replace("-", "_").replace(".", "_")
+    return f"gemini_{slug}_v1"
+
 
 class GeminiDocumentAIAdapter(DocumentAIAdapter):
     """Gemini document AI adapter."""
@@ -71,7 +111,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
 
     @property
     def adapter_key(self) -> str:
-        return "gemini_2_5_flash_v1"
+        return _adapter_key_for_model(_GEMINI_MODEL)
 
     async def classify(
         self,
@@ -108,13 +148,12 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         document_type_key: str | None = None,
     ) -> AIInvocationResult:
         """Extract fields and optional positional evidence using the schema registry."""
-        import time as _t
-
         log = logger.bind(
             adapter=self.adapter_key,
             document_type_key=document_type_key,
             physical_form_type=physical_form_type,
-            correlation_id=correlation_id,
+            # None would mask the job context bound by the worker.
+            **({"correlation_id": correlation_id} if correlation_id else {}),
         )
 
         schema = get_schema(document_type_key or "")
@@ -137,19 +176,23 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             evidence_localization_requested=True,
         )
 
-        provider_request_id = str(uuid.uuid4())
         raw_response: str | None = None
         field_results: list[FieldResult] | None = None
         settings = get_settings()
         thinking_level = settings.docai_gemini_extraction_thinking_level
         usages: list[GeminiUsage] = []
-        last_error: str | None = None
-        call_start = _t.monotonic()
+        call_start = time.monotonic()
+        attempt_ms = 0.0
         prompt_tokens = 0
         response_tokens = 0
         http_status = 0
+        max_attempts = 2
 
-        for attempt in range(2):
+        for attempt in range(max_attempts):
+            attempt_no = attempt + 1
+            will_retry = attempt_no < max_attempts
+            attempt_start = time.monotonic()
+            usages_before = len(usages)
             try:
                 raw_response, http_status, prompt_tokens, response_tokens = (
                     await _call_gemini_instrumented(
@@ -168,18 +211,39 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                     raw_response=raw_response,
                 )
                 field_results = _parse_response(raw_response, schema, fields)
+                attempt_ms = _elapsed_ms(attempt_start)
                 break
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_error = str(exc)
+            except GeminiContentBlockedError as exc:
+                # Deterministic at temperature 0: a second call is refused again.
                 log.warning(
+                    "gemini_content_blocked",
+                    document_type_key=document_type_key,
+                    gemini_model=_GEMINI_MODEL,
+                    attempt=attempt_no,
+                    error_code=exc.technical_code,
+                    finish_reason=exc.finish_reason,
+                    block_reason=exc.block_reason,
+                    duration_ms=_elapsed_ms(attempt_start),
+                )
+                raise
+            except (json.JSONDecodeError, ValueError) as exc:
+                last_usage = usages[-1] if len(usages) > usages_before else None
+                truncated = last_usage is not None and last_usage.truncated
+                parse_log = log.warning if will_retry else log.error
+                parse_log(
                     "gemini_parse_failure",
                     document_type_key=document_type_key,
-                    attempt=attempt + 1,
-                    parse_error=last_error,
+                    gemini_model=_GEMINI_MODEL,
+                    attempt=attempt_no,
+                    will_retry=will_retry,
+                    error_code=GeminiResponseInvalidError.technical_code,
+                    exception_type=type(exc).__name__,
+                    finish_reason=last_usage.finish_reason if last_usage else None,
+                    duration_ms=_elapsed_ms(attempt_start),
+                    parse_error=str(exc),
                     raw_snippet=(raw_response or "")[:300],
                 )
-                if attempt == 0:
-                    truncated = bool(usages) and usages[-1].truncated
+                if will_retry:
                     if truncated:
                         # The answer hit the output cap: think less on the
                         # one retry rather than paying for the same cut-off.
@@ -187,50 +251,57 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                     log.warning(
                         "gemini_retry",
                         document_type_key=document_type_key,
-                        attempt=attempt + 1,
+                        attempt=attempt_no,
                         reason="output_truncated" if truncated else "parse_failure",
                     )
                     await asyncio.sleep(1)
                     continue
-                raise
+                if isinstance(exc, GeminiResponseInvalidError):
+                    raise
+                raise GeminiResponseInvalidError(str(exc)) from exc
             except GeminiApiError as exc:
-                last_error = str(exc)
                 http_status = exc.status_code
-                log.error(
+                will_retry = will_retry and exc.retryable
+                (log.warning if will_retry else log.error)(
                     "gemini_api_error",
                     document_type_key=document_type_key,
                     gemini_model=_GEMINI_MODEL,
                     http_status=http_status,
+                    error_code=exc.technical_code,
+                    retryable=exc.retryable,
                     exc_type=type(exc).__name__,
-                    exc_msg=last_error,
-                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),
+                    attempt=attempt_no,
+                    will_retry=will_retry,
+                    duration_ms=_elapsed_ms(attempt_start),
+                    total_duration_ms=_elapsed_ms(call_start),
                 )
-                if attempt == 0 and exc.retryable:
+                if will_retry:
                     log.warning(
                         "gemini_retry",
                         document_type_key=document_type_key,
-                        attempt=attempt + 1,
+                        attempt=attempt_no,
                         reason=f"http_{http_status}",
                     )
                     await asyncio.sleep(2)
                     continue
                 raise
             except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
-                log.error(
+                (log.warning if will_retry else log.error)(
                     "gemini_api_error",
                     document_type_key=document_type_key,
                     gemini_model=_GEMINI_MODEL,
                     http_status=http_status,
                     exc_type=type(exc).__name__,
-                    exc_msg=last_error,
-                    duration_ms=round((_t.monotonic() - call_start) * 1000, 1),
+                    attempt=attempt_no,
+                    will_retry=will_retry,
+                    duration_ms=_elapsed_ms(attempt_start),
+                    total_duration_ms=_elapsed_ms(call_start),
                 )
-                if attempt == 0:
+                if will_retry:
                     log.warning(
                         "gemini_retry",
                         document_type_key=document_type_key,
-                        attempt=attempt + 1,
+                        attempt=attempt_no,
                         reason="transport_error",
                     )
                     await asyncio.sleep(2)
@@ -240,7 +311,11 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         if field_results is None:
             raise RuntimeError("Gemini extraction ended without a provider result")
 
-        duration_ms = round((_t.monotonic() - call_start) * 1000, 1)
+        duration_ms = _elapsed_ms(call_start)
+        last_usage = usages[-1] if usages else None
+        provider_request_id = (
+            last_usage.response_id if last_usage and last_usage.response_id else str(uuid.uuid4())
+        )
         fields_found = sum(1 for fr in field_results if fr.found_status == FoundStatus.FOUND)
         fields_null = sum(1 for fr in field_results if fr.found_status != FoundStatus.FOUND)
         fields_low = sum(
@@ -253,17 +328,25 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
 
         thoughts_tokens = sum(u.thoughts_tokens for u in usages)
         billed_output_tokens = sum(u.billed_output_tokens for u in usages)
+        total_tokens = sum(u.total_tokens for u in usages)
+        cached_tokens = sum(u.cached_tokens for u in usages)
         log.info(
             "gemini_response",
             document_type_key=document_type_key,
             gemini_model=_GEMINI_MODEL,
+            model_version=last_usage.model_version if last_usage else None,
+            provider_request_id=provider_request_id,
             http_status=http_status,
-            duration_ms=duration_ms,
+            finish_reason=last_usage.finish_reason if last_usage else None,
+            duration_ms=attempt_ms,
+            total_duration_ms=duration_ms,
             prompt_tokens=prompt_tokens,
             response_tokens=response_tokens,
             thoughts_tokens=thoughts_tokens,
             billed_output_tokens=billed_output_tokens,
             billed_prompt_tokens=sum(u.prompt_tokens for u in usages),
+            total_tokens=total_tokens,
+            cached_tokens=cached_tokens,
             provider_calls=len(usages),
             thinking_level=settings.docai_gemini_extraction_thinking_level or "model-default",
             fields_extracted=fields_found,
@@ -306,9 +389,11 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             "thoughts_tokens": thoughts_tokens,
             "billed_output_tokens": billed_output_tokens,
             "billed_prompt_tokens": sum(u.prompt_tokens for u in usages),
+            "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
             "provider_calls": len(usages),
             "thinking_level": settings.docai_gemini_extraction_thinking_level or None,
-            "finish_reason": usages[-1].finish_reason if usages else None,
+            "finish_reason": last_usage.finish_reason if last_usage else None,
             "duration_ms": duration_ms,
         }
 
@@ -319,6 +404,10 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             results=field_results,
             usage_metrics=usage,
         )
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.monotonic() - start) * 1000, 1)
 
 
 def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) -> str:
@@ -489,17 +578,28 @@ async def _call_gemini_instrumented(
     if http_status != 200:
         raise GeminiApiError(http_status, resp.text[:500])
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise GeminiResponseInvalidError("Gemini response body is not JSON") from exc
+    if not isinstance(data, dict):
+        raise GeminiResponseInvalidError("Gemini response body is not a JSON object")
     usage = usage_from_response(data)
     if on_usage is not None:
         on_usage(usage)
+    if usage.blocked:
+        raise GeminiContentBlockedError(
+            block_reason=usage.block_reason, finish_reason=usage.finish_reason,
+        )
     prompt_tokens = usage.prompt_tokens
     response_tokens = usage.response_tokens
 
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as exc:
-        raise ValueError(f"Unexpected Gemini response shape: {data}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GeminiResponseInvalidError(
+            f"Unexpected Gemini response shape (finishReason={usage.finish_reason})"
+        ) from exc
 
     return text, http_status, prompt_tokens, response_tokens
 
@@ -569,7 +669,7 @@ def _parse_response(
     try:
         data = json.loads(text_value)
     except json.JSONDecodeError as exc:
-        raise ValueError(
+        raise GeminiResponseInvalidError(
             f"Gemini response is not valid JSON: {exc}\nRaw: {raw_text[:500]}"
         ) from exc
 
@@ -580,13 +680,13 @@ def _parse_response(
         if len(data) == 1 and isinstance(data[0], dict):
             data = data[0]
         else:
-            raise ValueError(
+            raise GeminiResponseInvalidError(
                 "Gemini response must be one JSON object or a single-item array "
                 f"containing one object. Raw: {raw_text[:500]}"
             )
 
     if not isinstance(data, dict):
-        raise ValueError(f"Gemini response is not a JSON object. Raw: {raw_text[:500]}")
+        raise GeminiResponseInvalidError(f"Gemini response is not a JSON object. Raw: {raw_text[:500]}")
 
     results: list[FieldResult] = []
     for db_field in db_fields:

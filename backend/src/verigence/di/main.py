@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from typing import Any
 
 import structlog
@@ -20,7 +21,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from verigence.di.errors import ErrorCode, error_for_http_status, problem_response
+from verigence.di.errors import (
+    ErrorCode,
+    ProblemException,
+    error_for_app_status,
+    error_for_code,
+    error_for_http_status,
+    problem_response,
+)
+from verigence.di.logging_config import is_probe_path
 from verigence.di.observability import (
     attach_correlation_to_current_span,
     configure_observability,
@@ -40,6 +49,7 @@ logger = structlog.get_logger(__name__)
 
 CORRELATION_ID_HEADER = "X-Correlation-ID"
 TRACE_ID_HEADER = "X-Trace-ID"
+PROBLEM_MEDIA_TYPE = "application/problem+json"
 _CORRELATION_SAFE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-")
 
 
@@ -51,6 +61,74 @@ def _route_template(request: Request) -> str:
     route = request.scope.get("route")
     path = getattr(route, "path", None)
     return str(path) if path else "unmatched"
+
+
+def _problem_json(
+    status_code: int,
+    body: dict[str, Any],
+    correlation_id: str,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    merged = dict(headers or {})
+    merged[CORRELATION_ID_HEADER] = correlation_id
+    return JSONResponse(
+        status_code=status_code,
+        content=body,
+        headers=merged,
+        media_type=PROBLEM_MEDIA_TYPE,
+    )
+
+
+def _complete_problem_body(detail: Mapping[str, Any], status_code: int) -> dict[str, Any]:
+    """Fill missing Problem members for a dict detail built outside problem_response."""
+    body = dict(detail)
+    error = error_for_code(body.get("code"))
+    if error is not None:
+        reference = problem_response(error)
+    else:
+        fallback = error_for_http_status(status_code)
+        reference = problem_response(fallback)
+        reference["type"] = f"https://docs.verigence.app/errors/{str(body['code']).lower()}"
+        reference["status"] = status_code
+    for key, value in reference.items():
+        body.setdefault(key, value)
+    return body
+
+
+def _is_framework_default_detail(exc: StarletteHTTPException) -> bool:
+    try:
+        phrase = HTTPStatus(exc.status_code).phrase
+    except ValueError:
+        return False
+    return exc.detail is None or exc.detail == phrase
+
+
+def _log_problem(
+    request: Request,
+    *,
+    status_code: int,
+    body: Mapping[str, Any],
+    correlation_id: str,
+    cause: BaseException | None = None,
+) -> None:
+    """Log one rejected request at a level matching its business/technical class."""
+    fields: dict[str, Any] = {
+        "error_code": body.get("code"),
+        "error_category": body.get("errorCategory"),
+        "retryable": body.get("retryable"),
+        "http_status": status_code,
+        "method": request.method,
+        "route": _route_template(request),
+        "correlation_id": correlation_id,
+    }
+    if status_code >= 500:
+        if cause is not None:
+            fields.update(safe_exception_context(cause))
+        logger.error("di_technical_error", **fields)
+    elif status_code in (401, 403):
+        logger.warning("di_security_rejection", **fields)
+    else:
+        logger.info("di_business_error", **fields)
 
 
 async def _validate_schema_profile_consistency() -> None:
@@ -118,7 +196,7 @@ async def _validate_schema_profile_consistency() -> None:
 def create_app() -> FastAPI:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
 
-    configure_logging()
+    configure_logging(process="api")
     settings = get_settings()
 
     @asynccontextmanager
@@ -222,7 +300,6 @@ def create_app() -> FastAPI:
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        del request
         correlation_id = correlation_id_or_new()
         detail, issues = validation_problem_detail(exc.errors())
         body = problem_response(
@@ -231,19 +308,17 @@ def create_app() -> FastAPI:
             correlation_id=correlation_id,
             extensions={"validationIssues": issues} if issues else None,
         )
-        logger.warning(
+        logger.info(
             "di_validation_error",
             error_code=ErrorCode.INVALID_REQUEST.code,
-            error_category=ErrorCode.INVALID_REQUEST.category,
+            error_category=ErrorCode.INVALID_REQUEST.error_category,
             validation_issue_count=len(issues),
             http_status=400,
+            method=request.method,
+            route=_route_template(request),
             correlation_id=correlation_id,
         )
-        return JSONResponse(
-            status_code=400,
-            content=body,
-            headers={CORRELATION_ID_HEADER: correlation_id},
-        )
+        return _problem_json(400, body, correlation_id)
 
     # Register against Starlette's base HTTPException so framework-generated
     # routing failures (404/405) receive the same business error contract as
@@ -252,32 +327,43 @@ def create_app() -> FastAPI:
     async def _http_exception_handler(
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
-        del request
         correlation_id = correlation_id_or_new()
         if isinstance(exc.detail, dict) and "code" in exc.detail:
-            body = dict(exc.detail)
-            # The response body/header pair must always use the correlation id
-            # created/bound for this request, even if a caller supplied another.
-            body["correlationId"] = correlation_id
-        else:
+            body = _complete_problem_body(exc.detail, exc.status_code)
+        elif _is_framework_default_detail(exc):
+            # Router-generated 404/405 etc. carry only the status phrase.
             mapped = error_for_http_status(exc.status_code)
-            body = problem_response(
-                mapped,
-                detail=mapped.title,
-                correlation_id=correlation_id,
-            )
-        logger.warning(
-            "di_business_error",
-            error_code=body.get("code") if isinstance(body, dict) else None,
-            error_category=body.get("category") if isinstance(body, dict) else None,
-            http_status=exc.status_code,
-            correlation_id=correlation_id,
-        )
-        return JSONResponse(
+            body = problem_response(mapped, detail=mapped.title)
+        else:
+            # Application-raised HTTPException(status, "caller-safe message").
+            mapped = error_for_app_status(exc.status_code)
+            body = problem_response(mapped, detail=str(exc.detail))
+        # The response body/header pair must always use the correlation id
+        # created/bound for this request, even if a caller supplied another.
+        body["correlationId"] = correlation_id
+        _log_problem(
+            request,
             status_code=exc.status_code,
-            content=body,
-            headers={CORRELATION_ID_HEADER: correlation_id},
+            body=body,
+            correlation_id=correlation_id,
+            cause=exc.__cause__,
         )
+        return _problem_json(exc.status_code, body, correlation_id, exc.headers)
+
+    @app.exception_handler(ProblemException)
+    async def _problem_exception_handler(
+        request: Request, exc: ProblemException
+    ) -> JSONResponse:
+        correlation_id = correlation_id_or_new()
+        body = problem_response(exc.error, detail=exc.detail, correlation_id=correlation_id)
+        _log_problem(
+            request,
+            status_code=exc.error.http_status,
+            body=body,
+            correlation_id=correlation_id,
+            cause=exc.__cause__,
+        )
+        return _problem_json(exc.error.http_status, body, correlation_id)
 
     @app.middleware("http")
     async def correlation_middleware(
@@ -303,6 +389,7 @@ def create_app() -> FastAPI:
             logger.error(
                 "api_request_failed",
                 error_code=failure.code,
+                error_category=ErrorCode.INTERNAL_ERROR.error_category,
                 http_status=500,
                 method=request.method,
                 path=request.url.path,
@@ -315,11 +402,7 @@ def create_app() -> FastAPI:
                 detail=failure.detail,
                 correlation_id=correlation_id,
             )
-            response = JSONResponse(
-                status_code=500,
-                content=body,
-                headers={CORRELATION_ID_HEADER: correlation_id},
-            )
+            response = _problem_json(500, body, correlation_id)
 
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
         response.headers[CORRELATION_ID_HEADER] = correlation_id
@@ -344,14 +427,15 @@ def create_app() -> FastAPI:
         if response.status_code >= 400:
             record_metric("di.http.errors", labels=metric_labels)
 
-        logger.info(
-            "http_request",
-            method=request.method,
-            path=request.url.path,
-            route=route,
-            status=response.status_code,
-            duration_ms=duration_ms,
-        )
+        if not is_probe_path(request.url.path):
+            logger.info(
+                "http_request",
+                method=request.method,
+                path=request.url.path,
+                route=route,
+                status=response.status_code,
+                duration_ms=duration_ms,
+            )
         return response
 
     from verigence.di.api.health import router as health_router  # noqa: PLC0415

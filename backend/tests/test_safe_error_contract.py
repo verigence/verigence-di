@@ -196,7 +196,7 @@ def test_safe_exception_context_is_bounded_and_has_no_exception_message() -> Non
     assert secret not in repr(context)
 
 
-def test_structlog_processor_redacts_values_and_adds_correlation() -> None:
+def test_structlog_processor_redacts_values_without_inventing_correlation() -> None:
     processor = _SafeEventProcessor()
     secret = "raw-document-value"
     event = processor(
@@ -213,7 +213,9 @@ def test_structlog_processor_redacts_values_and_adds_correlation() -> None:
     )
 
     assert event["error_code"] == "DOCUMENT_AI_UNAVAILABLE"
-    assert "correlation_id" in event
+    # No request/job scope is bound: leave it absent rather than invent a
+    # random id that correlates with nothing.
+    assert "correlation_id" not in event
     assert secret not in repr(event)
     assert "error" not in event
     assert "raw_value" not in event

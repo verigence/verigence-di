@@ -32,14 +32,87 @@ from verigence.di.document_ai.schema_authoring import (
     test_schema_proposal,
     validate_schema_proposal,
 )
-from verigence.di.errors import ErrorCode, problem
+from verigence.di.errors import ErrorCode, error_for_code, problem
 from verigence.di.repositories.database import tenant_session
+from verigence.di.runtime_errors import safe_exception_context, technical_failure
 from verigence.di.storage.adapter import StorageAdapter, get_storage_adapter
 
 router = APIRouter(prefix="/v1", tags=["Configuration Authoring"])
 logger = structlog.get_logger(__name__)
 
 _MAX_SAMPLE_BYTES = 30 * 1024 * 1024
+
+# Validation messages can echo proposal content, so clients get the rules instead.
+_PROPOSAL_RULES = (
+    "Check that documentTypeKey and every fieldKey are lower snake_case, displayName is "
+    "present, physicalFormType is GOVT_ID, PRINTABLE, HANDWRITTEN or ADDITIONAL, every "
+    "dataType is supported, every field has visible evidenceLabels, no field is derived or "
+    "duplicated, and there are at most 80 fields."
+)
+
+
+def _invalid_proposal(
+    exc: Exception, *, tenant_id: str, proposal_id: uuid.UUID, stage: str
+) -> Exception:
+    """An admin-edited or stored proposal failed deterministic validation (422)."""
+    logger.info(
+        "configuration_proposal_invalid",
+        tenant_id=tenant_id,
+        proposal_id=str(proposal_id),
+        stage=stage,
+        error_code=ErrorCode.VALIDATION_ERROR.code,
+        error_category=ErrorCode.VALIDATION_ERROR.error_category,
+        **safe_exception_context(exc),
+    )
+    return problem(
+        422,
+        f"The configuration proposal failed schema validation. {_PROPOSAL_RULES}",
+        ErrorCode.VALIDATION_ERROR,
+    )
+
+
+def _provider_response_invalid(
+    exc: Exception, *, tenant_id: str, proposal_id: uuid.UUID, stage: str
+) -> Exception:
+    """Gemini returned output DI could not parse or validate (502, retryable)."""
+    logger.warning(
+        "configuration_proposal_provider_response_invalid",
+        tenant_id=tenant_id,
+        proposal_id=str(proposal_id),
+        stage=stage,
+        error_code=ErrorCode.DOCUMENT_AI_RESPONSE_INVALID.code,
+        error_category=ErrorCode.DOCUMENT_AI_RESPONSE_INVALID.error_category,
+        **safe_exception_context(exc),
+    )
+    return problem(
+        502,
+        "The Document AI provider returned an unusable result. Retry the request; if it "
+        "keeps failing, use a clearer or more representative sample document.",
+        ErrorCode.DOCUMENT_AI_RESPONSE_INVALID,
+    )
+
+
+def _provider_failure(
+    exc: Exception, *, tenant_id: str, proposal_id: uuid.UUID, stage: str
+) -> Exception:
+    """Unexpected provider/technical failure; never echo the exception text."""
+    failure = technical_failure(exc, operation="api")
+    error = error_for_code(failure.code) or ErrorCode.INTERNAL_ERROR
+    logger.error(
+        "configuration_proposal_provider_failed",
+        tenant_id=tenant_id,
+        proposal_id=str(proposal_id),
+        stage=stage,
+        error_code=error.code,
+        error_category=error.error_category,
+        **safe_exception_context(exc),
+    )
+    return problem(
+        error.http_status,
+        f"Configuration proposal {stage} could not be completed. Retry later and quote "
+        "the correlation ID if the problem persists.",
+        error,
+    )
 
 
 def _safe_filename(value: str | None) -> str:
@@ -152,8 +225,19 @@ async def create_configuration_proposal(
             metadata={"purpose": "configuration-authoring", "proposal-id": str(proposal_id)},
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("configuration_proposal_sample_storage_failed", tenant_id=tenant_id, proposal_id=str(proposal_id))
-        raise problem(503, f"Unable to store authoring sample: {type(exc).__name__}", ErrorCode.STORAGE_WRITE_FAILED) from exc
+        logger.error(
+            "configuration_proposal_sample_storage_failed",
+            tenant_id=tenant_id,
+            proposal_id=str(proposal_id),
+            error_code=ErrorCode.STORAGE_WRITE_FAILED.code,
+            error_category=ErrorCode.STORAGE_WRITE_FAILED.error_category,
+            **safe_exception_context(exc),
+        )
+        raise problem(
+            503,
+            "The authoring sample could not be stored. Retry the upload shortly.",
+            ErrorCode.STORAGE_WRITE_FAILED,
+        ) from exc
 
     try:
         generated = await generate_schema_proposal(
@@ -164,10 +248,13 @@ async def create_configuration_proposal(
             canonical_field_keys=await _canonical_catalogue(tenant_id),
         )
     except ValueError as exc:
-        raise problem(422, str(exc), ErrorCode.VALIDATION_ERROR) from exc
+        raise _provider_response_invalid(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="generation"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("configuration_proposal_generation_failed", tenant_id=tenant_id, proposal_id=str(proposal_id))
-        raise problem(500, f"Gemini schema proposal failed: {type(exc).__name__}: {exc}", ErrorCode.INTERNAL_ERROR) from exc
+        raise _provider_failure(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="generation"
+        ) from exc
 
     now = datetime.now(UTC)
     proposal = generated.proposal
@@ -276,7 +363,9 @@ async def update_configuration_proposal(
     try:
         proposal = validate_schema_proposal(body.get("proposal", body))
     except ValueError as exc:
-        raise problem(422, str(exc), ErrorCode.VALIDATION_ERROR) from exc
+        raise _invalid_proposal(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="update"
+        ) from exc
 
     now = datetime.now(UTC)
     async with tenant_session(tenant_id) as session:
@@ -327,7 +416,19 @@ async def test_configuration_proposal_endpoint(
         async for chunk in stream:
             chunks.append(chunk)
     except Exception as exc:  # noqa: BLE001
-        raise problem(503, f"Unable to read authoring sample: {type(exc).__name__}", ErrorCode.STORAGE_READ_FAILED) from exc
+        logger.error(
+            "configuration_proposal_sample_read_failed",
+            tenant_id=tenant_id,
+            proposal_id=str(proposal_id),
+            error_code=ErrorCode.STORAGE_READ_FAILED.code,
+            error_category=ErrorCode.STORAGE_READ_FAILED.error_category,
+            **safe_exception_context(exc),
+        )
+        raise problem(
+            503,
+            "The stored authoring sample could not be read. Retry the test shortly.",
+            ErrorCode.STORAGE_READ_FAILED,
+        ) from exc
     sample = b"".join(chunks)
     try:
         test_result = await test_schema_proposal(
@@ -336,10 +437,13 @@ async def test_configuration_proposal_endpoint(
             proposal=row["proposal_payload"],
         )
     except ValueError as exc:
-        raise problem(422, str(exc), ErrorCode.VALIDATION_ERROR) from exc
+        raise _provider_response_invalid(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="test"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("configuration_proposal_test_failed", tenant_id=tenant_id, proposal_id=str(proposal_id))
-        raise problem(500, f"Test extraction failed: {type(exc).__name__}: {exc}", ErrorCode.INTERNAL_ERROR) from exc
+        raise _provider_failure(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="test"
+        ) from exc
 
     now = datetime.now(UTC)
     async with tenant_session(tenant_id) as session:
@@ -462,7 +566,9 @@ async def approve_configuration_proposal(
     try:
         proposal = validate_schema_proposal(row["proposal_payload"])
     except ValueError as exc:
-        raise problem(422, str(exc), ErrorCode.VALIDATION_ERROR) from exc
+        raise _invalid_proposal(
+            exc, tenant_id=tenant_id, proposal_id=proposal_id, stage="approval"
+        ) from exc
 
     now = datetime.now(UTC)
     async with tenant_session(tenant_id) as session:

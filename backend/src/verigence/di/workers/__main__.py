@@ -44,9 +44,16 @@ async def _main() -> None:
         traces_enabled=observability_state.traces_enabled,
     )
 
+    from sqlalchemy.ext.asyncio import (  # noqa: PLC0415
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
     from verigence.di.document_ai.v2_classifier import close_v2_classifier_client
     from verigence.di.scheduler.beat import EODRetryScheduler
     from verigence.di.workers.capture_v2_classifier import CaptureV2ClassificationWorker
+    from verigence.di.workers.heartbeat import WorkerStats, run_heartbeat
     from verigence.di.workers.processor import ProcessingWorker, V2ProcessingWorker
 
     mode = settings.worker_mode
@@ -103,6 +110,31 @@ async def _main() -> None:
     for processing_worker in v2_processing_workers:
         processing_worker.start()
 
+    def _worker_stats() -> list[WorkerStats]:
+        workers: list[ProcessingWorker | V2ProcessingWorker | CaptureV2ClassificationWorker] = [
+            *capture_v2_workers, *v2_processing_workers,
+        ]
+        if legacy_worker is not None:
+            workers.append(legacy_worker)
+        return [worker.stats for worker in workers]
+
+    heartbeat_engine = create_async_engine(str(settings.database_url), echo=False, pool_size=1)
+    heartbeat_task = asyncio.create_task(
+        run_heartbeat(
+            stop_event=stop_event,
+            session_factory=async_sessionmaker(
+                heartbeat_engine, class_=AsyncSession, expire_on_commit=False,
+            ),
+            stats=_worker_stats,
+            fields={
+                "worker_mode": mode.value,
+                "replica_id": replica_id,
+                "replica_region": replica_region,
+            },
+        ),
+        name="di-worker-heartbeat",
+    )
+
     scheduler_started = False
     try:
         if scheduler is not None:
@@ -134,6 +166,11 @@ async def _main() -> None:
         await stop_event.wait()
     finally:
         logger.info("di_worker_stopping", worker_mode=mode.value)
+        stop_event.set()
+        with suppress(Exception):
+            await asyncio.wait_for(heartbeat_task, timeout=5)
+        with suppress(Exception):
+            await heartbeat_engine.dispose()
         await asyncio.gather(
             *(capture_worker.stop() for capture_worker in capture_v2_workers),
             *(processing_worker.stop() for processing_worker in v2_processing_workers),

@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import os
 import socket
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -33,6 +34,8 @@ from verigence.di.repositories.database import tenant_session
 from verigence.di.repositories.documents import update_document_upload_complete
 from verigence.di.repositories.processing_jobs import create_initial_job
 from verigence.di.runtime_errors import (
+    BUSINESS,
+    CodedError,
     TechnicalFailure,
     correlation_id_or_new,
     safe_exception_context,
@@ -41,19 +44,27 @@ from verigence.di.runtime_errors import (
 )
 from verigence.di.settings import get_settings
 from verigence.di.storage.adapter import get_storage_adapter
+from verigence.di.workers.heartbeat import WorkerStats
 
 logger = structlog.get_logger(__name__)
+_NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
+# Attempts a retryable classification failure (or an expired lease, see
+# scheduler/beat.py) gets before the upload is FAILED.
 # A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) is a
 # reason to wait, never to fail the page: under a burst of uploads the
 # quota comes back on its own. Retries are spaced 1, 3, 10 and 20 minutes
 # apart (about 34 minutes, five attempts in all), inside Audit Core's
 # one-hour page deadline, before the page is given up on and the nightly
 # reprocess takes over. Nothing here spends more on the model: a retry
-# only follows a call Gemini rejected or that never completed. A
-# non-retryable failure keeps its single quick retry.
+# only follows a call Gemini rejected or that never completed.
 _RETRYABLE_RETRY_DELAYS_SECONDS = (60, 180, 600, 1200)
-_NOTIFY_CHANNEL = "di_capture_v2_jobs"
+CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
+
+
+def _retry_delay_seconds(attempt_no: int) -> int:
+    """Seconds to wait after the attempt that just failed (numbered from 1)."""
+    return _RETRYABLE_RETRY_DELAYS_SECONDS[min(attempt_no, len(_RETRYABLE_RETRY_DELAYS_SECONDS)) - 1]
 
 
 def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
@@ -88,6 +99,7 @@ class CaptureV2ClassificationWorker:
         self._wake = asyncio.Event()
         self._notify_conn: Any | None = None
         self._runtime_correlation_id = correlation_id_or_new()
+        self.stats = WorkerStats()
 
     def start(self) -> None:
         self._stop.clear()
@@ -147,12 +159,13 @@ class CaptureV2ClassificationWorker:
         worker_id = _worker_id()
         try:
             while not self._stop.is_set():
+                self.stats.cycles += 1
                 did_work = False
                 try:
                     job = await self._claim(factory, worker_id)
                     if job is not None:
                         did_work = True
-                        await self._process(job)
+                        self.stats.record(await self._process(job))
                 except Exception as exc:  # noqa: BLE001
                     failure = technical_failure(exc, operation="worker")
                     logger.error(
@@ -230,45 +243,53 @@ class CaptureV2ClassificationWorker:
             result["correlation_id"] = correlation_id
             return result
 
-    async def _process(self, job: dict[str, Any]) -> None:
+    async def _process(self, job: dict[str, Any]) -> str:
+        """Classify one claimed job; returns ``completed`` or ``failed``."""
         tenant_id = str(job["tenant_id"])
         document_id = uuid.UUID(str(job["document_id"]))
         job_id = uuid.UUID(str(job["classification_job_id"]))
         correlation_id = correlation_id_or_new(job.get("correlation_id"))
-        log = logger.bind(
-            tenant_id=tenant_id,
-            document_id=str(document_id),
-            classification_job_id=str(job_id),
-            correlation_id=correlation_id,
-        )
-        log.info(
-            "capture_v2_classification_started",
-            attempt_no=int(job["attempt_no"]),
-        )
-        try:
-            await self._classify(
-                tenant_id,
-                document_id,
-                job_id,
-                correlation_id=correlation_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            failure = technical_failure(exc, operation="capture_v2_classification")
-            log.warning(
-                "capture_v2_classification_attempt_failed",
-                technical_error_code=failure.code,
-                retryable=failure.retryable,
-                attempt_no=int(job["attempt_no"]),
-                **safe_exception_context(exc),
-            )
-            await self._fail_job(
-                tenant_id=tenant_id,
-                job_id=job_id,
-                document_id=document_id,
-                attempt_no=int(job["attempt_no"]),
-                correlation_id=correlation_id,
-                failure=failure,
-            )
+        attempt_no = int(job["attempt_no"])
+        context = {
+            "tenant_id": tenant_id,
+            "document_id": str(document_id),
+            "classification_job_id": str(job_id),
+            "correlation_id": correlation_id,
+            "attempt_no": attempt_no,
+        }
+        with structlog.contextvars.bound_contextvars(**context):
+            log = logger.bind(**context)
+            log.info("capture_v2_classification_started")
+            started = time.monotonic()
+            try:
+                await self._classify(
+                    tenant_id,
+                    document_id,
+                    job_id,
+                    correlation_id=correlation_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = technical_failure(exc, operation="capture_v2_classification")
+                duration_ms = round((time.monotonic() - started) * 1000, 1)
+                log.warning(
+                    "capture_v2_classification_attempt_failed",
+                    technical_error_code=failure.code,
+                    retryable=failure.retryable,
+                    error_category=failure.category,
+                    duration_ms=duration_ms,
+                    **safe_exception_context(exc),
+                )
+                await self._fail_job(
+                    tenant_id=tenant_id,
+                    job_id=job_id,
+                    document_id=document_id,
+                    attempt_no=attempt_no,
+                    correlation_id=correlation_id,
+                    failure=failure,
+                    duration_ms=duration_ms,
+                )
+                return "failed"
+            return "completed"
 
     async def _classify(
         self,
@@ -317,8 +338,23 @@ class CaptureV2ClassificationWorker:
             )
             await session.commit()
 
-        document_bytes = b"".join(
-            [chunk async for chunk in storage.get_stream(str(row["logical_object_key"]))]
+        download_started = time.monotonic()
+        try:
+            document_bytes = b"".join(
+                [chunk async for chunk in storage.get_stream(str(row["logical_object_key"]))]
+            )
+        except Exception as exc:
+            log.warning(
+                "capture_v2_artifact_download_failed",
+                error_code="STORAGE_READ_ERROR",
+                duration_ms=round((time.monotonic() - download_started) * 1000, 1),
+                **safe_exception_context(exc),
+            )
+            raise CodedError("STORAGE_READ_ERROR", retryable=True) from exc
+        log.info(
+            "capture_v2_artifact_downloaded",
+            file_bytes=len(document_bytes),
+            duration_ms=round((time.monotonic() - download_started) * 1000, 1),
         )
         detected_mime = _detect_mime(
             document_bytes, str(row["original_filename"] or "")
@@ -470,7 +506,8 @@ class CaptureV2ClassificationWorker:
                 )
                 await self._complete_job(session, tenant_id, job_id, now)
                 await session.commit()
-                log.warning(
+                # An expected outcome the PC resolves, not an incident.
+                log.info(
                     "capture_v2_classification_unknown",
                     error_code="CLASSIFICATION_AMBIGUOUS",
                 )
@@ -499,7 +536,18 @@ class CaptureV2ClassificationWorker:
                     ),
                     {"tenant_id": tenant_id, "document_type_key": accepted},
                 )
-            ).mappings().one()
+            ).mappings().one_or_none()
+            if type_row is None:
+                # The model chose a candidate (e.g. the internal generic invoice
+                # fallback) that is not an active type for this tenant: a
+                # configuration gap a retry cannot fix.
+                log.error(
+                    "capture_v2_classified_type_not_configured",
+                    document_type_key=accepted,
+                    error_code="DOCUMENT_TYPE_NOT_FOUND",
+                    error_category="CONFIGURATION",
+                )
+                raise CodedError("DOCUMENT_TYPE_NOT_FOUND", retryable=False)
 
             requirement_map = dict(
                 row["requirement_refs_by_document_type_key"] or {}
@@ -677,11 +725,12 @@ class CaptureV2ClassificationWorker:
         attempt_no: int,
         correlation_id: str,
         failure: TechnicalFailure,
+        duration_ms: float | None = None,
     ) -> None:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
-            retry_delay = _retry_delay_seconds(attempt_no, retryable=failure.retryable)
-            if retry_delay is not None:
+            if failure.retryable and attempt_no < CLASSIFICATION_MAX_ATTEMPTS:
+                retry_delay = _retry_delay_seconds(attempt_no)
                 retry_code = "CLASSIFICATION_RETRY"
                 retry_detail = safe_persisted_detail(retry_code)
                 logger.warning(
@@ -692,7 +741,8 @@ class CaptureV2ClassificationWorker:
                     attempt_no=attempt_no,
                     technical_error_code=failure.code,
                     error_code=retry_code,
-                    retryable=failure.retryable,
+                    error_category=failure.category,
+                    duration_ms=duration_ms,
                     retry_in_seconds=retry_delay,
                     correlation_id=correlation_id,
                 )
@@ -727,8 +777,12 @@ class CaptureV2ClassificationWorker:
                     {"tenant_id": tenant_id, "document_id": document_id, "now": now},
                 )
             else:
-                final_code = "CLASSIFICATION_FAILED"
-                logger.error(
+                # Exhausted retries keep the established CLASSIFICATION_FAILED;
+                # a non-retryable failure (unreadable file, rejected request,
+                # missing configuration) records its own code instead.
+                final_code = "CLASSIFICATION_FAILED" if failure.retryable else failure.code
+                final_log = logger.info if failure.category == BUSINESS else logger.error
+                final_log(
                     "capture_v2_classification_failed",
                     tenant_id=tenant_id,
                     document_id=str(document_id),
@@ -736,6 +790,9 @@ class CaptureV2ClassificationWorker:
                     attempt_no=attempt_no,
                     technical_error_code=failure.code,
                     error_code=final_code,
+                    retryable=failure.retryable,
+                    error_category=failure.category,
+                    duration_ms=duration_ms,
                     correlation_id=correlation_id,
                 )
                 await self._finish_failed(
@@ -747,17 +804,6 @@ class CaptureV2ClassificationWorker:
                     detail=safe_persisted_detail(final_code),
                 )
             await session.commit()
-
-
-def _retry_delay_seconds(attempt_no: int, *, retryable: bool) -> int | None:
-    """How long to wait before the next classification attempt, or None
-    when the page has had its chances (``attempt_no`` is the attempt that
-    just failed, starting at 1)."""
-    if retryable:
-        if attempt_no <= len(_RETRYABLE_RETRY_DELAYS_SECONDS):
-            return _RETRYABLE_RETRY_DELAYS_SECONDS[attempt_no - 1]
-        return None
-    return 1 if attempt_no < 2 else None
 
 
 _worker = CaptureV2ClassificationWorker()

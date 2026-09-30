@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.document_ai.schemas import SCHEMA_REGISTRY
+from verigence.di.errors import ErrorCode, ErrorDef
 from verigence.di.repositories.tenants import provision_actor
 
 DOCUMENT_TYPES = "DOCUMENT_TYPES"
@@ -76,11 +77,29 @@ _REQUIRED_HEADERS: dict[str, frozenset[str]] = {
 
 
 class ConfigImportError(ValueError):
-    pass
+    """Caller-correctable import problem.
+
+    ``detail`` is a DI-authored, caller-safe message; ``error`` is the canonical
+    Problem the API layer returns for it.
+    """
+
+    error: ErrorDef = ErrorCode.VALIDATION_ERROR
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class ConfigImportConflict(ConfigImportError):
-    pass
+    error = ErrorCode.CONFLICT
+
+
+class ConfigImportNotFound(ConfigImportError):
+    """The addressed import or configuration version does not exist for the Tenant."""
+
+    def __init__(self, detail: str, error: ErrorDef = ErrorCode.DOCUMENT_NOT_FOUND) -> None:
+        super().__init__(detail)
+        self.error = error
 
 
 def normalize_master_key(master_key: str) -> str:
@@ -252,7 +271,7 @@ async def get_config_import(
         )
     ).mappings().one_or_none()
     if row is None:
-        raise ConfigImportError("Configuration import not found")
+        raise ConfigImportNotFound("Configuration import not found")
     return dict(row)
 
 
