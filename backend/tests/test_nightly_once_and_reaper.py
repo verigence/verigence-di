@@ -21,7 +21,11 @@ from verigence.di.domain.enums import RetentionDisposition, SubjectType
 from verigence.di.repositories.audit_storage_contexts import ensure_audit_storage_context
 from verigence.di.repositories.database import set_tenant_context
 from verigence.di.repositories.documents import create_document_receiving
-from verigence.di.repositories.processing_jobs import insert_nightly_reprocessing_jobs
+from verigence.di.repositories.processing_jobs import (
+    insert_nightly_initial_jobs_for_unqueued,
+    insert_nightly_reprocessing_jobs,
+    request_manual_reread,
+)
 from verigence.di.repositories.scheduler_runs import claim_scheduler_run
 from verigence.di.repositories.subjects import create_subject
 from verigence.di.repositories.tenants import (
@@ -341,3 +345,123 @@ async def test_stale_classification_job_out_of_attempts_fails_the_upload(db_sess
     )
     failed = [e for e in log.events if e[1] == "stale_classification_job_failed"]
     assert failed and failed[0][0] == "error"
+
+
+async def _classified_unqueued_upload(session: AsyncSession, tenant_id: str) -> uuid.UUID:
+    """A Capture V2 page DI classified but never queued for reading: the
+    shape every second PAN, KYC form and UPI screenshot had before
+    2026-10-01 (no open checklist slot at upload time)."""
+    await set_tenant_context(session, tenant_id)
+    await provision_tenant(session, tenant_id)
+    retention_policy_id = await provision_retention_policy(session, tenant_id)
+    await provision_tenant_document_types(session, tenant_id)
+    subject = await create_subject(
+        session, tenant_id=tenant_id, subject_type=SubjectType.PERSON,
+        display_name="Unqueued Subject", created_by_actor_id="test-actor",
+    )
+    document = await create_document_receiving(
+        session, tenant_id=tenant_id, subject_id=subject["subject_id"],
+        uploaded_by_actor_id="test-actor", uploaded_by_actor_type="USER",
+        correlation_id="upload-correlation", retention_policy_id=retention_policy_id,
+        retention_days=365, retention_disposition=RetentionDisposition.PURGE_CONTENT,
+    )
+    document_id: uuid.UUID = document["document_id"]
+    await session.execute(
+        text("UPDATE docintel.documents SET upload_status='FIT' WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+    context = await ensure_audit_storage_context(
+        session, tenant_id=tenant_id, external_context_ref=f"ctx-{uuid.uuid4()}",
+        dealer_id=uuid.uuid4(), dealer_outlet_id=uuid.uuid4(), customer_id=uuid.uuid4(),
+        subject_id=subject["subject_id"], service_principal_id="test-service",
+        project_slug="proj", dealer_slug="dlr", dealer_outlet_slug="out", customer_slug="cust",
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO docintel.document_capture_v2_uploads (
+                tenant_id, document_id, audit_storage_context_id, external_context_ref, phase,
+                client_upload_id, logical_object_key, original_filename, declared_mime_type,
+                candidate_document_type_keys, state, classified_document_type_key,
+                created_at_utc, updated_at_utc
+            ) VALUES (
+                :t, :d, :ctx, :ref, 'BOOKING', :client, :key, 'pan.pdf', 'application/pdf',
+                CAST('["pan_card"]' AS jsonb), 'CLASSIFIED', 'pan_card', now(), now()
+            )
+            """
+        ),
+        {"t": tenant_id, "d": document_id, "ctx": context["storage_context_id"],
+         "ref": context["external_context_ref"], "client": f"upload-{uuid.uuid4()}",
+         "key": f"{tenant_id}/{document_id}"},
+    )
+    return document_id
+
+
+async def _jobs_for(session: AsyncSession, tenant_id: str, document_id: uuid.UUID) -> list[Any]:
+    return list((await session.execute(
+        text("SELECT job_type, attempt_no, job_status, correlation_id FROM docintel.processing_jobs "
+             "WHERE tenant_id=:t AND document_id=:d ORDER BY attempt_no"),
+        {"t": tenant_id, "d": document_id},
+    )).all())
+
+
+@pytest.mark.asyncio
+async def test_a_classified_page_never_queued_gets_its_initial_job_at_night(db_session: AsyncSession) -> None:
+    tenant_id = f"tenant-unq-{uuid.uuid4().hex[:8]}"
+    document_id = await _classified_unqueued_upload(db_session, tenant_id)
+
+    assert await insert_nightly_initial_jobs_for_unqueued(db_session) == 1
+    jobs = await _jobs_for(db_session, tenant_id, document_id)
+    assert [tuple(j) for j in jobs] == [("INITIAL", 1, "PENDING", "upload-correlation")]
+    # Once queued it is left alone: the night never doubles a job.
+    assert await insert_nightly_initial_jobs_for_unqueued(db_session) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_retry_pending_document_is_reprocessed_at_night(db_session: AsyncSession) -> None:
+    tenant_id = f"tenant-rp-{uuid.uuid4().hex[:8]}"
+    document_id = await _failed_document(
+        db_session, tenant_id, failure_code="WORKER_INTERNAL_ERROR", initial_correlation="corr-rp",
+    )
+    await db_session.execute(
+        text("UPDATE docintel.documents SET processing_status='RETRY_PENDING', confirmation_status='PENDING' "
+             "WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+
+    assert await insert_nightly_reprocessing_jobs(db_session) == 1
+    assert [tuple(j)[:3] for j in await _nightly_jobs(db_session, tenant_id)] == [(3, "corr-rp", "PENDING")]
+
+
+@pytest.mark.asyncio
+async def test_read_again_queues_once_and_reports_a_job_already_in_hand(db_session: AsyncSession) -> None:
+    tenant_id = f"tenant-rr-{uuid.uuid4().hex[:8]}"
+    document_id = await _classified_unqueued_upload(db_session, tenant_id)
+
+    first = await request_manual_reread(db_session, tenant_id=tenant_id, document_id=document_id, requested_by="svc")
+    assert first["outcome"] == "queued" and first["jobType"] == "INITIAL" and first["attemptNo"] == 1
+    second = await request_manual_reread(db_session, tenant_id=tenant_id, document_id=document_id, requested_by="svc")
+    assert second == {"outcome": "in_progress"}
+    assert len(await _jobs_for(db_session, tenant_id, document_id)) == 1
+
+    # A document whose attempts all failed gets a MANUAL_REREAD after the last one.
+    await db_session.execute(
+        text("UPDATE docintel.processing_jobs SET job_status='FAILED' WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+    third = await request_manual_reread(db_session, tenant_id=tenant_id, document_id=document_id, requested_by="svc")
+    assert third["outcome"] == "queued" and third["jobType"] == "MANUAL_REREAD" and third["attemptNo"] == 2
+
+    # Read documents are synced, not read again; unknown documents are not found.
+    await db_session.execute(
+        text("UPDATE docintel.processing_jobs SET job_status='COMPLETED' WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+    await db_session.execute(
+        text("UPDATE docintel.documents SET processing_status='PROCESSED', confirmation_status='CONFIRMED', "
+             "confidence_score=95.00, verification_threshold_applied=90.00, human_verification_status='OPTIONAL' "
+             "WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+    assert await request_manual_reread(db_session, tenant_id=tenant_id, document_id=document_id, requested_by="svc") == {"outcome": "already_processed"}
+    assert await request_manual_reread(db_session, tenant_id=tenant_id, document_id=uuid.uuid4(), requested_by="svc") == {"outcome": "not_found"}

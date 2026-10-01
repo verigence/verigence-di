@@ -53,7 +53,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.repositories.backout import insert_backout_job, sweep_expired_backout_jobs
-from verigence.di.repositories.processing_jobs import fail_job, insert_nightly_reprocessing_jobs
+from verigence.di.repositories.processing_jobs import (
+    fail_job,
+    insert_nightly_initial_jobs_for_unqueued,
+    insert_nightly_reprocessing_jobs,
+)
 from verigence.di.repositories.scheduler_runs import (
     claim_scheduler_run,
     complete_scheduler_run,
@@ -223,6 +227,9 @@ async def _run_nightly_reprocess(
                 run_log.debug("nightly_reprocess_already_ran")
                 return
             queued = await insert_nightly_reprocessing_jobs(session)
+            # Classified pages that never got a reading job (2026-10-01):
+            # after the night, no classified page stays unread.
+            queued += await insert_nightly_initial_jobs_for_unqueued(session)
             await complete_scheduler_run(
                 session, run_name=_NIGHTLY_RUN_NAME, run_date=run_date,
                 items_queued=queued, now=datetime.now(UTC),

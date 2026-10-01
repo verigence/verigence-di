@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from sqlalchemy import text
@@ -378,7 +379,9 @@ async def schedule_v2_fast_retry(
 RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
 RATE_LIMIT_DEFER_SECONDS = 300
 RATE_LIMIT_DEFER_JITTER_SECONDS = 60
-RATE_LIMIT_DEFER_MAX_SECONDS = 6 * 3600
+# Eight hours (decision 2026-10-01): a quota that is out for the day is
+# waited for until the night, when the nightly run takes over.
+RATE_LIMIT_DEFER_MAX_SECONDS = 8 * 3600
 
 
 async def defer_job_after_rate_limit(
@@ -483,7 +486,9 @@ async def insert_nightly_reprocessing_jobs(
                 JOIN docintel.tenant_settings ts
                   ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
                 WHERE d.upload_status = 'FIT'
-                  AND d.processing_status = 'FAILED'
+                  -- RETRY_PENDING too (2026-10-01): a document whose fast second
+                  -- attempt never ran otherwise waits on the legacy EOD scheduler alone.
+                  AND d.processing_status IN ('FAILED', 'RETRY_PENDING')
                   -- only technical failures: a re-run cannot change a business
                   -- outcome or a configuration gap
                   AND (d.processing_failure_code IS NULL
@@ -556,6 +561,156 @@ async def insert_nightly_reprocessing_jobs(
             )
 
     return queued
+
+
+async def insert_nightly_initial_jobs_for_unqueued(session: AsyncSession) -> int:
+    """Every classified Capture V2 document that never got a reading job at
+    all gets its INITIAL job tonight (decision 2026-10-01: after the night,
+    no classified page stays unread). Until 2026-10-01 the classifier queued
+    reading only for a page with an open checklist slot, so such documents
+    exist; the classifier no longer skips them, and this is the backstop.
+    Returns the number of jobs inserted."""
+    now = datetime.now(UTC)
+    rows = (
+        await session.execute(
+            text("""
+                SELECT d.tenant_id, d.document_id, d.correlation_id,
+                       u.classified_document_type_key
+                FROM docintel.documents d
+                JOIN docintel.tenant_settings ts
+                  ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
+                JOIN docintel.document_capture_v2_uploads u
+                  ON u.tenant_id = d.tenant_id AND u.document_id = d.document_id
+                WHERE d.upload_status = 'FIT'
+                  AND d.processing_status = 'NOT_STARTED'
+                  AND u.state = 'CLASSIFIED'
+                  AND u.classified_document_type_key IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM docintel.processing_jobs pj
+                      WHERE pj.tenant_id = d.tenant_id AND pj.document_id = d.document_id
+                  )
+                ORDER BY d.registered_at_utc
+            """),
+        )
+    ).mappings().all()
+    queued = 0
+    for row in rows:
+        try:
+            await session.execute(
+                text("""
+                    INSERT INTO docintel.processing_jobs
+                        (tenant_id, processing_job_id, document_id, correlation_id,
+                         job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+                    VALUES
+                        (:tenant_id, :job_id, :doc_id, :corr, 'INITIAL', 'PENDING', :now, 1, :now)
+                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
+                """),
+                {
+                    "tenant_id": row["tenant_id"],
+                    "job_id": uuid.uuid4(),
+                    "doc_id": row["document_id"],
+                    "corr": row["correlation_id"] or f"nightly.{uuid.uuid4()}",
+                    "now": now,
+                },
+            )
+            queued += 1
+            logger.info(
+                "nightly_unqueued_document_queued",
+                tenant_id=row["tenant_id"],
+                document_id=str(row["document_id"]),
+                document_type_key=row["classified_document_type_key"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "nightly_unqueued_job_insert_failed",
+                tenant_id=row["tenant_id"],
+                document_id=str(row["document_id"]),
+                **safe_exception_context(exc),
+            )
+    return queued
+
+
+MANUAL_REREAD_JOB_TYPE = "MANUAL_REREAD"
+
+
+async def request_manual_reread(
+    session: AsyncSession, *, tenant_id: str, document_id: uuid.UUID, requested_by: str,
+) -> dict[str, Any]:
+    """Queue one more reading of a classified document DI already holds,
+    at a person's request (Audit Core's "Read again", decision 2026-10-01).
+    Never re-uploads, never re-classifies. Outcomes:
+
+      not_found          no such document for the tenant
+      not_classified     DI has not (or could not) classified it yet
+      already_processed  the document was read; the caller syncs instead
+      in_progress        a job is already pending or running
+      queued             a job was inserted (processingJobId returned)
+    """
+    row = (
+        await session.execute(
+            text("""
+                SELECT d.processing_status, d.correlation_id,
+                       u.state AS capture_state, u.classified_document_type_key,
+                       (SELECT COUNT(*) FROM docintel.processing_jobs a
+                         WHERE a.tenant_id = d.tenant_id AND a.document_id = d.document_id
+                           AND a.job_status IN ('PENDING', 'RUNNING')) AS active_jobs,
+                       (SELECT MAX(attempt_no) FROM docintel.processing_jobs b
+                         WHERE b.tenant_id = d.tenant_id AND b.document_id = d.document_id) AS last_attempt
+                FROM docintel.documents d
+                LEFT JOIN docintel.document_capture_v2_uploads u
+                  ON u.tenant_id = d.tenant_id AND u.document_id = d.document_id
+                WHERE d.tenant_id = :tenant_id AND d.document_id = :document_id
+            """),
+            {"tenant_id": tenant_id, "document_id": document_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        return {"outcome": "not_found"}
+    if row["capture_state"] != "CLASSIFIED" or not row["classified_document_type_key"]:
+        return {"outcome": "not_classified", "captureState": row["capture_state"]}
+    if row["processing_status"] == "PROCESSED":
+        return {"outcome": "already_processed"}
+    if int(row["active_jobs"] or 0) > 0:
+        return {"outcome": "in_progress"}
+
+    last_attempt = row["last_attempt"]
+    if last_attempt is None:
+        job_type, attempt_no = "INITIAL", 1
+    else:
+        job_type, attempt_no = MANUAL_REREAD_JOB_TYPE, max(int(last_attempt) + 1, 2)
+    job_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    await session.execute(
+        text("""
+            INSERT INTO docintel.processing_jobs
+                (tenant_id, processing_job_id, document_id, correlation_id,
+                 job_type, job_status, due_at_utc, attempt_no, created_at_utc)
+            VALUES
+                (:tenant_id, :job_id, :document_id, :corr, :job_type, 'PENDING', :now, :attempt_no, :now)
+        """),
+        {
+            "tenant_id": tenant_id,
+            "job_id": job_id,
+            "document_id": document_id,
+            "corr": row["correlation_id"] or f"reread.{uuid.uuid4()}",
+            "job_type": job_type,
+            "attempt_no": attempt_no,
+            "now": now,
+        },
+    )
+    await session.execute(
+        text("SELECT pg_notify('di_processing_jobs', :payload)"), {"payload": str(job_id)},
+    )
+    logger.info(
+        "manual_reread_queued",
+        tenant_id=tenant_id,
+        document_id=str(document_id),
+        processing_job_id=str(job_id),
+        job_type=job_type,
+        attempt_no=attempt_no,
+        requested_by=requested_by,
+    )
+    return {"outcome": "queued", "processingJobId": str(job_id), "jobType": job_type, "attemptNo": attempt_no}
 
 
 SUPERSEDED_ERROR_CODE = "SUPERSEDED_ALREADY_PROCESSED"

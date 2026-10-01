@@ -68,7 +68,7 @@ CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
 _RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
 _RATE_LIMIT_WAIT_SECONDS = 300
 _RATE_LIMIT_WAIT_JITTER_SECONDS = 60
-_RATE_LIMIT_WAIT_MAX_SECONDS = 6 * 3600
+_RATE_LIMIT_WAIT_MAX_SECONDS = 8 * 3600  # until the night (decision 2026-10-01)
 
 
 def _retry_delay_seconds(attempt_no: int) -> int:
@@ -106,13 +106,16 @@ def _asyncpg_url(url: str) -> str:
 
 
 def extraction_skip_reason(
-    *, requirement_ref: object, requires_processing: bool, has_published_profile: bool
+    *, requires_processing: bool, has_published_profile: bool
 ) -> str | None:
     """Why a classified page is not queued for reading, or None when it is.
-    The listing reports the page as not queued (extractionQueued=false) so
-    Audit Core settles it as supporting evidence instead of waiting."""
-    if requirement_ref is None:
-        return "NO_OPEN_REQUIREMENT_SLOT"
+    Decision 2026-10-01: every page with a readable type and a published
+    profile is read, whether or not Audit Core's checklist had an open slot
+    for it at upload time (a second PAN, a KYC form, a UPI screenshot used
+    to be classified and left unread for ever). Audit Core decides at copy
+    time where the values belong. The listing reports a page that is not
+    queued (extractionQueued=false) so Audit Core settles it as supporting
+    evidence instead of waiting."""
     if not requires_processing:
         return "TYPE_NOT_READ"
     if not has_published_profile:
@@ -653,7 +656,6 @@ class CaptureV2ClassificationWorker:
             # done above, unconditionally) is enough to know what the extra
             # copy is and let it be counted/labelled without ever queuing it.
             skipped_reason = extraction_skip_reason(
-                requirement_ref=requirement_ref,
                 requires_processing=bool(type_row["requires_processing"]),
                 has_published_profile=bool(type_row["has_published_profile"]),
             )
@@ -679,6 +681,7 @@ class CaptureV2ClassificationWorker:
                 ),
                 extraction_queued=skipped_reason is None,
                 extraction_skipped_reason=skipped_reason,
+                audit_requirement_ref_present=requirement_ref is not None,
             )
 
     async def _complete_job(

@@ -182,7 +182,13 @@ def pg_container(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def
 
 
 @pytest.fixture(scope="session")
-def db_url(pg_container) -> str:  # type: ignore[no-untyped-def]
+def db_url(request: pytest.FixtureRequest) -> str:
+    """The migrated test database: DI_TEST_DATABASE_URL when set (a local
+    PostgreSQL without Docker), else a container for the session."""
+    external = os.environ.get("DI_TEST_DATABASE_URL", "").strip()
+    if external:
+        return _async_db_url(external)
+    pg_container = request.getfixturevalue("pg_container")
     return _async_db_url(pg_container.get_connection_url())
 
 
