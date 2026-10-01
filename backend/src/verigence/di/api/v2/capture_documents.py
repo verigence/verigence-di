@@ -101,6 +101,13 @@ class V2CaptureDocumentStatus(BaseModel):
     # the caller can tell the person what to do instead of "retry".
     failureCode: str | None = None
     failureDetail: str | None = None
+    # Whether a classified page was queued for reading at all. A page the
+    # booking already holds a copy of, a type with no checklist slot or no
+    # published extraction profile is classified and then left alone (see
+    # workers/capture_v2_classifier.py); without this the caller cannot
+    # tell "queued, waiting its turn" from "never going to be read" and
+    # shows the page as reading for ever (seen live 2026-10-01).
+    extractionQueued: bool | None = None
 
 
 class V2CaptureDocumentList(BaseModel):
@@ -549,7 +556,11 @@ async def _status_rows(
                     SELECT u.document_id, u.client_upload_id, u.state,
                            u.classified_document_type_key, u.original_filename,
                            u.logical_object_key, u.failure_code, u.failure_detail,
-                           d.processing_status, d.content_state
+                           d.processing_status, d.content_state,
+                           EXISTS (
+                               SELECT 1 FROM docintel.processing_jobs pj
+                               WHERE pj.tenant_id=u.tenant_id AND pj.document_id=u.document_id
+                           ) AS extraction_queued
                     FROM docintel.document_capture_v2_uploads u
                     JOIN docintel.documents d
                       ON d.tenant_id=u.tenant_id AND d.document_id=u.document_id
@@ -596,6 +607,7 @@ async def _public_status(
         processingStatus=row["processing_status"],
         failureCode=row["failure_code"],
         failureDetail=row["failure_detail"],
+        extractionQueued=bool(row["extraction_queued"]) if "extraction_queued" in row else None,
     )
 
 
