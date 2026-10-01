@@ -39,7 +39,16 @@ def _scanned_pdf(image_bytes: bytes) -> bytes:
 
 def test_status_listing_carries_the_failure_reason() -> None:
     fields = set(V2CaptureDocumentStatus.model_fields)
-    assert {"failureCode", "failureDetail"} <= fields
+    assert {"failureCode", "failureDetail", "extractionQueued"} <= fields
+
+
+def test_a_classified_page_is_queued_only_with_a_slot_a_readable_type_and_a_profile() -> None:
+    from verigence.di.workers.capture_v2_classifier import extraction_skip_reason
+
+    assert extraction_skip_reason(requirement_ref="r1", requires_processing=True, has_published_profile=True) is None
+    assert extraction_skip_reason(requirement_ref=None, requires_processing=True, has_published_profile=True) == "NO_OPEN_REQUIREMENT_SLOT"
+    assert extraction_skip_reason(requirement_ref="r1", requires_processing=False, has_published_profile=True) == "TYPE_NOT_READ"
+    assert extraction_skip_reason(requirement_ref="r1", requires_processing=True, has_published_profile=False) == "NO_PUBLISHED_PROFILE"
 
 
 def test_image_rules_read_the_scan_inside_a_pdf_page() -> None:

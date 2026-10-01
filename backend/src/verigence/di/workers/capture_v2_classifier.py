@@ -79,6 +79,21 @@ def _asyncpg_url(url: str) -> str:
     )
 
 
+def extraction_skip_reason(
+    *, requirement_ref: object, requires_processing: bool, has_published_profile: bool
+) -> str | None:
+    """Why a classified page is not queued for reading, or None when it is.
+    The listing reports the page as not queued (extractionQueued=false) so
+    Audit Core settles it as supporting evidence instead of waiting."""
+    if requirement_ref is None:
+        return "NO_OPEN_REQUIREMENT_SLOT"
+    if not requires_processing:
+        return "TYPE_NOT_READ"
+    if not has_published_profile:
+        return "NO_PUBLISHED_PROFILE"
+    return None
+
+
 class CaptureV2ClassificationWorker:
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
@@ -611,7 +626,12 @@ class CaptureV2ClassificationWorker:
             # spent on data nothing will ever read; classification (already
             # done above, unconditionally) is enough to know what the extra
             # copy is and let it be counted/labelled without ever queuing it.
-            if requirement_ref is not None and type_row["requires_processing"] and type_row["has_published_profile"]:
+            skipped_reason = extraction_skip_reason(
+                requirement_ref=requirement_ref,
+                requires_processing=bool(type_row["requires_processing"]),
+                has_published_profile=bool(type_row["has_published_profile"]),
+            )
+            if skipped_reason is None:
                 processing_job_id = await create_initial_job(
                     session,
                     tenant_id=tenant_id,
@@ -631,10 +651,8 @@ class CaptureV2ClassificationWorker:
                 audit_requirement_ref=(
                     str(requirement_ref) if requirement_ref is not None else None
                 ),
-                extraction_queued=bool(
-                    type_row["requires_processing"]
-                    and type_row["has_published_profile"]
-                ),
+                extraction_queued=skipped_reason is None,
+                extraction_skipped_reason=skipped_reason,
             )
 
     async def _complete_job(
