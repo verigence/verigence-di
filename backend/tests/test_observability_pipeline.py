@@ -668,7 +668,7 @@ async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch
 async def test_a_quota_hit_is_waited_out_without_spending_the_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Load is never a failure (2026-09-30): a 429 puts the job back in the
     queue five minutes or so later at the same attempt number, however many
-    times, until the job has waited on the quota for six hours; after that
+    times, until the job has waited on the quota for eight hours; after that
     it counts like any other retryable failure."""
     from datetime import UTC, datetime, timedelta
 
@@ -691,7 +691,7 @@ async def test_a_quota_hit_is_waited_out_without_spending_the_attempt(monkeypatc
 
     holder, log = _capture_fail_harness(monkeypatch)
     holder.session.execute.return_value.scalar_one_or_none = MagicMock(
-        return_value=datetime.now(UTC) - timedelta(hours=7))
+        return_value=datetime.now(UTC) - timedelta(hours=9))
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
         tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
         attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
@@ -757,6 +757,8 @@ async def test_nightly_run_is_performed_and_reported_once(monkeypatch: pytest.Mo
     monkeypatch.setattr(beat, "complete_scheduler_run", AsyncMock())
     insert = AsyncMock(return_value=7)
     monkeypatch.setattr(beat, "insert_nightly_reprocessing_jobs", insert)
+    unqueued = AsyncMock(return_value=0)
+    monkeypatch.setattr(beat, "insert_nightly_initial_jobs_for_unqueued", unqueued)
     report = AsyncMock()
     monkeypatch.setattr(beat, "_report_nightly_reprocess_run", report)
 
@@ -765,6 +767,7 @@ async def test_nightly_run_is_performed_and_reported_once(monkeypatch: pytest.Mo
         await beat._run_nightly_reprocess(_session_factory(), now, log=_Log())
 
     insert.assert_awaited_once()
+    unqueued.assert_awaited_once()
     report.assert_awaited_once()
     assert report.call_args.kwargs["queued_count"] == 7
 

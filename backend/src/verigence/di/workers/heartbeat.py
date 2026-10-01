@@ -22,6 +22,21 @@ from verigence.di.runtime_errors import safe_exception_context
 logger = structlog.get_logger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 300.0
+# Work is due and nothing has been processed for this many heartbeats in a
+# row (30 minutes at the default interval): the worker is alive but stalled.
+# Logged at ERROR so the log alert fires (decision 2026-10-01).
+STALL_HEARTBEATS = 6
+
+
+def stall_detected(
+    *, pending: int, processed_before: int, processed_now: int, idle_beats: int
+) -> tuple[bool, int]:
+    """Returns (stalled, idle_beats after this beat). Idle beats count only
+    while work is due and the processed counter has not moved."""
+    if pending <= 0 or processed_now != processed_before:
+        return False, 0
+    idle_beats += 1
+    return idle_beats >= STALL_HEARTBEATS, idle_beats
 
 
 @dataclass
@@ -81,7 +96,8 @@ async def emit_heartbeat(
     session_factory: async_sessionmaker[AsyncSession] | None,
     stats: Callable[[], Iterable[WorkerStats]],
     fields: dict[str, Any],
-) -> None:
+) -> tuple[int, int]:
+    """Logs the heartbeat; returns (pending work, processed so far)."""
     depth: dict[str, int] = {}
     if session_factory is not None:
         try:
@@ -93,7 +109,10 @@ async def emit_heartbeat(
                 error_code="DATABASE_UNAVAILABLE",
                 **safe_exception_context(exc),
             )
-    logger.info("di_worker_heartbeat", **fields, **aggregate_stats(stats()), **depth)
+    totals = aggregate_stats(stats())
+    logger.info("di_worker_heartbeat", **fields, **totals, **depth)
+    pending = int(depth.get("processing_pending", 0)) + int(depth.get("classification_pending", 0))
+    return pending, int(totals["processed"])
 
 
 async def run_heartbeat(
@@ -104,12 +123,30 @@ async def run_heartbeat(
     fields: dict[str, Any],
     interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> None:
+    processed_before = 0
+    idle_beats = 0
     while not stop_event.is_set():
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         if stop_event.is_set():
             return
         try:
-            await emit_heartbeat(session_factory=session_factory, stats=stats, fields=fields)
+            pending, processed_now = await emit_heartbeat(
+                session_factory=session_factory, stats=stats, fields=fields,
+            )
+            stalled, idle_beats = stall_detected(
+                pending=pending, processed_before=processed_before,
+                processed_now=processed_now, idle_beats=idle_beats,
+            )
+            processed_before = processed_now
+            if stalled:
+                logger.error(
+                    "di_worker_stalled",
+                    error_code="WORKER_STALLED",
+                    error_category="TECHNICAL",
+                    pending_jobs=pending,
+                    idle_heartbeats=idle_beats,
+                    **fields,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("di_worker_heartbeat_failed", **safe_exception_context(exc))

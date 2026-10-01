@@ -32,6 +32,7 @@ from verigence.di.repositories.documents import (
     delete_document,
     get_active_retention_policy,
 )
+from verigence.di.repositories.processing_jobs import request_manual_reread
 from verigence.di.repositories.tenants import provision_actor
 from verigence.di.runtime_errors import safe_exception_context, technical_failure
 from verigence.di.storage.adapter import get_storage_adapter
@@ -526,6 +527,67 @@ async def finalize_capture_document(
         state=rows[0]["state"],
     )
     return await _public_status(tenantId, rows[0])
+
+
+class V2CaptureReprocessResponse(BaseModel):
+    documentId: UUID
+    # queued | in_progress | already_processed | not_classified
+    outcome: str
+    processingJobId: UUID | None = None
+
+
+@router.post(
+    "/audit-storage-contexts/{externalContextRef}/capture-documents/{documentId}:reprocess",
+    response_model=V2CaptureReprocessResponse,
+)
+async def reprocess_capture_document(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+) -> V2CaptureReprocessResponse:
+    """Read a classified document again, at a person's request relayed by
+    Audit Core ("Read again" on the Upload / Edit Documents card, decision
+    2026-10-01). No re-upload, no re-classification: one reading job for a
+    document DI already holds. Idempotent: a job already pending or running
+    is reported, never doubled."""
+    rows = await _status_rows(tenantId, externalContextRef, None, documentId)
+    if not rows:
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    try:
+        async with tenant_session(tenantId) as session, session.begin():
+            result = await request_manual_reread(
+                session, tenant_id=tenantId, document_id=documentId,
+                requested_by=principal.service_id,
+            )
+    except Exception as exc:
+        failure = technical_failure(exc, operation="worker")
+        logger.error(
+            "capture_v2_reprocess_failed",
+            tenant_id=tenantId,
+            document_id=str(documentId),
+            error_code=failure.code,
+            **safe_exception_context(exc),
+        )
+        raise http_exception(
+            ErrorCode.INTERNAL_ERROR, detail="The document could not be queued for reading."
+        ) from exc
+    if result["outcome"] == "not_found":
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    logger.info(
+        "capture_v2_document_reprocess_requested",
+        tenant_id=tenantId,
+        document_id=str(documentId),
+        actor_id=principal.service_id,
+        actor_type="SERVICE",
+        outcome=result["outcome"],
+        processing_job_id=result.get("processingJobId"),
+    )
+    job_id = result.get("processingJobId")
+    return V2CaptureReprocessResponse(
+        documentId=documentId, outcome=str(result["outcome"]),
+        processingJobId=UUID(str(job_id)) if job_id else None,
+    )
 
 
 async def _status_rows(
