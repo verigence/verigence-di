@@ -4,6 +4,7 @@ processing_run), or the delete fails and Audit Core retries on every pass."""
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ class _Rows:
 
 class _RecordingSession:
     def __init__(self) -> None:
-        self.statements: list[tuple[str, dict]] = []
+        self.statements: list[tuple[str, dict[str, Any]]] = []
 
     async def execute(self, statement, params=None):  # type: ignore[no-untyped-def]
         self.statements.append((" ".join(str(statement).split()), dict(params or {})))
