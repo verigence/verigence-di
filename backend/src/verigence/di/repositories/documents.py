@@ -332,6 +332,7 @@ async def delete_document(
 
     Eligibility must be checked by the caller before invoking this function.
     Deletes in dependency order:
+      (clear documents.current_processing_run_id) →
       document_field_values → validation_results → extracted_facts →
       processor_invocations → processing_runs → processing_jobs →
       document_quality_results → document_artifacts (+ object storage bytes) →
@@ -352,8 +353,12 @@ async def delete_document(
     ).all()
     logical_keys = [r[0] for r in artifact_rows]
 
-    # Delete child rows in dependency order
+    # Delete child rows in dependency order. documents.current_processing_run_id
+    # points at processing_runs (a deliberate cycle), so the pointer is cleared
+    # first or deleting the runs fails on fk_documents_current_processing_run.
     for stmt in [
+        "UPDATE docintel.documents SET current_processing_run_id=NULL "
+        "WHERE tenant_id=:tid AND document_id=:doc_id AND subject_id=:sid",
         "DELETE FROM docintel.document_field_values  WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.validation_results     WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.extracted_facts        WHERE tenant_id=:tid AND document_id=:doc_id",
