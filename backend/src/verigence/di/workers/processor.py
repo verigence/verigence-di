@@ -60,6 +60,7 @@ from verigence.di.runtime_errors import (
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.heartbeat import WorkerStats
+from verigence.di.workers.idle_wait import idle_wait
 from verigence.di.workers.job_runner import run_processing_job
 
 logger = structlog.get_logger(__name__)
@@ -244,11 +245,7 @@ class ProcessingWorker(_NotifyWorker):
 
                 if not did_work:
                     self._notify_event.clear()
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(
-                            asyncio.shield(self._notify_event.wait()),
-                            timeout=poll_interval,
-                        )
+                    await idle_wait(self._notify_event, poll_interval)
         finally:
             await engine.dispose()
 
@@ -401,11 +398,7 @@ class V2ProcessingWorker(_NotifyWorker):
 
                 if not did_work:
                     self._notify_event.clear()
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(
-                            asyncio.shield(self._notify_event.wait()),
-                            timeout=_V2_FALLBACK_POLL_SECONDS,
-                        )
+                    await idle_wait(self._notify_event, _V2_FALLBACK_POLL_SECONDS)
         finally:
             await engine.dispose()
 
