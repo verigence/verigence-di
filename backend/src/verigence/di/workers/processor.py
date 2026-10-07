@@ -60,7 +60,7 @@ from verigence.di.runtime_errors import (
 )
 from verigence.di.settings import get_settings
 from verigence.di.workers.heartbeat import WorkerStats
-from verigence.di.workers.idle_wait import idle_wait
+from verigence.di.workers.idle_wait import NOTIFY_BACKSTOP_SECONDS, idle_wait
 from verigence.di.workers.job_runner import run_processing_job
 
 logger = structlog.get_logger(__name__)
@@ -398,7 +398,10 @@ class V2ProcessingWorker(_NotifyWorker):
 
                 if not did_work:
                     self._notify_event.clear()
-                    await idle_wait(self._notify_event, _V2_FALLBACK_POLL_SECONDS)
+                    await idle_wait(
+                        self._notify_event,
+                        NOTIFY_BACKSTOP_SECONDS if notify_active else _V2_FALLBACK_POLL_SECONDS,
+                    )
         finally:
             await engine.dispose()
 

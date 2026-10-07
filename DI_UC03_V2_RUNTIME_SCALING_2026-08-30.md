@@ -47,9 +47,9 @@ Classification is the hard gate for leaving Step 1. Extraction starts immediatel
 
 ## No artificial extraction lag
 
-The normal V2 path uses PostgreSQL LISTEN/NOTIFY to wake extraction workers as soon as the classified document's processing job is committed. The existing V2 extraction fallback poll remains 0.5 seconds. It is a recovery path, not the primary dispatcher.
+The normal V2 path uses PostgreSQL LISTEN/NOTIFY to wake extraction workers as soon as the classified document's processing job is committed. While the notification listener is connected, an idle lane checks the job table every 6 seconds as a safety net (2026-10-07; it was 0.5 s for extraction and 1 s for classification, about 24 queries a second all day). A job queued without a notification waits at most that long. A lane without a listener keeps polling every 0.5 s (extraction) or 0.25 s (classification). The backstop is a recovery path, not the primary dispatcher.
 
-The UI may refresh document/extraction readiness approximately once per second while the PC is in Step 2 or while Review is preparing. Backend polling must not be increased from 0.5 seconds to 1 second because that would make the fallback slower.
+The UI may refresh document/extraction readiness approximately once per second while the PC is in Step 2 or while Review is preparing. This is about the notification-less fallback, which stays at 0.5 seconds; the notified path does not depend on the poll interval.
 
 ## Dedicated Railway worker topology
 

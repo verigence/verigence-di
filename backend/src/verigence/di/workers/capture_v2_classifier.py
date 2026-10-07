@@ -46,7 +46,7 @@ from verigence.di.runtime_errors import (
 from verigence.di.settings import get_settings
 from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.workers.heartbeat import WorkerStats
-from verigence.di.workers.idle_wait import idle_wait
+from verigence.di.workers.idle_wait import NOTIFY_BACKSTOP_SECONDS, idle_wait
 
 logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
@@ -210,7 +210,7 @@ class CaptureV2ClassificationWorker:
                     )
                 if not did_work:
                     self._wake.clear()
-                    await idle_wait(self._wake, 1.0 if notify_active else 0.25)
+                    await idle_wait(self._wake, NOTIFY_BACKSTOP_SECONDS if notify_active else 0.25)
         finally:
             await engine.dispose()
 

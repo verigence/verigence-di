@@ -5,6 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
+# While the job-notification listener is up, a notification wakes a lane the moment a job is
+# queued; this timer is only the safety net for a job queued without one (a nightly sweep, a
+# retry whose time has come). Without a listener the lanes keep polling quickly.
+NOTIFY_BACKSTOP_SECONDS = 6.0
+
 
 async def idle_wait(event: asyncio.Event, timeout: float) -> None:
     """Wait until ``event`` is set or ``timeout`` seconds pass, whichever is first.

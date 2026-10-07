@@ -27,3 +27,10 @@ async def test_a_notification_ends_the_wait_at_once() -> None:
     await asyncio.sleep(0)
     event.set()
     await asyncio.wait_for(waiter, timeout=1)
+
+
+@pytest.mark.no_docker
+def test_the_backstop_is_six_seconds_while_notifications_work() -> None:
+    from verigence.di.workers.idle_wait import NOTIFY_BACKSTOP_SECONDS
+
+    assert NOTIFY_BACKSTOP_SECONDS == 6.0
