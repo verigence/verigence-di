@@ -555,7 +555,13 @@ async def reprocess_capture_document(
     if not rows:
         raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
     try:
-        async with tenant_session(tenantId) as session, session.begin():
+        # tenant_session() is already inside its transaction when it yields
+        # (it set the RLS context and provisioned the tenant) and commits on a
+        # clean exit / rolls back on an error. A session.begin() here raised
+        # "A transaction is already begun on this Session" on every call
+        # (found live 2026-10-19: every Read-again request failed and Audit
+        # Core dead-lettered it), so none is opened.
+        async with tenant_session(tenantId) as session:
             result = await request_manual_reread(
                 session, tenant_id=tenantId, document_id=documentId,
                 requested_by=principal.service_id,
