@@ -329,16 +329,30 @@ async def delete_document(
     subject_id: uuid.UUID,
     storage: StorageAdapter,
 ) -> None:
-    """Hard-delete a document and all child rows except audit_events.
+    """Hard-delete a document and every row that references it, except audit_events.
 
     Eligibility must be checked by the caller before invoking this function.
-    Deletes in dependency order:
-      (clear documents.current_processing_run_id) →
-      document_field_values → validation_results → extracted_facts →
-      processor_invocations → processing_runs → processing_jobs →
-      document_quality_results → document_artifacts (+ object storage bytes) →
-      documents
+    Every table with a foreign key to the document, its processing runs or its
+    jobs is cleared child-first, so nothing is left to refuse the delete:
+      (clear documents.current_processing_run_id, and other documents' lineage
+       links to this one) →
+      document_field_values → human_verifications → validation_results →
+      document_classifications → extracted_facts → processor_invocations →
+      document_artifacts (+ object storage bytes) → backout_jobs →
+      processing_runs → processing_jobs → document_quality_results →
+      document_search_index → entity_links →
+      (integration_intake_events keep their row, without the document) →
+      Capture V2 classification jobs and uploads → documents
     audit_events are intentionally preserved.
+
+    2026-10-19: document_classifications was missing, so deleting the processing
+    runs of any classified document was refused by Postgres (IntegrityError,
+    reported as DATABASE_UNAVAILABLE) and every merged page Audit Core asked DI to
+    delete stayed behind. document_artifacts was deleted after the runs it
+    references (fk_artifact_processing_run), and human_verifications, backout_jobs,
+    document_search_index, entity_links and integration_intake_events were not
+    handled at all. tests/test_delete_document_full_graph.py fails if a table that
+    references documents, runs or jobs is added without being handled here.
     """
 
     # Load artifact keys before deleting rows
@@ -360,8 +374,23 @@ async def delete_document(
     for stmt in [
         "UPDATE docintel.documents SET current_processing_run_id=NULL "
         "WHERE tenant_id=:tid AND document_id=:doc_id AND subject_id=:sid",
+        # Other documents may name this one as the original it duplicates, replaces
+        # or was replaced by; those links cannot outlive it (same as the Project
+        # housekeeping delete does).
+        """UPDATE docintel.documents
+               SET duplicate_of_document_id = CASE WHEN duplicate_of_document_id=:doc_id
+                                                   THEN NULL ELSE duplicate_of_document_id END,
+                   replaces_document_id = CASE WHEN replaces_document_id=:doc_id
+                                               THEN NULL ELSE replaces_document_id END,
+                   replaced_by_document_id = CASE WHEN replaced_by_document_id=:doc_id
+                                                  THEN NULL ELSE replaced_by_document_id END
+             WHERE tenant_id=:tid AND document_id<>:doc_id
+               AND (duplicate_of_document_id=:doc_id OR replaces_document_id=:doc_id
+                    OR replaced_by_document_id=:doc_id)""",
         "DELETE FROM docintel.document_field_values  WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.human_verifications    WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.validation_results     WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_classifications WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.extracted_facts        WHERE tenant_id=:tid AND document_id=:doc_id",
         """DELETE FROM docintel.processor_invocations
                WHERE tenant_id=:tid
@@ -369,10 +398,19 @@ async def delete_document(
                      SELECT processing_run_id FROM docintel.processing_runs
                      WHERE tenant_id=:tid AND document_id=:doc_id
                  )""",
+        "DELETE FROM docintel.document_artifacts     WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.backout_jobs           WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.processing_runs        WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.processing_jobs        WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.document_quality_results WHERE tenant_id=:tid AND document_id=:doc_id",
-        "DELETE FROM docintel.document_artifacts     WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_search_index  WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.entity_links           WHERE tenant_id=:tid AND document_id=:doc_id",
+        # The intake event is the record that a message arrived (and its dedupe key):
+        # it stays, no longer pointing at the deleted document.
+        "UPDATE docintel.integration_intake_events SET document_id=NULL "
+        "WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_capture_v2_classification_jobs WHERE tenant_id=:tid AND document_id=:doc_id",
+        "DELETE FROM docintel.document_capture_v2_uploads WHERE tenant_id=:tid AND document_id=:doc_id",
         "DELETE FROM docintel.documents              WHERE tenant_id=:tid AND document_id=:doc_id AND subject_id=:sid",
     ]:
         await session.execute(text(stmt), {"tid": tenant_id, "doc_id": document_id, "sid": subject_id})
