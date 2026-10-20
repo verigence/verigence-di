@@ -182,6 +182,23 @@ class StorageAdapter(abc.ABC):
         """Delete object — only callable under retention authorization."""
 
 
+_SESSION: Any = None
+
+
+def _shared_session() -> Any:
+    """One aioboto3 session for the process. A new session per call reloads
+    botocore's service data -- 100-250 ms of CPU on the event loop each time
+    (measured 2026-10-20), so concurrent requests queued behind each other:
+    capture init took 10-21 s when several uploads arrived together. Clients
+    are still opened per call; only the session is shared."""
+    global _SESSION  # noqa: PLW0603
+    if _SESSION is None:
+        import aioboto3
+
+        _SESSION = aioboto3.Session()
+    return _SESSION
+
+
 # ── R2 / MinIO S3-compatible implementation ───────────────────────────────────
 class S3StorageAdapter(StorageAdapter):
     """S3-compatible implementation for Cloudflare R2 and local MinIO.
@@ -222,7 +239,6 @@ class S3StorageAdapter(StorageAdapter):
     ) -> StorageMetadata:
         import uuid
 
-        import aioboto3
 
         # Normalise: accept both sync IO and async iterators without leaking the
         # provider's upload-body type into the application interface.
@@ -243,7 +259,7 @@ class S3StorageAdapter(StorageAdapter):
         if metadata:
             extra["Metadata"] = metadata
 
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             await s3.put_object(
                 Bucket=self._bucket,
@@ -261,21 +277,19 @@ class S3StorageAdapter(StorageAdapter):
         )
 
     async def get_stream(self, logical_key: str) -> AsyncIterator[bytes]:
-        import aioboto3
 
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             response = await s3.get_object(Bucket=self._bucket, Key=logical_key)
             async for chunk in response["Body"].iter_chunks(chunk_size=65536):
                 yield chunk
 
     async def get_presigned_url(self, logical_key: str, expires_seconds: int) -> str:
-        import aioboto3
 
         # Presigning is local cryptographic work. The URL lets the browser/mobile
         # fetch the large object directly from R2/MinIO instead of proxying bytes
         # through the DI Railway service.
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             url = await s3.generate_presigned_url(
                 "get_object",
@@ -285,10 +299,9 @@ class S3StorageAdapter(StorageAdapter):
         return str(url)
 
     async def exists(self, logical_key: str) -> bool:
-        import aioboto3
         from botocore.exceptions import ClientError
 
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             try:
                 await s3.head_object(Bucket=self._bucket, Key=logical_key)
@@ -301,9 +314,8 @@ class S3StorageAdapter(StorageAdapter):
     async def get_metadata(self, logical_key: str) -> StorageMetadata:
         import uuid
 
-        import aioboto3
 
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             head = await s3.head_object(Bucket=self._bucket, Key=logical_key)
 
@@ -315,9 +327,8 @@ class S3StorageAdapter(StorageAdapter):
         )
 
     async def delete(self, logical_key: str) -> None:
-        import aioboto3
 
-        session = aioboto3.Session()
+        session = _shared_session()
         async with session.client("s3", **self._client_kwargs()) as s3:
             await s3.delete_object(Bucket=self._bucket, Key=logical_key)
 

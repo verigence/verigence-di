@@ -196,3 +196,11 @@ def test_parse_failure_reason_carries_no_document_text() -> None:
     shaped = GeminiResponseInvalidError(f"Gemini response is not a JSON object. Raw: {raw}")
     assert _safe_parse_reason(shaped) == "Gemini response is not a JSON object."
     assert _safe_parse_reason(ValueError("bad value RAMESH")) == "ValueError"
+
+
+def test_the_storage_session_is_created_once_per_process() -> None:
+    from verigence.di.storage import adapter
+
+    adapter._SESSION = None
+    first = adapter._shared_session()
+    assert adapter._shared_session() is first

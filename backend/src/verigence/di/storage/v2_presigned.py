@@ -7,8 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import aioboto3
-
 from verigence.di.settings import get_settings
 
 
@@ -40,7 +38,9 @@ def open_v2_s3_client() -> Any:
     presign more than one file in the same request should open one client
     with this and pass it to every ``presign_v2_put`` call.
     """
-    return aioboto3.Session().client("s3", **_client_kwargs())
+    from verigence.di.storage.adapter import _shared_session  # noqa: PLC0415
+
+    return _shared_session().client("s3", **_client_kwargs())
 
 
 async def presign_v2_put(
@@ -67,8 +67,7 @@ async def presign_v2_put(
         )
         return V2PresignedPut(url=str(url), required_headers=headers, expires_seconds=expires_seconds)
 
-    session = aioboto3.Session()
-    async with session.client("s3", **_client_kwargs()) as s3:
+    async with open_v2_s3_client() as s3:
         url = await s3.generate_presigned_url(
             "put_object",
             Params=params,
