@@ -308,7 +308,7 @@ async def create_capture_upload_intents(
                         await session.execute(
                             text(
                                 """
-                                SELECT document_id, logical_object_key,
+                                SELECT document_id, logical_object_key, state,
                                        requirement_refs_by_document_type_key
                                 FROM docintel.document_capture_v2_uploads
                                 WHERE tenant_id=:tenant_id
@@ -420,7 +420,43 @@ async def create_capture_upload_intents(
                                 existing["requirement_refs_by_document_type_key"] or {}
                             ).items()
                         }
-                        if existing_refs != requirement_refs:
+                        if existing_refs != requirement_refs and existing["state"] == "RECEIVING":
+                            # The file never arrived (the caller timed out
+                            # waiting for the first answer and asks again):
+                            # nothing was read under the earlier mapping, so
+                            # the new request's mapping and candidates stand
+                            # (2026-10-20: a page of a multi-page upload is
+                            # first sent without its read-once types, then
+                            # retried in full after grouping, and every
+                            # retry was refused as a conflict).
+                            await session.execute(
+                                text(
+                                    """
+                                    UPDATE docintel.document_capture_v2_uploads
+                                    SET requirement_refs_by_document_type_key=CAST(:refs AS jsonb),
+                                        candidate_document_type_keys=CAST(:candidate_keys AS jsonb),
+                                        classification_mode=:classification_mode,
+                                        updated_at_utc=now()
+                                    WHERE tenant_id=:tenant_id AND document_id=:document_id
+                                      AND state='RECEIVING'
+                                    """
+                                ),
+                                {
+                                    "refs": requirement_refs_json,
+                                    "candidate_keys": json.dumps(candidate_keys),
+                                    "classification_mode": command.classificationMode,
+                                    "tenant_id": tenantId,
+                                    "document_id": existing["document_id"],
+                                },
+                            )
+                            logger.info(
+                                "capture_v2_upload_intent_refreshed",
+                                tenant_id=tenantId,
+                                external_context_ref=externalContextRef,
+                                client_upload_id=item.clientUploadId,
+                                document_id=str(existing["document_id"]),
+                            )
+                        elif existing_refs != requirement_refs:
                             raise http_exception(
                                 ErrorCode.CONFLICT,
                                 detail=(
