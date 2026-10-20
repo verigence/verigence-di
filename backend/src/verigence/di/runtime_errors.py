@@ -347,6 +347,11 @@ def _detail_for_code(code: str) -> str:
         "EXTRACTION_PROFILE_EMPTY": "The effective extraction profile contains no enabled fields.",
         "SCORING_DENOMINATOR_ZERO": "The extraction profile scoring configuration has no positive denominator.",
         "UPLOAD_NOT_FIT": "The uploaded document failed file-quality validation.",
+        # Scan-quality rejections, as the person who uploaded the page reads them.
+        "DI_QUALITY_IMAGE_CONTRAST": "the page is too faded: the writing is grey, not dark",
+        "DI_QUALITY_IMAGE_BLUR_SCORE": "the page is blurred",
+        "DI_QUALITY_IMAGE_MIN_DIMENSIONS": "the image is too small",
+        "DI_QUALITY_PDF_PAGE_COUNT": "the PDF has too many pages",
     }
     explicit = details.get(code)
     if explicit is not None:

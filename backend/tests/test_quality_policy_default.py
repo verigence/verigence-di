@@ -44,6 +44,7 @@ def test_default_policy_names_catalogued_rules_with_their_parameters() -> None:
         "di.quality.file_not_empty",
         "di.quality.image_min_dimensions",
         "di.quality.image_blur_score",
+        "di.quality.image_contrast",
         "di.quality.pdf_page_count",
     ]
     for entry in DEFAULT_QUALITY_POLICY:
@@ -52,15 +53,34 @@ def test_default_policy_names_catalogued_rules_with_their_parameters() -> None:
     assert by_key["di.quality.image_min_dimensions"] == {"min_width": 800, "min_height": 600}
     assert by_key["di.quality.image_blur_score"] == {"min_variance": 80.0}
     assert by_key["di.quality.pdf_page_count"] == {"max_pages": 100}
+    assert by_key["di.quality.image_contrast"] == {"max_ink_level": 90.0, "min_stroke_contrast": 160.0}
 
 
-def test_new_tenants_and_the_migration_use_the_same_policy() -> None:
+def _load(name: str):
+    path = _MIGRATION.parent / name
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_new_tenants_and_the_migrations_use_the_same_policy() -> None:
+    """0049 gave every tenant the policy of its day; 0053 adds the contrast
+    rule. Together they are today's default, and so are new tenants'."""
     assert json.loads(tenants._DEFAULT_QUALITY_POLICY) == DEFAULT_QUALITY_POLICY
     migration = _migration()
-    assert migration._DEFAULT_POLICY == DEFAULT_QUALITY_POLICY
-    assert [(r[0], r[1]) for r in migration._CATALOG] == [
+    contrast = _load("0053_quality_contrast_rule.py")
+    migrated = [*migration._DEFAULT_POLICY, contrast._POLICY_ENTRY]
+    key = lambda rule: rule["rule_key"]  # noqa: E731
+    assert sorted(migrated, key=key) == sorted(DEFAULT_QUALITY_POLICY, key=key)
+    catalogued = [(r[0], r[1]) for r in migration._CATALOG] + [(contrast._RULE_KEY, contrast._RULE_KEY)]
+    assert sorted(catalogued) == sorted(
         (c["rule_key"], c["implementation_key"]) for c in QUALITY_RULE_CATALOG
-    ]
+    )
+    by_key = {c["rule_key"]: c for c in QUALITY_RULE_CATALOG}
+    assert by_key[contrast._RULE_KEY]["description"] == contrast._DESCRIPTION
+    assert by_key[contrast._RULE_KEY]["parameter_schema"] == contrast._SCHEMA
 
 
 def test_a_quality_rejection_code_is_what_audit_core_expects() -> None:
