@@ -49,6 +49,7 @@ from verigence.di.repositories.processing_jobs import (
     retry_job,
     schedule_v2_fast_retry,
 )
+from verigence.di.retry_policy import failure_kind, retry_delay_seconds
 from verigence.di.runtime_errors import (
     BUSINESS,
     CONFIGURATION,
@@ -68,6 +69,9 @@ logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_processing_jobs"
 _V2_PROCESSING_CONCURRENCY = 4
 _V2_FALLBACK_POLL_SECONDS = 0.5
+# Capture V2 jobs whose failure may be followed by a daytime retry: the first
+# attempt and the retries themselves (None: a caller that does not say).
+_V2_DAYTIME_JOB_TYPES = frozenset({"INITIAL", "V2_FAST_RETRY", None})
 
 
 def _default_worker_id(prefix: str = "processing") -> str:
@@ -550,6 +554,7 @@ async def _execute_claimed_job_in_context(
                 error_detail=result.error_detail,
                 retryable=result.retryable,
                 attempt_no=attempt_no,
+                job_type=job_type,
                 is_capture_v2=is_capture_v2,
                 job_log=job_log,
                 duration_ms=round((time.monotonic() - job_start) * 1000, 1),
@@ -577,6 +582,7 @@ async def _execute_claimed_job_in_context(
                 error_detail=failure.detail,
                 retryable=failure.retryable,
                 attempt_no=attempt_no,
+                job_type=job_type,
                 is_capture_v2=is_capture_v2,
                 job_log=job_log,
                 duration_ms=round((time.monotonic() - job_start) * 1000, 1),
@@ -621,6 +627,7 @@ async def _handle_failure(
     is_capture_v2: bool,
     job_log: Any,
     duration_ms: float | None = None,
+    job_type: str | None = None,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -632,9 +639,54 @@ async def _handle_failure(
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
     error_category = failure_category(safe_code)
 
+    # Capture V2 follows the product owner's retry rule (2026-10-20, see
+    # retry_policy.py): an AI failure is tried again 10 and 20 minutes later,
+    # a technical one once more two minutes later, and only the first
+    # attempt and its daytime retries take part -- the night attempt and a
+    # person's "Read again" are one attempt each. A quota hit counts like
+    # any other AI failure; the night attempt waits out a quota that is out
+    # for the day.
+    if is_capture_v2:
+        delay = (
+            retry_delay_seconds(safe_code, retryable=retryable, attempt_no=attempt_no)
+            if job_type in _V2_DAYTIME_JOB_TYPES
+            else None
+        )
+        if delay is not None:
+            async with session_factory() as session, session.begin():
+                await retry_job(
+                    session,
+                    tenant_id=tenant_id,
+                    processing_job_id=job_id,
+                    error_code=safe_code,
+                    error_detail=safe_detail,
+                )
+                await schedule_v2_fast_retry(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    correlation_id=correlation_id,
+                    attempt_no=attempt_no + 1,
+                    delay_seconds=delay,
+                )
+            job_log.warning(
+                "job_retry_pending",
+                error_class=error_class,
+                error_code=safe_code,
+                error_category=error_category,
+                failure_kind=failure_kind(safe_code),
+                attempt_no=attempt_no,
+                duration_ms=duration_ms,
+                is_capture_v2=True,
+                fast_retry_scheduled=True,
+                retry_in_seconds=delay,
+            )
+            return
+
     # A quota hit is the burst's doing, not the document's: wait it out
-    # without spending the attempt (see defer_job_after_rate_limit).
-    if safe_code == RATE_LIMITED_CODE:
+    # without spending the attempt (see defer_job_after_rate_limit). Legacy
+    # (non-Capture-V2) documents only.
+    elif safe_code == RATE_LIMITED_CODE:
         async with session_factory() as session, session.begin():
             deferred_for = await defer_job_after_rate_limit(
                 session, tenant_id=tenant_id, processing_job_id=job_id,
@@ -651,7 +703,7 @@ async def _handle_failure(
             )
             return
 
-    if retryable and attempt_no == 1:
+    if retryable and attempt_no == 1 and not is_capture_v2:
         async with session_factory() as session, session.begin():
             await retry_job(
                 session,
@@ -660,18 +712,9 @@ async def _handle_failure(
                 error_code=safe_code,
                 error_detail=safe_detail,
             )
-            # The legacy/V1 flow's next attempt is the once-daily EOD Retry
-            # Scheduler (scheduler/beat.py) -- an accepted design there, but
-            # Capture V2's whole reason for a dedicated worker pool is fast
-            # PC-facing turnaround. Give it a fast second attempt instead of
-            # leaving the document showing "still processing" for up to ~24h.
-            if is_capture_v2:
-                await schedule_v2_fast_retry(
-                    session,
-                    tenant_id=tenant_id,
-                    document_id=document_id,
-                    correlation_id=correlation_id,
-                )
+        # The legacy/V1 flow's next attempt is the once-daily EOD Retry
+        # Scheduler (scheduler/beat.py) -- an accepted design there. Capture
+        # V2's daytime retries are scheduled above.
         job_log.warning(
             "job_retry_pending",
             error_class=error_class,
@@ -679,8 +722,8 @@ async def _handle_failure(
             error_category=error_category,
             attempt_no=attempt_no,
             duration_ms=duration_ms,
-            is_capture_v2=is_capture_v2,
-            fast_retry_scheduled=is_capture_v2,
+            is_capture_v2=False,
+            fast_retry_scheduled=False,
         )
         return
 

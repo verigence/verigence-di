@@ -1,20 +1,84 @@
-"""A Gemini quota hit or outage during classification gets one more attempt
-five minutes later, then the page is left for the nightly sweep: two
-attempts in all, never a burst against the model."""
+"""Product owner's retry rule (2026-10-20): a Gemini failure is tried again
+10 and 20 minutes later (three attempts), then once that night; a technical
+failure gets two attempts in all, two minutes apart; a failure the page
+itself decides is never retried. Classification and extraction share it."""
 
 from __future__ import annotations
 
 import pytest
 
+from verigence.di.retry_policy import (
+    AI_MAX_ATTEMPTS,
+    CLASSIFICATION_NIGHT_ATTEMPT_NO,
+    TECHNICAL_MAX_ATTEMPTS,
+    failure_kind,
+    retry_delay_seconds,
+)
+from verigence.di.runtime_errors import TechnicalFailure
 from verigence.di.workers.capture_v2_classifier import (
-    _RETRYABLE_RETRY_DELAYS_SECONDS,
     CLASSIFICATION_MAX_ATTEMPTS,
     _retry_delay_seconds,
 )
 
+pytestmark = pytest.mark.no_docker
 
-@pytest.mark.no_docker
-def test_a_retryable_failure_is_tried_once_more_after_five_minutes() -> None:
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "DOCUMENT_AI_RATE_LIMITED",
+        "DOCUMENT_AI_UNAVAILABLE",
+        "DOCUMENT_AI_RESPONSE_INVALID",
+        "CLASSIFICATION_PROVIDER_ERROR",
+        "EXTRACTION_PROVIDER_ERROR",
+    ],
+)
+def test_an_ai_failure_is_retried_at_10_then_20_minutes_and_then_stops(code: str) -> None:
+    assert failure_kind(code) == "AI"
+    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 600
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2) == 1200
+    assert retry_delay_seconds(code, retryable=True, attempt_no=3) is None
+    assert AI_MAX_ATTEMPTS == 3
+    # the night attempt is one past the daytime ladder, so its failure is final
+    assert CLASSIFICATION_NIGHT_ATTEMPT_NO == 4
+    assert retry_delay_seconds(code, retryable=True, attempt_no=CLASSIFICATION_NIGHT_ATTEMPT_NO) is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["STORAGE_READ_ERROR", "DATABASE_UNAVAILABLE", "WORKER_INTERNAL_ERROR", "CLASSIFICATION_RETRY"],
+)
+def test_a_technical_failure_gets_two_attempts_two_minutes_apart(code: str) -> None:
+    assert failure_kind(code) == "TECHNICAL"
+    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 120
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2) is None
+    assert TECHNICAL_MAX_ATTEMPTS == 2
+    # an expired lease (scheduler/beat.py) is technical: same two attempts
     assert CLASSIFICATION_MAX_ATTEMPTS == 2
-    assert _RETRYABLE_RETRY_DELAYS_SECONDS == (300,)
-    assert _retry_delay_seconds(1) == 300
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [
+        ("DOCUMENT_AI_CONTENT_BLOCKED", "DOCUMENT"),
+        ("INVALID_FILE_CONTENT", "DOCUMENT"),
+        ("DI_QUALITY_IMAGE_BLUR_SCORE", "DOCUMENT"),
+        ("DOCUMENT_AI_REQUEST_REJECTED", "AI"),
+        ("DOCUMENT_TYPE_NOT_FOUND", "CONFIGURATION"),
+    ],
+)
+def test_a_refusal_is_never_retried(code: str, kind: str) -> None:
+    assert failure_kind(code) == kind
+    assert retry_delay_seconds(code, retryable=False, attempt_no=1) is None
+    # even if a caller marked it retryable, a page-decided outcome is final
+    if kind in ("DOCUMENT", "CONFIGURATION"):
+        assert retry_delay_seconds(code, retryable=True, attempt_no=1) is None
+
+
+def test_the_classifier_follows_the_shared_ladder() -> None:
+    ai = TechnicalFailure("DOCUMENT_AI_UNAVAILABLE", "x", True)
+    technical = TechnicalFailure("STORAGE_READ_ERROR", "x", True)
+    refused = TechnicalFailure("INVALID_FILE_CONTENT", "x", False)
+    assert [_retry_delay_seconds(ai, n) for n in (1, 2, 3)] == [600, 1200, None]
+    assert [_retry_delay_seconds(technical, n) for n in (1, 2)] == [120, None]
+    assert _retry_delay_seconds(refused, 1) is None

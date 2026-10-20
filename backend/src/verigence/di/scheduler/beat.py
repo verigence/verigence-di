@@ -16,6 +16,9 @@ Runs four independent things in-process alongside FastAPI, every 60 seconds:
      technical one more processing attempt -- up to
      NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly tries (see
      repositories/processing_jobs.py::insert_nightly_reprocessing_jobs).
+     A Capture V2 page gets one night attempt, and only after an AI failure
+     (classification or reading; product owner's rule 2026-10-20, see
+     retry_policy.py).
      Distinct from (2): this catches documents already permanently FAILED
      (backed out), not the once-off RETRY_PENDING->EOD_RETRY handoff.
      The trigger window spans several ticks on every replica; a
@@ -55,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from verigence.di.repositories.backout import insert_backout_job, sweep_expired_backout_jobs
 from verigence.di.repositories.processing_jobs import (
     fail_job,
+    insert_nightly_classification_retries,
     insert_nightly_initial_jobs_for_unqueued,
     insert_nightly_reprocessing_jobs,
 )
@@ -230,6 +234,9 @@ async def _run_nightly_reprocess(
             # Classified pages that never got a reading job (2026-10-01):
             # after the night, no classified page stays unread.
             queued += await insert_nightly_initial_jobs_for_unqueued(session)
+            # A page whose classification failed in the AI gets its one night
+            # attempt too (product owner's rule 2026-10-20).
+            queued += await insert_nightly_classification_retries(session)
             await complete_scheduler_run(
                 session, run_name=_NIGHTLY_RUN_NAME, run_date=run_date,
                 items_queued=queued, now=datetime.now(UTC),
@@ -363,6 +370,13 @@ async def _insert_eod_retry_jobs(
                       WHERE pj.tenant_id = d.tenant_id
                         AND pj.document_id = d.document_id
                         AND pj.job_type = 'EOD_RETRY'
+                  )
+                  -- legacy documents only: a Capture V2 document waiting on
+                  -- its own daytime retry must not get a second one stacked
+                  -- on it (product owner's rule 2026-10-20)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM docintel.document_capture_v2_uploads v2
+                      WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
                   )
             """),
             {"tid": tenant_id},

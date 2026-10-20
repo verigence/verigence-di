@@ -34,6 +34,7 @@ from verigence.di.repositories.documents import (
 )
 from verigence.di.repositories.processing_jobs import request_manual_reread
 from verigence.di.repositories.tenants import provision_actor
+from verigence.di.retry_policy import retry_status
 from verigence.di.runtime_errors import safe_exception_context, technical_failure
 from verigence.di.storage.adapter import get_storage_adapter
 from verigence.di.storage.audit_keys import build_audit_original_key
@@ -109,6 +110,21 @@ class V2CaptureDocumentStatus(BaseModel):
     # tell "queued, waiting its turn" from "never going to be read" and
     # shows the page as reading for ever (seen live 2026-10-01).
     extractionQueued: bool | None = None
+    # How the page's failures and retries stand (product owner's rule
+    # 2026-10-20, see retry_policy.py), so Audit Core can tell the PC the
+    # plain reason and leave them alone while DI still has attempts to make:
+    # scanPassed: the page passed the upload scan (None: not scanned yet).
+    # failureKind: AI / TECHNICAL / DOCUMENT / CONFIGURATION, of the final
+    #   failure or of the failed attempt a pending retry follows.
+    # processingFailureCode: the reading (extraction) failure's code;
+    #   failureCode above is the upload / classification failure's.
+    # nextAttemptAtUtc: when the pending daytime retry is due.
+    # retryTonight: FAILED, and the nightly run will try it once more.
+    scanPassed: bool | None = None
+    failureKind: str | None = None
+    processingFailureCode: str | None = None
+    nextAttemptAtUtc: datetime | None = None
+    retryTonight: bool | None = None
 
 
 class V2CaptureDocumentList(BaseModel):
@@ -661,6 +677,19 @@ async def _status_rows(
                            u.classified_document_type_key, u.original_filename,
                            u.logical_object_key, u.failure_code, u.failure_detail,
                            d.processing_status, d.content_state,
+                           d.upload_status, d.processing_failure_code,
+                           cj.job_status AS classification_job_status,
+                           cj.attempt_no AS classification_attempt_no,
+                           cj.error_code AS classification_error_code,
+                           cj.due_at_utc AS classification_due_at_utc,
+                           (SELECT MIN(pn.due_at_utc) FROM docintel.processing_jobs pn
+                            WHERE pn.tenant_id=u.tenant_id AND pn.document_id=u.document_id
+                              AND pn.job_status='PENDING') AS processing_next_due_at_utc,
+                           EXISTS (
+                               SELECT 1 FROM docintel.processing_jobs nr
+                               WHERE nr.tenant_id=u.tenant_id AND nr.document_id=u.document_id
+                                 AND nr.job_type='NIGHTLY_REPROCESS'
+                           ) AS night_reprocess_used,
                            EXISTS (
                                SELECT 1 FROM docintel.processing_jobs pj
                                WHERE pj.tenant_id=u.tenant_id AND pj.document_id=u.document_id
@@ -668,6 +697,8 @@ async def _status_rows(
                     FROM docintel.document_capture_v2_uploads u
                     JOIN docintel.documents d
                       ON d.tenant_id=u.tenant_id AND d.document_id=u.document_id
+                    LEFT JOIN docintel.document_capture_v2_classification_jobs cj
+                      ON cj.tenant_id=u.tenant_id AND cj.document_id=u.document_id
                     WHERE {' AND '.join(clauses)}
                     ORDER BY u.created_at_utc, u.document_id
                     """
@@ -712,7 +743,23 @@ async def _public_status(
         failureCode=row["failure_code"],
         failureDetail=row["failure_detail"],
         extractionQueued=bool(row["extraction_queued"]) if "extraction_queued" in row else None,
+        **_retry_fields(row),
     )
+
+
+def _retry_fields(row: RowMapping) -> dict[str, object]:
+    """The listing's retry fields (see V2CaptureDocumentStatus); empty for
+    a row read without the retry columns."""
+    if "upload_status" not in row:
+        return {}
+    status = retry_status(dict(row))
+    return {
+        "scanPassed": status["scanPassed"],
+        "failureKind": status["failureKind"],
+        "processingFailureCode": row.get("processing_failure_code"),
+        "nextAttemptAtUtc": status["nextAttemptAtUtc"],
+        "retryTonight": status["retryTonight"],
+    }
 
 
 @router.get(
