@@ -70,8 +70,8 @@ _NOTIFY_CHANNEL = "di_processing_jobs"
 _V2_PROCESSING_CONCURRENCY = 4
 _V2_FALLBACK_POLL_SECONDS = 0.5
 # Capture V2 jobs whose failure may be followed by a daytime retry: the first
-# attempt and the retries themselves (None: a caller that does not say).
-_V2_DAYTIME_JOB_TYPES = frozenset({"INITIAL", "V2_FAST_RETRY", None})
+# attempt and the retries themselves.
+_V2_DAYTIME_JOB_TYPES = frozenset({"INITIAL", "V2_FAST_RETRY"})
 
 
 def _default_worker_id(prefix: str = "processing") -> str:
@@ -627,7 +627,7 @@ async def _handle_failure(
     is_capture_v2: bool,
     job_log: Any,
     duration_ms: float | None = None,
-    job_type: str | None = None,
+    job_type: str = "INITIAL",
 ) -> None:
     from datetime import UTC, datetime
 

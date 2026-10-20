@@ -31,6 +31,7 @@ from verigence.di.document_ai.invoice_taxonomy import (
     INVOICE_CLASSIFICATION_HINTS,
     INVOICE_SPECIFIC_DOCUMENT_TYPE_KEYS,
 )
+from verigence.di.runtime_errors import PROVIDER_CONFIGURATION_STATUSES
 from verigence.di.settings import get_settings
 
 _GEMINI_MODEL = "gemini-3-flash-preview"
@@ -74,6 +75,9 @@ def _http_failure(status_code: int) -> V2ClassificationError:
         code, retryable = "DOCUMENT_AI_RATE_LIMITED", True
     elif status_code in {408, 500, 502, 503, 504}:
         code, retryable = "DOCUMENT_AI_UNAVAILABLE", True
+    elif status_code in PROVIDER_CONFIGURATION_STATUSES:
+        # our key or model is wrong (2026-10-20): configuration, not the page
+        code, retryable = "DOCUMENT_AI_NOT_CONFIGURED", False
     else:
         code, retryable = "DOCUMENT_AI_REQUEST_REJECTED", False
     return V2ClassificationError(

@@ -10,7 +10,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from verigence.di.retry_policy import AI_RETRY_DELAYS_SECONDS, AI_RETRYABLE_FAILURE_CODES
+from verigence.di.retry_policy import AI_RETRY_DELAYS_SECONDS, NIGHT_ELIGIBLE_FAILURE_CODES
 from verigence.di.runtime_errors import (
     BUSINESS_FAILURE_CODES,
     CONFIGURATION_FAILURE_CODES,
@@ -444,7 +444,7 @@ NIGHTLY_REPROCESS_MIN_INTERVAL = timedelta(hours=20)
 # fix, or a document that repeatedly killed the worker.
 NIGHTLY_NON_REPROCESSABLE_CODES = frozenset(
     BUSINESS_FAILURE_CODES | CONFIGURATION_FAILURE_CODES | {"WORKER_LEASE_EXHAUSTED"}
-)
+) - NIGHT_ELIGIBLE_FAILURE_CODES  # a refused key/model is fixed by night (2026-10-20)
 
 
 async def insert_nightly_reprocessing_jobs(
@@ -499,7 +499,7 @@ async def insert_nightly_reprocessing_jobs(
                   AND (d.processing_failure_code IS NULL
                        OR NOT (d.processing_failure_code = ANY(:non_reprocessable_codes)))
                   -- Capture V2 (product owner's rule 2026-10-20): one night
-                  -- attempt, for an AI failure only. A technical failure has
+                  -- attempt, for an AI failure (or a refused key/model) only. A technical failure has
                   -- had its two attempts and is the PC's (Audit Core tells
                   -- them); a fast retry that never ran is still owed its turn.
                   AND (
@@ -538,7 +538,7 @@ async def insert_nightly_reprocessing_jobs(
             {
                 "first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO,
                 "non_reprocessable_codes": sorted(NIGHTLY_NON_REPROCESSABLE_CODES),
-                "ai_codes": sorted(AI_RETRYABLE_FAILURE_CODES),
+                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
                 "recent_cutoff": now - NIGHTLY_REPROCESS_MIN_INTERVAL,
             },
         )
@@ -592,7 +592,8 @@ async def insert_nightly_reprocessing_jobs(
 async def insert_nightly_classification_retries(session: AsyncSession) -> int:
     """The one night attempt for a Capture V2 page whose classification
     failed in the AI (product owner's rule 2026-10-20): every upload FAILED
-    with a retryable AI code, that passed the upload scan, and has not had
+    with a retryable AI code (or a refused key/model), that passed the
+    upload scan, and has not had
     its night attempt yet goes back in the classification queue now. The
     job's attempt number jumps to CLASSIFICATION_NIGHT_ATTEMPT_NO, so a
     failure of this attempt is final. Returns the number of pages queued."""
@@ -622,7 +623,7 @@ async def insert_nightly_classification_retries(session: AsyncSession) -> int:
             """),
             {
                 "night_attempt_no": CLASSIFICATION_NIGHT_ATTEMPT_NO,
-                "ai_codes": sorted(AI_RETRYABLE_FAILURE_CODES),
+                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
                 "now": now,
             },
         )

@@ -492,7 +492,7 @@ class TestHandleFailure:
 
     # ── Capture V2: product owner's retry rule (2026-10-20) ─────────────────
 
-    async def _v2_failure(self, *, error_code: str, attempt_no: int, job_type: str | None,
+    async def _v2_failure(self, *, error_code: str, attempt_no: int, job_type: str,
                           retryable: bool = True) -> dict[str, Any]:
         from verigence.di.workers.processor import _handle_failure
 

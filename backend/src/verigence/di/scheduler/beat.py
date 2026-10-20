@@ -94,6 +94,10 @@ _NIGHTLY_FAILURE_REPORT_RUN_NAME = "NIGHTLY_REPROCESS_FAILURE_REPORT"
 # times; the next expiry fails it, so a document that kills the worker every
 # time stops being retried.
 _MAX_LEASE_RECLAIMS = 2
+# A Capture V2 job is reclaimed at most once (product owner's rule
+# 2026-10-20): a worker dying mid-job is a technical failure, and a technical
+# failure gets two runs in all, never a third.
+_V2_MAX_LEASE_RECLAIMS = 1
 _LEASE_EXHAUSTED_CODE = "WORKER_LEASE_EXHAUSTED"
 
 
@@ -478,9 +482,13 @@ async def _reclaim_stale_jobs(
     rows = (
         await session.execute(
             text("""
-                SELECT tenant_id, processing_job_id, document_id, job_type,
-                       attempt_no, lease_reclaim_count
-                FROM docintel.processing_jobs
+                SELECT pj.tenant_id, pj.processing_job_id, pj.document_id, pj.job_type,
+                       pj.attempt_no, pj.lease_reclaim_count,
+                       EXISTS (
+                           SELECT 1 FROM docintel.document_capture_v2_uploads v2
+                           WHERE v2.tenant_id = pj.tenant_id AND v2.document_id = pj.document_id
+                       ) AS is_capture_v2
+                FROM docintel.processing_jobs pj
                 WHERE job_status = 'RUNNING'
                   AND locked_at_utc < :cutoff
                 ORDER BY locked_at_utc
@@ -496,7 +504,8 @@ async def _reclaim_stale_jobs(
     exhausted: list[str] = []
     for row in rows:
         job_id = str(row["processing_job_id"])
-        if int(row["lease_reclaim_count"]) >= _MAX_LEASE_RECLAIMS:
+        limit = _V2_MAX_LEASE_RECLAIMS if row.get("is_capture_v2") else _MAX_LEASE_RECLAIMS
+        if int(row["lease_reclaim_count"]) >= limit:
             detail = safe_persisted_detail(_LEASE_EXHAUSTED_CODE)
             await fail_job(
                 session,

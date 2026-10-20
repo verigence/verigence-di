@@ -174,7 +174,7 @@ def test_listing_a_reading_waiting_on_its_daytime_retry() -> None:
         "processing_failure_code": "DOCUMENT_AI_RESPONSE_INVALID", "processing_next_due_at_utc": due,
     })
     assert status == {"scanPassed": True, "failureKind": "AI", "retryFailureCode": "DOCUMENT_AI_RESPONSE_INVALID",
-                      "nextAttemptAtUtc": due, "retryTonight": False}
+                      "nextAttemptAtUtc": due, "inNightAttempt": False, "retryTonight": False}
 
 
 def test_listing_a_failed_reading_left_for_the_night() -> None:
@@ -234,8 +234,64 @@ async def test_the_listing_query_carries_the_retry_fields(
     [row] = await capture_documents._status_rows(tenant_id, context_ref, None)
     fields = capture_documents._retry_fields(row)
     assert fields == {"scanPassed": True, "failureKind": "AI", "processingFailureCode": "DOCUMENT_AI_UNAVAILABLE",
-                      "nextAttemptAtUtc": None, "retryTonight": True}
+                      "nextAttemptAtUtc": None, "inNightAttempt": False, "retryTonight": True}
 
-    await _job(db_session, tenant_id, document_id, job_type="NIGHTLY_REPROCESS", attempt_no=4, status="FAILED")
+    # 2026-10-20 review (race): the night run has queued the attempt but no
+    # worker has run it yet. The document still says FAILED; the listing
+    # must say an attempt is coming, never that the night attempt failed.
+    assert await insert_nightly_reprocessing_jobs(db_session) == 1
     [row] = await capture_documents._status_rows(tenant_id, context_ref, None)
-    assert capture_documents._retry_fields(row)["retryTonight"] is False
+    assert row["processing_status"] == "FAILED"
+    queued = capture_documents._retry_fields(row)
+    assert queued["nextAttemptAtUtc"] is not None
+    assert queued["inNightAttempt"] is True and queued["retryTonight"] is True
+
+    # ... and once it has run and failed, it is used.
+    await db_session.execute(
+        text("UPDATE docintel.processing_jobs SET job_status='FAILED' "
+             "WHERE tenant_id=:t AND document_id=:d AND job_type='NIGHTLY_REPROCESS'"),
+        {"t": tenant_id, "d": document_id},
+    )
+    [row] = await capture_documents._status_rows(tenant_id, context_ref, None)
+    done = capture_documents._retry_fields(row)
+    assert (done["nextAttemptAtUtc"], done["retryTonight"]) == (None, False)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_key_or_model_waits_for_the_night_attempt(db_session: AsyncSession) -> None:
+    """Gemini 401/403/404 is our configuration, not the page's (2026-10-20):
+    no daytime retries, but the night attempt is still made once fixed."""
+    tenant_id = f"v2-cfg-{uuid.uuid4().hex[:8]}"
+    await _v2_page_failed_reading(db_session, tenant_id, "DOCUMENT_AI_NOT_CONFIGURED")
+    assert await insert_nightly_reprocessing_jobs(db_session) == 1
+
+    tenant_id = f"v2-cfgc-{uuid.uuid4().hex[:8]}"
+    await _v2_page_failed_classification(db_session, tenant_id, "DOCUMENT_AI_NOT_CONFIGURED")
+    assert await insert_nightly_classification_retries(db_session) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_v2_job_whose_worker_dies_runs_at_most_twice(db_session: AsyncSession) -> None:
+    """A lease expiry is a technical failure: a Capture V2 job is reclaimed
+    once, and the next expiry fails it (no third run)."""
+    tenant_id = f"v2-lease-{uuid.uuid4().hex[:8]}"
+    document_id = await _classified_unqueued_upload(db_session, tenant_id)
+    job_id = await _job(db_session, tenant_id, document_id, job_type="INITIAL", attempt_no=1, status="RUNNING",
+                        locked_minutes_ago=60)
+
+    async def job_state() -> tuple[Any, ...]:
+        return tuple((await db_session.execute(
+            text("SELECT job_status, lease_reclaim_count FROM docintel.processing_jobs "
+                 "WHERE tenant_id=:t AND processing_job_id=:j"),
+            {"t": tenant_id, "j": job_id},
+        )).one())
+
+    await beat._reclaim_stale_jobs(db_session, datetime.now(UTC))
+    assert await job_state() == ("PENDING", 1)
+    await db_session.execute(
+        text("UPDATE docintel.processing_jobs SET job_status='RUNNING', locked_by='dead', "
+             "locked_at_utc=now() - interval '1 hour' WHERE tenant_id=:t AND processing_job_id=:j"),
+        {"t": tenant_id, "j": job_id},
+    )
+    await beat._reclaim_stale_jobs(db_session, datetime.now(UTC))
+    assert await job_state() == ("FAILED", 1)

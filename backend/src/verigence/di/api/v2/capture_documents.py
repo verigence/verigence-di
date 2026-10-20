@@ -118,12 +118,16 @@ class V2CaptureDocumentStatus(BaseModel):
     #   failure or of the failed attempt a pending retry follows.
     # processingFailureCode: the reading (extraction) failure's code;
     #   failureCode above is the upload / classification failure's.
-    # nextAttemptAtUtc: when the pending daytime retry is due.
-    # retryTonight: FAILED, and the nightly run will try it once more.
+    # nextAttemptAtUtc: when the attempt DI holds queued or running is due
+    #   (a daytime retry, the night attempt, a Read again); while it is set
+    #   the page is still in DI's hands, whatever processingStatus says.
+    # inNightAttempt: that attempt is the night attempt.
+    # retryTonight: the night attempt is still to come or under way.
     scanPassed: bool | None = None
     failureKind: str | None = None
     processingFailureCode: str | None = None
     nextAttemptAtUtc: datetime | None = None
+    inNightAttempt: bool | None = None
     retryTonight: bool | None = None
 
 
@@ -682,13 +686,15 @@ async def _status_rows(
                            cj.attempt_no AS classification_attempt_no,
                            cj.error_code AS classification_error_code,
                            cj.due_at_utc AS classification_due_at_utc,
-                           (SELECT MIN(pn.due_at_utc) FROM docintel.processing_jobs pn
-                            WHERE pn.tenant_id=u.tenant_id AND pn.document_id=u.document_id
-                              AND pn.job_status='PENDING') AS processing_next_due_at_utc,
+                           pn.due_at_utc AS processing_next_due_at_utc,
+                           pn.job_type AS processing_next_job_type,
+                           -- only a finished night attempt is "used": one queued
+                           -- or running is still to come (2026-10-20 review)
                            EXISTS (
                                SELECT 1 FROM docintel.processing_jobs nr
                                WHERE nr.tenant_id=u.tenant_id AND nr.document_id=u.document_id
                                  AND nr.job_type='NIGHTLY_REPROCESS'
+                                 AND nr.job_status IN ('COMPLETED','FAILED','CANCELLED')
                            ) AS night_reprocess_used,
                            EXISTS (
                                SELECT 1 FROM docintel.processing_jobs pj
@@ -699,6 +705,12 @@ async def _status_rows(
                       ON d.tenant_id=u.tenant_id AND d.document_id=u.document_id
                     LEFT JOIN docintel.document_capture_v2_classification_jobs cj
                       ON cj.tenant_id=u.tenant_id AND cj.document_id=u.document_id
+                    LEFT JOIN LATERAL (
+                      SELECT p.due_at_utc, p.job_type FROM docintel.processing_jobs p
+                      WHERE p.tenant_id=u.tenant_id AND p.document_id=u.document_id
+                        AND p.job_status IN ('PENDING','RUNNING')
+                      ORDER BY p.due_at_utc LIMIT 1
+                    ) pn ON true
                     WHERE {' AND '.join(clauses)}
                     ORDER BY u.created_at_utc, u.document_id
                     """
@@ -758,6 +770,7 @@ def _retry_fields(row: RowMapping) -> dict[str, object]:
         "failureKind": status["failureKind"],
         "processingFailureCode": row.get("processing_failure_code"),
         "nextAttemptAtUtc": status["nextAttemptAtUtc"],
+        "inNightAttempt": status["inNightAttempt"],
         "retryTonight": status["retryTonight"],
     }
 

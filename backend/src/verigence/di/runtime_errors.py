@@ -53,6 +53,9 @@ BUSINESS_FAILURE_CODES = frozenset(
 )
 CONFIGURATION_FAILURE_CODES = frozenset(
     {
+        # Gemini answered 401/403/404: the API key or the model name is wrong
+        # (2026-10-20). Ours to fix, never the document's.
+        "DOCUMENT_AI_NOT_CONFIGURED",
         "DOCUMENT_TYPE_NOT_FOUND",
         "EXTRACTION_PROFILE_EMPTY",
         "EXTRACTION_PROFILE_NOT_FOUND",
@@ -78,6 +81,11 @@ DEPENDENCY_FAILURE_CODES = frozenset(
         "STORAGE_READ_FAILED",
     }
 )
+
+
+# Provider answers that mean our key or model is wrong, not the document
+# (401 unauthorised, 403 forbidden, 404 model not found): CONFIGURATION.
+PROVIDER_CONFIGURATION_STATUSES = frozenset({401, 403, 404})
 
 
 def failure_category(code: str | None) -> str:
@@ -224,6 +232,12 @@ def technical_failure(
                 _detail_for_code("DOCUMENT_AI_UNAVAILABLE"),
                 True,
             )
+        if status_code in PROVIDER_CONFIGURATION_STATUSES:
+            return TechnicalFailure(
+                "DOCUMENT_AI_NOT_CONFIGURED",
+                _detail_for_code("DOCUMENT_AI_NOT_CONFIGURED"),
+                False,
+            )
         if 400 <= status_code < 500:
             # The same request will be rejected again: never retry it.
             return TechnicalFailure(
@@ -333,6 +347,7 @@ def _detail_for_code(code: str) -> str:
         "DOCUMENT_AI_RESPONSE_INVALID": "The Document AI provider returned an unusable response. Processing may be retried automatically.",
         "DOCUMENT_AI_REQUEST_REJECTED": "The Document AI provider rejected the request. It will not be retried automatically.",
         "DOCUMENT_AI_CONTENT_BLOCKED": "The Document AI provider declined to process this document's content.",
+        "DOCUMENT_AI_NOT_CONFIGURED": "The Document AI provider refused our credentials or model; an administrator must fix the configuration.",
         "WORKER_LEASE_EXHAUSTED": "Processing repeatedly stopped before completing and was abandoned.",
         "STORAGE_READ_ERROR": "The stored document could not be read. Processing may be retried automatically.",
         "INVALID_FILE_CONTENT": "The document file is unreadable or has no pages.",

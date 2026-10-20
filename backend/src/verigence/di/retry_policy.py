@@ -35,9 +35,14 @@ AI_RETRYABLE_FAILURE_CODES = frozenset(
         "EXTRACTION_PROVIDER_ERROR",
     }
 )
-# Gemini refused the request itself (a 4xx other than 429): the same request
-# is refused again, so it is an AI failure that is never retried.
+# Gemini refused the request itself (a 4xx other than 401/403/404/429): the
+# same request is refused again, so it is an AI failure that is never retried.
 AI_FAILURE_CODES = AI_RETRYABLE_FAILURE_CODES | {"DOCUMENT_AI_REQUEST_REJECTED"}
+# Failures the one night attempt is for: an AI failure a later call can fix,
+# and Gemini refusing our key or model (DOCUMENT_AI_NOT_CONFIGURED, a
+# configuration failure): by night an administrator has fixed it, and the
+# page is read without the PC uploading it again (2026-10-20).
+NIGHT_ELIGIBLE_FAILURE_CODES = AI_RETRYABLE_FAILURE_CODES | {"DOCUMENT_AI_NOT_CONFIGURED"}
 
 # Seconds to wait after attempt 1, 2, ... failed.
 AI_RETRY_DELAYS_SECONDS: tuple[int, ...] = (600, 1200)
@@ -93,39 +98,51 @@ def retry_status(row: Mapping[str, Any]) -> dict[str, Any]:
     ``row`` carries the upload's state and failure_code, the document's
     upload_status, processing_status and processing_failure_code, the
     classification job's status, attempt number, error code and due time,
-    the next pending processing job's due time, and whether the document
-    already had its night attempt (night_reprocess_used).
+    the earliest pending-or-running processing job's due time and type, and
+    whether the document already had its night attempt *finished*
+    (night_reprocess_used).
 
     Returns failureKind (of the final failure, or of the failed attempt a
-    pending retry follows), the failure code behind it, nextAttemptAtUtc for
-    a pending daytime retry, retryTonight when the page is FAILED and the
-    nightly run will try it once more, and scanPassed."""
+    pending retry follows), the failure code behind it, nextAttemptAtUtc
+    whenever DI holds another attempt queued or running (a daytime retry,
+    the night attempt, a person's Read again), inNightAttempt when that
+    attempt is the night attempt, retryTonight when the night attempt is
+    still to come or under way, and scanPassed.
+
+    2026-10-20 review: a night attempt that is queued but not yet run is
+    reported as an attempt to come, never as the page having failed for good.
+    """
     passed = scan_passed(row.get("upload_status"))
     state = str(row.get("state") or "")
     processing = str(row.get("processing_status") or "")
     code: str | None = None
     next_at: Any = None
+    night = False
     tonight = False
+    classification_attempt = int(row.get("classification_attempt_no") or 1)
+    classification_in_hand = row.get("classification_job_status") in ("PENDING", "RUNNING")
     if state == "FAILED":
         code = row.get("failure_code")
         tonight = (
             passed is True
-            and (code or "") in AI_RETRYABLE_FAILURE_CODES
-            and int(row.get("classification_attempt_no") or 0) < CLASSIFICATION_NIGHT_ATTEMPT_NO
+            and (code or "").upper() in NIGHT_ELIGIBLE_FAILURE_CODES
+            and classification_attempt < CLASSIFICATION_NIGHT_ATTEMPT_NO
         )
     elif state in ("STORED", "CLASSIFYING"):
-        if row.get("classification_job_status") == "PENDING" and int(row.get("classification_attempt_no") or 1) > 1:
+        if classification_in_hand and classification_attempt > 1:
             code = row.get("classification_error_code")
             next_at = row.get("classification_due_at_utc")
-    elif state == "CLASSIFIED":
-        if processing == "RETRY_PENDING":
-            code = row.get("processing_failure_code")
-            next_at = row.get("processing_next_due_at_utc")
-        elif processing == "FAILED":
-            code = row.get("processing_failure_code")
-            tonight = (
-                passed is True
-                and (code or "") in AI_RETRYABLE_FAILURE_CODES
+            night = classification_attempt >= CLASSIFICATION_NIGHT_ATTEMPT_NO
+            tonight = night
+    elif state == "CLASSIFIED" and processing in ("RETRY_PENDING", "FAILED"):
+        code = row.get("processing_failure_code")
+        next_at = row.get("processing_next_due_at_utc")
+        night = next_at is not None and row.get("processing_next_job_type") == "NIGHTLY_REPROCESS"
+        if processing == "FAILED":
+            tonight = night or (
+                next_at is None
+                and passed is True
+                and (code or "").upper() in NIGHT_ELIGIBLE_FAILURE_CODES
                 and not row.get("night_reprocess_used")
             )
     return {
@@ -133,6 +150,7 @@ def retry_status(row: Mapping[str, Any]) -> dict[str, Any]:
         "failureKind": failure_kind(code),
         "retryFailureCode": code,
         "nextAttemptAtUtc": next_at,
+        "inNightAttempt": night,
         "retryTonight": tonight,
     }
 

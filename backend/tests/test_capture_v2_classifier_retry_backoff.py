@@ -65,6 +65,7 @@ def test_a_technical_failure_gets_two_attempts_two_minutes_apart(code: str) -> N
         ("DI_QUALITY_IMAGE_BLUR_SCORE", "DOCUMENT"),
         ("DOCUMENT_AI_REQUEST_REJECTED", "AI"),
         ("DOCUMENT_TYPE_NOT_FOUND", "CONFIGURATION"),
+        ("DOCUMENT_AI_NOT_CONFIGURED", "CONFIGURATION"),
     ],
 )
 def test_a_refusal_is_never_retried(code: str, kind: str) -> None:
@@ -82,3 +83,19 @@ def test_the_classifier_follows_the_shared_ladder() -> None:
     assert [_retry_delay_seconds(ai, n) for n in (1, 2, 3)] == [600, 1200, None]
     assert [_retry_delay_seconds(technical, n) for n in (1, 2)] == [120, None]
     assert _retry_delay_seconds(refused, 1) is None
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_gemini_refusing_our_key_or_model_is_configuration_not_the_page(status: int) -> None:
+    """2026-10-20 review (S8): an expired key or a wrong model name must not
+    tell the PC to re-upload a good page."""
+    from verigence.di.document_ai.gemini_adapter import GeminiApiError
+    from verigence.di.document_ai.v2_classifier import _http_failure
+    from verigence.di.runtime_errors import technical_failure
+
+    assert GeminiApiError(status, "x").technical_code == "DOCUMENT_AI_NOT_CONFIGURED"
+    assert (_http_failure(status).technical_code, _http_failure(status).retryable) == (
+        "DOCUMENT_AI_NOT_CONFIGURED", False)
+    failure = technical_failure(GeminiApiError(status, "x"), operation="extraction_provider")
+    assert (failure.code, failure.retryable, failure.category) == ("DOCUMENT_AI_NOT_CONFIGURED", False, "CONFIGURATION")
+    assert retry_delay_seconds("DOCUMENT_AI_NOT_CONFIGURED", retryable=False, attempt_no=1) is None

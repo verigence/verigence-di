@@ -38,6 +38,7 @@ from verigence.di.document_ai.gemini_cost import GeminiUsage, generation_config,
 from verigence.di.document_ai.schemas import get_schema
 from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 from verigence.di.domain.enums import AICapability, FoundStatus
+from verigence.di.runtime_errors import PROVIDER_CONFIGURATION_STATUSES
 from verigence.di.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -72,6 +73,9 @@ class GeminiApiError(RuntimeError):
             return "DOCUMENT_AI_RATE_LIMITED"
         if self.retryable:
             return "DOCUMENT_AI_UNAVAILABLE"
+        if self.status_code in PROVIDER_CONFIGURATION_STATUSES:
+            # our key or model is wrong (2026-10-20): configuration, not the page
+            return "DOCUMENT_AI_NOT_CONFIGURED"
         return "DOCUMENT_AI_REQUEST_REJECTED"
 
 
