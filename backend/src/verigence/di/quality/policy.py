@@ -12,6 +12,10 @@ Thresholds are a starting point, tuned per tenant from
   receipts are not rejected before a tenant has calibrated it.
 - dimensions: 800x600 rejects thumbnails and previews, not real captures
   (an A4 scan at 100 dpi is 827x1169; phone photos are wider).
+- contrast (2026-10-20): a faded page -- grey writing, ink level above 90
+  and stroke contrast below 160 -- is rejected; calibrated on a faded DEV
+  Gate Pass photo (ink 103, contrast 147) against clean scans (ink 50-65,
+  contrast 175-200). Tune per tenant from the recorded measurements.
 - page count: Audit Core sends one page at a time and merges at most a few
   pages of one document; 100 matches its own upload limit.
 """
@@ -19,6 +23,15 @@ Thresholds are a starting point, tuned per tenant from
 from __future__ import annotations
 
 from typing import Any
+
+_CONTRAST_DESCRIPTION = (
+    "The page is not faded: its writing is dark against the paper (ink level at most "
+    "max_ink_level, or stroke contrast at least min_stroke_contrast)."
+)
+_CONTRAST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"max_ink_level": {"type": "number"}, "min_stroke_contrast": {"type": "number"}},
+}
 
 DEFAULT_QUALITY_POLICY: list[dict[str, Any]] = [
     {"rule_key": "di.quality.file_not_empty", "enabled": True, "parameters": {}},
@@ -31,6 +44,11 @@ DEFAULT_QUALITY_POLICY: list[dict[str, Any]] = [
         "rule_key": "di.quality.image_blur_score",
         "enabled": True,
         "parameters": {"min_variance": 80.0},
+    },
+    {
+        "rule_key": "di.quality.image_contrast",
+        "enabled": True,
+        "parameters": {"max_ink_level": 90.0, "min_stroke_contrast": 160.0},
     },
     {"rule_key": "di.quality.pdf_page_count", "enabled": True, "parameters": {"max_pages": 100}},
 ]
@@ -73,6 +91,12 @@ QUALITY_RULE_CATALOG: list[dict[str, Any]] = [
         "implementation_key": "di.quality.image_blur_score",
         "description": "The page image (or the scan inside a PDF page) is sharp: Laplacian variance at least min_variance.",
         "parameter_schema": {"type": "object", "properties": {"min_variance": {"type": "number"}}},
+    },
+    {
+        "rule_key": "di.quality.image_contrast",
+        "implementation_key": "di.quality.image_contrast",
+        "description": _CONTRAST_DESCRIPTION,
+        "parameter_schema": _CONTRAST_SCHEMA,
     },
     {
         "rule_key": "di.quality.pdf_page_count",

@@ -191,6 +191,91 @@ def _rule_image_blur_score(
         )
 
 
+def _rule_image_contrast(
+    data: bytes,
+    rule_key: str,
+    params: dict[str, Any],
+) -> QualityRuleResult:
+    """Reject a faded page: the writing is grey, not dark, against its paper.
+
+    Added 2026-10-20 (product owner): a faded, low-contrast phone photo of a
+    handwritten Gate Pass passed the blur check -- the printed form lines are
+    sharp -- and its date was read as 2020 instead of 2026.
+
+    The page is measured at 1200 px on its long side. Writing is found with a
+    black-hat transform (pixels at least 30 darker than their local paper),
+    so a dark table around the paper or a shadow does not count as ink:
+
+    - ``ink_level``: the 10th percentile grey level of the writing
+      (0 black .. 255 white) -- how dark the darkest strokes are;
+    - ``stroke_contrast``: the 90th percentile of how much darker the writing
+      is than the paper around it.
+
+    The page fails only when both say faded: ``ink_level`` above
+    ``max_ink_level`` and ``stroke_contrast`` below ``min_stroke_contrast``.
+    A page with no writing at all is skipped (other rules handle it).
+    """
+    max_ink_level: float = float(params.get("max_ink_level", 90.0))
+    min_stroke_contrast: float = float(params.get("min_stroke_contrast", 160.0))
+    applied = {"max_ink_level": max_ink_level, "min_stroke_contrast": min_stroke_contrast}
+
+    try:
+        import cv2
+        import numpy as np
+
+        img = cv2.imdecode(np.frombuffer(_image_bytes(data), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return QualityRuleResult(
+                rule_key=rule_key, outcome="SKIP", parameters_applied=applied,
+                measurement={"error": "cv2 could not decode image"},
+                message="Could not decode image for contrast check",
+            )
+        height, width = img.shape[:2]
+        scale = 1200.0 / max(height, width)
+        if scale < 1.0:
+            img = cv2.resize(img, (max(1, int(width * scale)), max(1, int(height * scale))),
+                             interpolation=cv2.INTER_AREA)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        depth = cv2.morphologyEx(img, cv2.MORPH_BLACKHAT, kernel)
+        ink = depth > 30
+        ink_fraction = float(ink.mean())
+        if ink_fraction < 0.002:
+            return QualityRuleResult(
+                rule_key=rule_key, outcome="SKIP", parameters_applied=applied,
+                measurement={"ink_fraction": round(ink_fraction, 4)},
+                message="No writing found for the contrast check",
+            )
+        ink_level = float(np.percentile(img[ink], 10))
+        stroke_contrast = float(np.percentile(depth[ink], 90))
+        faded = ink_level > max_ink_level and stroke_contrast < min_stroke_contrast
+        return QualityRuleResult(
+            rule_key=rule_key,
+            outcome="FAIL" if faded else "PASS",
+            parameters_applied=applied,
+            measurement={
+                "ink_level": round(ink_level, 1),
+                "stroke_contrast": round(stroke_contrast, 1),
+                "ink_fraction": round(ink_fraction, 4),
+            },
+            message=(
+                f"Page too faded: writing is grey (ink level {ink_level:.0f}, "
+                f"contrast {stroke_contrast:.0f}); re-scan in good light"
+            ) if faded else None,
+        )
+    except ImportError:
+        return QualityRuleResult(
+            rule_key=rule_key, outcome="SKIP", parameters_applied=applied,
+            measurement={"error": "opencv-python-headless not available"},
+            message="Contrast check skipped — OpenCV not available",
+        )
+    except Exception as exc:
+        return QualityRuleResult(
+            rule_key=rule_key, outcome="ERROR", parameters_applied=applied,
+            measurement={"error": str(exc)},
+            message=f"Contrast check error: {exc}",
+        )
+
+
 def _rule_pdf_page_count(
     data: bytes,
     rule_key: str,
@@ -231,6 +316,7 @@ REGISTRY: dict[str, RuleFn] = {
     "di.quality.mime_type_allowed":     _rule_mime_type_allowed,
     "di.quality.image_min_dimensions":  _rule_image_min_dimensions,
     "di.quality.image_blur_score":      _rule_image_blur_score,
+    "di.quality.image_contrast":        _rule_image_contrast,
     "di.quality.pdf_page_count":        _rule_pdf_page_count,
 }
 

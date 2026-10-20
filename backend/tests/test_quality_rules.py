@@ -59,13 +59,14 @@ def _minimal_pdf() -> bytes:
 
 # ── REGISTRY lookup ───────────────────────────────────────────────────────────
 
-def test_registry_contains_all_six_rules() -> None:
+def test_registry_contains_every_rule() -> None:
     expected = {
         "di.quality.file_not_empty",
         "di.quality.file_size_max",
         "di.quality.mime_type_allowed",
         "di.quality.image_min_dimensions",
         "di.quality.image_blur_score",
+        "di.quality.image_contrast",
         "di.quality.pdf_page_count",
     }
     assert expected == set(REGISTRY.keys())

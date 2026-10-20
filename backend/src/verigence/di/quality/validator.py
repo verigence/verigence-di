@@ -161,6 +161,16 @@ async def validate_upload(
         quality_results.append(result)
         if result.outcome == "FAIL":
             has_fail = True
+        # One line per rule and page, so thresholds can be tuned from the
+        # logs as well as from document_quality_results (2026-10-20).
+        logger.info(
+            "quality_rule_result",
+            rule_key=rule_key,
+            outcome=result.outcome,
+            document_id=str(document_id),
+            **{f"m_{key}": value for key, value in (result.measurement or {}).items()
+               if isinstance(value, (int, float, str))},
+        )
 
     # ── Persist quality results ───────────────────────────────────────────────
     await _persist_quality_results(
