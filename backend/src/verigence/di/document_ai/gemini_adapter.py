@@ -250,6 +250,12 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                     duration_ms=_elapsed_ms(attempt_start),
                     parse_error=str(exc),
                     raw_snippet=(raw_response or "")[:300],
+                    # Content-free: why the answer was refused and how long
+                    # it was (parse_error/raw_snippet carry document text and
+                    # never reach the logs).
+                    parse_reason=_safe_parse_reason(exc),
+                    response_chars=len(raw_response or ""),
+                    response_tokens=last_usage.response_tokens if last_usage else None,
                 )
                 if will_retry:
                     if truncated:
@@ -623,6 +629,22 @@ async def _call_gemini(
         api_key, artifact_bytes, mime_type, prompt
     )
     return text
+
+
+def _safe_parse_reason(exc: Exception) -> str:
+    """Why a Gemini answer was refused, without any of its text: the JSON
+    decoder's message (position only) or the adapter's own reason, cut
+    before the raw excerpt it appends."""
+    if isinstance(exc, json.JSONDecodeError):
+        return f"invalid JSON: {exc.msg} at char {exc.pos} of {len(exc.doc)}"
+    cause = exc.__cause__
+    if isinstance(cause, json.JSONDecodeError):
+        return f"invalid JSON: {cause.msg} at char {cause.pos} of {len(cause.doc)}"
+    if not isinstance(exc, GeminiResponseInvalidError):
+        # Any other error's message may quote a value: its kind only.
+        return type(exc).__name__
+    message = str(exc).split("Raw:", 1)[0].split("\n", 1)[0].strip()
+    return message[:160] or type(exc).__name__
 
 
 def _parse_page_no(field_data: dict[str, Any]) -> int | None:

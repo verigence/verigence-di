@@ -174,3 +174,25 @@ def test_upload_intent_defaults_to_classifying() -> None:
         == "TRUST_SINGLE_CANDIDATE"
     with pytest.raises(ValueError):
         V2UploadIntentCommand(**base, classificationMode="GUESS")
+
+
+def test_parse_failure_reason_carries_no_document_text() -> None:
+    import json as _json
+
+    from verigence.di.document_ai.gemini_adapter import (
+        GeminiResponseInvalidError,
+        _safe_parse_reason,
+    )
+
+    raw = '{"customer_name": "RAMESH KUMAR", "amount": 11000,, }'
+    try:
+        _json.loads(raw)
+    except _json.JSONDecodeError as decode_error:
+        wrapped = GeminiResponseInvalidError(f"Gemini response is not valid JSON: {decode_error}\nRaw: {raw}")
+        wrapped.__cause__ = decode_error
+        reason = _safe_parse_reason(wrapped)
+    assert reason.startswith("invalid JSON: Expecting property name")
+    assert "RAMESH" not in reason
+    shaped = GeminiResponseInvalidError(f"Gemini response is not a JSON object. Raw: {raw}")
+    assert _safe_parse_reason(shaped) == "Gemini response is not a JSON object."
+    assert _safe_parse_reason(ValueError("bad value RAMESH")) == "ValueError"
