@@ -719,7 +719,7 @@ def _log_answer_shape(data: list[Any], db_fields: list[ExtractionField]) -> None
     invoices and dealer receipts answered with several objects; what they hold
     decides whether they are pages to merge or separate documents)."""
     wanted = {f.field_key for f in db_fields}
-    items = []
+    items: list[dict[str, Any]] = []
     for item in data[:10]:
         if not isinstance(item, dict):
             items.append({"type": type(item).__name__})
