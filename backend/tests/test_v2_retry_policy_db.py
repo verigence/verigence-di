@@ -307,3 +307,56 @@ async def test_a_v2_job_whose_worker_dies_runs_at_most_twice(db_session: AsyncSe
     )
     await beat._reclaim_stale_jobs(db_session, datetime.now(UTC))
     assert await job_state() == ("FAILED", 1)
+
+
+def test_classification_and_reading_share_one_budget_of_three_attempts() -> None:
+    """2026-10-21 review: a page identified on its second attempt (T0+10)
+    reads as attempt 2 of the budget, so it gets one reading retry (T0+20),
+    never a fresh T0/+10/+20 of its own."""
+    from verigence.di.retry_policy import budget_attempt, retry_delay_seconds
+
+    code = "DOCUMENT_AI_UNAVAILABLE"
+    assert budget_attempt(1, 1) == 1 and budget_attempt(1, None) == 1
+    assert budget_attempt(1, 2) == 2  # identified at T0+10, first reading
+    assert retry_delay_seconds(code, retryable=True, attempt_no=budget_attempt(1, 2)) == 600  # read again T0+20
+    assert retry_delay_seconds(code, retryable=True, attempt_no=budget_attempt(2, 2)) is None  # then FAILED
+    assert retry_delay_seconds(code, retryable=True, attempt_no=budget_attempt(1, 3)) is None  # identified at T0+20
+
+
+@pytest.mark.asyncio
+async def test_the_listing_counts_attempts_across_the_budget(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    from verigence.di.api.v2 import capture_documents
+
+    tenant_id = f"v2-made-{uuid.uuid4().hex[:8]}"
+    document_id = await _classified_unqueued_upload(db_session, tenant_id)
+    # identified on attempt 2 (T0+10); read at T0+10 and T0+20, both failed
+    await db_session.execute(
+        text("INSERT INTO docintel.document_capture_v2_classification_jobs "
+             "(tenant_id, document_id, job_status, attempt_no) VALUES (:t, :d, 'COMPLETED', 2)"),
+        {"t": tenant_id, "d": document_id},
+    )
+    await _job(db_session, tenant_id, document_id, job_type="INITIAL", attempt_no=1, status="FAILED")
+    await _job(db_session, tenant_id, document_id, job_type="V2_FAST_RETRY", attempt_no=2, status="FAILED")
+    await db_session.execute(
+        text("UPDATE docintel.documents SET processing_status='FAILED', confirmation_status='NOT_CONFIRMED', "
+             "processing_failure_code='DOCUMENT_AI_UNAVAILABLE' WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )
+    context_ref = (await db_session.execute(
+        text("SELECT external_context_ref FROM docintel.document_capture_v2_uploads "
+             "WHERE tenant_id=:t AND document_id=:d"),
+        {"t": tenant_id, "d": document_id},
+    )).scalar_one()
+
+    @contextlib.asynccontextmanager
+    async def same_session(_tenant_id: str) -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    monkeypatch.setattr(capture_documents, "tenant_session", same_session)
+    [row] = await capture_documents._status_rows(tenant_id, context_ref, None)
+    assert capture_documents._retry_fields(row)["attemptsMade"] == 3

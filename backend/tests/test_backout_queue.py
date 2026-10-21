@@ -219,7 +219,12 @@ def _make_mock_session_factory() -> MagicMock:
 
     session_mock = AsyncMock()
     session_mock.begin = MagicMock(return_value=begin_cm)
-    session_mock.execute = AsyncMock()
+    # The budget lookup in _handle_failure (received just now, no classification attempts).
+    budget_row = MagicMock()
+    budget_row.mappings.return_value.one_or_none.return_value = {
+        "created_at_utc": datetime.now(UTC), "classification_attempt": None,
+    }
+    session_mock.execute = AsyncMock(return_value=budget_row)
 
     outer_cm = AsyncMock()
     outer_cm.__aenter__ = AsyncMock(return_value=session_mock)

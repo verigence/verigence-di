@@ -100,3 +100,22 @@ def test_gemini_refusing_our_key_or_model_is_configuration_not_the_page(status: 
     failure = technical_failure(GeminiApiError(status, "x"), operation="extraction_provider")
     assert (failure.code, failure.retryable, failure.category) == ("DOCUMENT_AI_NOT_CONFIGURED", False, "CONFIGURATION")
     assert retry_delay_seconds("DOCUMENT_AI_NOT_CONFIGURED", retryable=False, attempt_no=1) is None
+
+
+def test_no_retry_starts_more_than_25_minutes_after_receipt() -> None:
+    """2026-10-21 review: every attempt runs inside Audit Core's 30-minute
+    ceiling, however long the earlier attempts took."""
+    from datetime import UTC, datetime, timedelta
+
+    received = datetime(2026, 10, 21, 7, 0, tzinfo=UTC)
+    code = "DOCUMENT_AI_UNAVAILABLE"
+    assert retry_delay_seconds(code, retryable=True, attempt_no=1, received_at=received,
+                               now=received + timedelta(minutes=1)) == 600
+    # the second retry, due at 25 minutes: still allowed
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2, received_at=received,
+                               now=received + timedelta(minutes=15)) == 600
+    # earlier attempts ran long: a retry due at 26 minutes is not made
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2, received_at=received,
+                               now=received + timedelta(minutes=16)) is None
+    ai = TechnicalFailure(code, "x", True)
+    assert _retry_delay_seconds(ai, 1, datetime.now(UTC) - timedelta(minutes=20)) is None

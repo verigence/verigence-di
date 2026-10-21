@@ -17,13 +17,19 @@ more than 30 minutes (Audit Core fails any page still not read then).
   (scheduler/beat.py), when an administrator has fixed it, so the PC need not
   upload it again.
 
-The same ladder applies to classification (capture_v2_classifier) and
-extraction (processor); the Gemini adapters themselves never retry, so the
-attempts here are the only ones.
+One budget per document (2026-10-21 review): classification and extraction
+share the three attempts. A page identified on its second attempt reads
+as attempt 2 of the budget (budget_attempt: the reading job's own number
+plus the identification attempts that failed), so T0, T0+10 and T0+20 are
+the whole budget, never three for each step. And no retry starts later than 25 minutes after DI first received
+the page, so every attempt runs inside Audit Core's 30-minute ceiling. The
+Gemini adapters themselves never retry, so the attempts here are the only
+ones.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from verigence.di.runtime_errors import BUSINESS_FAILURE_CODES, CONFIGURATION_FAILURE_CODES
@@ -52,6 +58,9 @@ AI_RETRY_DELAYS_SECONDS: tuple[int, ...] = (600, 600)
 TECHNICAL_RETRY_DELAYS_SECONDS: tuple[int, ...] = (600, 600)
 AI_MAX_ATTEMPTS = len(AI_RETRY_DELAYS_SECONDS) + 1
 TECHNICAL_MAX_ATTEMPTS = len(TECHNICAL_RETRY_DELAYS_SECONDS) + 1
+# No retry starts later than this after DI first received the page, so the
+# last attempt finishes inside Audit Core's 30-minute ceiling.
+LAST_RETRY_START_SECONDS = 25 * 60
 
 # The classification job's attempt number for the night re-read of a page our
 # setup refused: one past the daytime ladder, so a failure of it is final.
@@ -115,9 +124,9 @@ def retry_status(row: Mapping[str, Any]) -> dict[str, Any]:
     2026-10-20 review: a night attempt that is queued but not yet run is
     reported as an attempt to come, never as the page having failed for good.
 
-    attemptsMade (2026-10-21): how many attempts the step that failed (or is
-    being retried) has made -- reading when the page was classified, else
-    classification -- for Audit Core's failure report.
+    attemptsMade (2026-10-21): how many attempts of the document's one
+    budget have been made -- the identification attempts, plus the reading
+    attempts once the page was classified -- for Audit Core's failure report.
     """
     passed = scan_passed(row.get("upload_status"))
     state = str(row.get("state") or "")
@@ -143,7 +152,8 @@ def retry_status(row: Mapping[str, Any]) -> dict[str, Any]:
             night = classification_attempt >= CLASSIFICATION_NIGHT_ATTEMPT_NO
             tonight = night
     elif state == "CLASSIFIED" and processing in ("RETRY_PENDING", "FAILED"):
-        attempts = int(row.get("processing_attempts") or 0) or None
+        reading = int(row.get("processing_attempts") or 0)
+        attempts = budget_attempt(reading, classification_attempt) if reading else None
         code = row.get("processing_failure_code")
         next_at = row.get("processing_next_due_at_utc")
         night = next_at is not None and row.get("processing_next_job_type") == "NIGHTLY_REPROCESS"
@@ -165,10 +175,25 @@ def retry_status(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def retry_delay_seconds(code: str | None, *, retryable: bool, attempt_no: int) -> int | None:
+def budget_attempt(reading_attempt_no: int, classification_attempt_no: int | None) -> int:
+    """Where a reading attempt stands in the document's one budget: its own
+    number plus the identification attempts that failed before it."""
+    return int(reading_attempt_no) + max(0, int(classification_attempt_no or 1) - 1)
+
+
+def retry_delay_seconds(
+    code: str | None,
+    *,
+    retryable: bool,
+    attempt_no: int,
+    received_at: datetime | None = None,
+    now: datetime | None = None,
+) -> int | None:
     """Seconds until the next daytime attempt after attempt ``attempt_no``
-    (numbered from 1) failed with ``code``, or None when the daytime attempts
-    are used up or a retry cannot help."""
+    (numbered from 1, across classification and extraction) failed with
+    ``code``, or None when the attempts are used up, a retry cannot help,
+    or the retry would start more than LAST_RETRY_START_SECONDS after the
+    page was first received (``received_at``)."""
     if not retryable or attempt_no < 1:
         return None
     kind = failure_kind(code)
@@ -179,4 +204,11 @@ def retry_delay_seconds(code: str | None, *, retryable: bool, attempt_no: int) -
         if kind == AI and (code or "").upper() in AI_RETRYABLE_FAILURE_CODES
         else TECHNICAL_RETRY_DELAYS_SECONDS
     )
-    return delays[attempt_no - 1] if attempt_no <= len(delays) else None
+    if attempt_no > len(delays):
+        return None
+    delay = delays[attempt_no - 1]
+    if received_at is not None:
+        now = now or datetime.now(UTC)
+        if now + timedelta(seconds=delay) > received_at + timedelta(seconds=LAST_RETRY_START_SECONDS):
+            return None
+    return delay

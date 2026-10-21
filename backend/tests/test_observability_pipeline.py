@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import json
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -595,6 +596,10 @@ async def test_v2_call_logs_usage_status_latency_and_response_id(monkeypatch: py
 class _TenantSession:
     def __init__(self) -> None:
         self.session = AsyncMock()
+        # The page was received just now (the 25-minute cap on retries reads it).
+        self.session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=datetime.now(UTC)),
+        )
 
     async def __aenter__(self) -> AsyncMock:
         return self.session
