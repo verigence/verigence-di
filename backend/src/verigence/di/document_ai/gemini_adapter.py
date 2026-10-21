@@ -685,6 +685,66 @@ def _parse_evidence_region(field_data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# Characters that may follow a complete JSON answer without changing it: a
+# closing code fence, stray closing brackets, whitespace (2026-10-21: dealer
+# receipts and a customer ledger were refused day and night because a complete
+# answer ended with three extra characters -- "Extra data at char 2612 of 2615").
+_HARMLESS_TRAILING = frozenset("`]} \t\r\n")
+
+
+def _complete_answer_with_trailing_marks(text_value: str) -> Any | None:
+    """The first complete JSON value of the answer when everything after it is
+    only closing marks; None otherwise (the answer stays refused)."""
+    try:
+        data, end = json.JSONDecoder().raw_decode(text_value)
+    except json.JSONDecodeError:
+        return None
+    rest = text_value[end:]
+    if not rest.strip() or any(ch not in _HARMLESS_TRAILING for ch in rest):
+        return None
+    logger.warning(
+        "gemini_trailing_marks_ignored",
+        trailing_chars=len(rest),
+        # Only backticks, brackets and whitespace can reach this point.
+        trailing=rest[:20],
+        answer_chars=end,
+    )
+    return data
+
+
+def _log_answer_shape(data: list[Any], db_fields: list[ExtractionField]) -> None:
+    """Content-free shape of a multi-item answer: how many items, and for each
+    the number of requested fields it carries, the pages its fields cite, and
+    whether it has line items. No values are logged (2026-10-21: accessory
+    invoices and dealer receipts answered with several objects; what they hold
+    decides whether they are pages to merge or separate documents)."""
+    wanted = {f.field_key for f in db_fields}
+    items: list[dict[str, Any]] = []
+    for item in data[:10]:
+        if not isinstance(item, dict):
+            items.append({"type": type(item).__name__})
+            continue
+        keys = [k for k in item if k in wanted]
+        pages = sorted(
+            {
+                p
+                for k in keys
+                if isinstance(item.get(k), dict)
+                and (p := _parse_page_no(item[k])) is not None
+            }
+        )
+        items.append(
+            {
+                "requestedFields": len(keys),
+                "otherKeys": len([k for k in item if k not in wanted]),
+                "pages": pages,
+                "hasLineItems": "line_items" in keys,
+                "fieldKeys": sorted(keys)[:40],
+            }
+        )
+    logger.warning("gemini_multi_item_answer_shape", items=len(data), shape=items)
+
+
 def _parse_response(
     raw_text: str,
     schema: SchemaDefinition,
@@ -702,9 +762,11 @@ def _parse_response(
     try:
         data = json.loads(text_value)
     except json.JSONDecodeError as exc:
-        raise GeminiResponseInvalidError(
-            f"Gemini response is not valid JSON: {exc}\nRaw: {raw_text[:500]}"
-        ) from exc
+        data = _complete_answer_with_trailing_marks(text_value)
+        if data is None:
+            raise GeminiResponseInvalidError(
+                f"Gemini response is not valid JSON: {exc}\nRaw: {raw_text[:500]}"
+            ) from exc
 
     # Gemini can occasionally wrap the requested object in a one-element JSON
     # array even when responseMimeType=application/json and the prompt requests an
@@ -713,6 +775,7 @@ def _parse_response(
         if len(data) == 1 and isinstance(data[0], dict):
             data = data[0]
         else:
+            _log_answer_shape(data, db_fields)
             raise GeminiResponseInvalidError(
                 "Gemini response must be one JSON object or a single-item array "
                 f"containing one object. Raw: {raw_text[:500]}"
