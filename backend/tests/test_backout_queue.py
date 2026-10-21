@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -454,11 +455,10 @@ class TestHandleFailure:
         assert call_kwargs["correlation_id"] == "corr-1"
 
     @pytest.mark.asyncio
-    async def test_a_quota_hit_defers_the_job_without_spending_the_attempt(self) -> None:
-        """Load is never a failure (2026-09-30): a 429 puts the job back in
-        the queue at the same attempt number; nothing is retried, failed or
-        backed out. Once the job has waited on the quota too long the
-        deferral is refused and the ordinary retry rule applies."""
+    async def test_a_legacy_quota_hit_defers_the_job_without_spending_the_attempt(self) -> None:
+        """Legacy (non-Capture-V2) documents keep the 2026-09-30 rule: a 429
+        puts the job back in the queue at the same attempt number. Once the
+        job has waited on the quota too long the ordinary retry rule applies."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -466,7 +466,7 @@ class TestHandleFailure:
         common = dict(
             session_factory=factory, tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
             correlation_id="corr-1", processing_run_id=uuid.uuid4(), error_code="DOCUMENT_AI_RATE_LIMITED",
-            error_detail="gemini 429", retryable=True, attempt_no=2, is_capture_v2=True, job_log=job_log,
+            error_detail="gemini 429", retryable=True, attempt_no=2, is_capture_v2=False, job_log=job_log,
         )
         with (
             patch("verigence.di.workers.processor.defer_job_after_rate_limit",
@@ -489,6 +489,82 @@ class TestHandleFailure:
         ):
             await _handle_failure(**common)
         mock_fail.assert_called_once()
+
+    # ── Capture V2: product owner's retry rule (2026-10-20) ─────────────────
+
+    async def _v2_failure(self, *, error_code: str, attempt_no: int, job_type: str,
+                          retryable: bool = True) -> dict[str, Any]:
+        from verigence.di.workers.processor import _handle_failure
+
+        job_log = MagicMock()
+        with (
+            patch("verigence.di.workers.processor.defer_job_after_rate_limit",
+                  new_callable=AsyncMock, return_value=317) as mock_defer,
+            patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch("verigence.di.workers.processor.schedule_v2_fast_retry",
+                  new_callable=AsyncMock) as mock_fast_retry,
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+            patch("verigence.di.workers.processor.insert_backout_job", new_callable=AsyncMock),
+        ):
+            await _handle_failure(
+                session_factory=self._make_session_factory(), tenant_id="t1", job_id=uuid.uuid4(),
+                document_id=uuid.uuid4(), correlation_id="corr-1", processing_run_id=uuid.uuid4(),
+                error_code=error_code, error_detail="x", retryable=retryable, attempt_no=attempt_no,
+                is_capture_v2=True, job_log=job_log, job_type=job_type,
+            )
+        return {"defer": mock_defer, "retry": mock_retry, "fast": mock_fast_retry, "fail": mock_fail,
+                "log": job_log}
+
+    @pytest.mark.asyncio
+    async def test_v2_ai_failure_is_retried_at_10_then_20_minutes_then_failed(self) -> None:
+        first = await self._v2_failure(error_code="DOCUMENT_AI_UNAVAILABLE", attempt_no=1, job_type="INITIAL")
+        first["retry"].assert_called_once()
+        first["fail"].assert_not_called()
+        assert first["fast"].call_args.kwargs["attempt_no"] == 2
+        assert first["fast"].call_args.kwargs["delay_seconds"] == 600
+
+        second = await self._v2_failure(error_code="DOCUMENT_AI_RESPONSE_INVALID", attempt_no=2,
+                                        job_type="V2_FAST_RETRY")
+        assert second["fast"].call_args.kwargs["attempt_no"] == 3
+        assert second["fast"].call_args.kwargs["delay_seconds"] == 1200
+        assert second["log"].warning.call_args.kwargs["failure_kind"] == "AI"
+
+        third = await self._v2_failure(error_code="DOCUMENT_AI_UNAVAILABLE", attempt_no=3,
+                                       job_type="V2_FAST_RETRY")
+        third["fast"].assert_not_called()
+        third["fail"].assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_v2_quota_hit_is_an_ai_attempt_not_an_uncounted_wait(self) -> None:
+        outcome = await self._v2_failure(error_code="DOCUMENT_AI_RATE_LIMITED", attempt_no=1, job_type="INITIAL")
+        outcome["defer"].assert_not_called()
+        assert outcome["fast"].call_args.kwargs["delay_seconds"] == 600
+
+    @pytest.mark.asyncio
+    async def test_v2_technical_failure_gets_two_attempts(self) -> None:
+        first = await self._v2_failure(error_code="STORAGE_READ_ERROR", attempt_no=1, job_type="INITIAL")
+        assert first["fast"].call_args.kwargs["attempt_no"] == 2
+        assert first["fast"].call_args.kwargs["delay_seconds"] == 120
+        second = await self._v2_failure(error_code="WORKER_INTERNAL_ERROR", attempt_no=2,
+                                        job_type="V2_FAST_RETRY")
+        second["fast"].assert_not_called()
+        second["fail"].assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_v2_night_attempt_and_manual_reread_are_one_attempt_each(self) -> None:
+        for job_type in ("NIGHTLY_REPROCESS", "MANUAL_REREAD"):
+            outcome = await self._v2_failure(error_code="DOCUMENT_AI_UNAVAILABLE", attempt_no=1,
+                                             job_type=job_type)
+            outcome["fast"].assert_not_called()
+            outcome["retry"].assert_not_called()
+            outcome["fail"].assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_v2_refusal_fails_at_once(self) -> None:
+        outcome = await self._v2_failure(error_code="DOCUMENT_AI_CONTENT_BLOCKED", attempt_no=1,
+                                         job_type="INITIAL", retryable=False)
+        outcome["fast"].assert_not_called()
+        outcome["fail"].assert_called_once()
 
     @pytest.mark.asyncio
     async def test_legacy_retryable_attempt1_does_not_schedule_fast_retry(self) -> None:

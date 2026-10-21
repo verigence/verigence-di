@@ -10,6 +10,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from verigence.di.retry_policy import AI_RETRY_DELAYS_SECONDS, NIGHT_ELIGIBLE_FAILURE_CODES
 from verigence.di.runtime_errors import (
     BUSINESS_FAILURE_CODES,
     CONFIGURATION_FAILURE_CODES,
@@ -24,13 +25,13 @@ _MAX_ERROR_CODE = 128
 
 # The bounded V2 worker pool exists specifically to give Capture V2
 # extraction a fast, PC-facing turnaround (see module docstring in
-# workers/processor.py). Its first retryable failure must not fall back to
-# the legacy EOD Retry Scheduler, which can leave a document showing
-# nothing more than "still processing" for up to ~24h (see
-# schedule_v2_fast_retry below).
-# Five minutes (decision 2026-09-30): no request is retried within five
-# minutes, so the fast second attempt waits that long.
-V2_FAST_RETRY_DELAY_SECONDS = 300
+# workers/processor.py). Its retryable failures must not fall back to the
+# legacy EOD Retry Scheduler, which can leave a document showing nothing
+# more than "still processing" for up to ~24h (see schedule_v2_fast_retry
+# below). How long each retry waits is retry_policy's (product owner's rule
+# 2026-10-20: an AI failure 10 then 20 minutes, a technical one 2 minutes);
+# this is the wait when a caller does not say.
+V2_FAST_RETRY_DELAY_SECONDS = AI_RETRY_DELAYS_SECONDS[0]
 
 
 def _cap(value: str | None, limit: int) -> str | None:
@@ -329,9 +330,12 @@ async def schedule_v2_fast_retry(
     tenant_id: str,
     document_id: uuid.UUID,
     correlation_id: str,
+    attempt_no: int = 2,
+    delay_seconds: int = V2_FAST_RETRY_DELAY_SECONDS,
 ) -> None:
-    """Give a Capture V2 document's first retryable extraction failure a
-    fast second attempt instead of the legacy EOD Retry Scheduler.
+    """Give a Capture V2 document's retryable extraction failure its next
+    daytime attempt (``attempt_no``, due in ``delay_seconds``) instead of the
+    legacy EOD Retry Scheduler.
 
     retry_job() above already set the document to RETRY_PENDING -- correct
     for the legacy/V1 flow, where the EOD Retry Scheduler inserting the
@@ -349,7 +353,7 @@ async def schedule_v2_fast_retry(
     document_id could exist, this row is long since resolved.
     """
     now = datetime.now(UTC)
-    due_at = now + timedelta(seconds=V2_FAST_RETRY_DELAY_SECONDS)
+    due_at = now + timedelta(seconds=delay_seconds)
     await session.execute(
         text("""
             INSERT INTO docintel.processing_jobs
@@ -357,7 +361,7 @@ async def schedule_v2_fast_retry(
                  job_type, job_status, due_at_utc, attempt_no, created_at_utc)
             VALUES
                 (:tenant_id, :job_id, :document_id, :correlation_id,
-                 'V2_FAST_RETRY', 'PENDING', :due_at, 2, :now)
+                 'V2_FAST_RETRY', 'PENDING', :due_at, :attempt_no, :now)
             ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
         """),
         {
@@ -366,6 +370,7 @@ async def schedule_v2_fast_retry(
             "document_id": document_id,
             "correlation_id": correlation_id,
             "due_at": due_at,
+            "attempt_no": attempt_no,
             "now": now,
         },
     )
@@ -439,7 +444,7 @@ NIGHTLY_REPROCESS_MIN_INTERVAL = timedelta(hours=20)
 # fix, or a document that repeatedly killed the worker.
 NIGHTLY_NON_REPROCESSABLE_CODES = frozenset(
     BUSINESS_FAILURE_CODES | CONFIGURATION_FAILURE_CODES | {"WORKER_LEASE_EXHAUSTED"}
-)
+) - NIGHT_ELIGIBLE_FAILURE_CODES  # a refused key/model is fixed by night (2026-10-20)
 
 
 async def insert_nightly_reprocessing_jobs(
@@ -493,6 +498,26 @@ async def insert_nightly_reprocessing_jobs(
                   -- outcome or a configuration gap
                   AND (d.processing_failure_code IS NULL
                        OR NOT (d.processing_failure_code = ANY(:non_reprocessable_codes)))
+                  -- Capture V2 (product owner's rule 2026-10-20): one night
+                  -- attempt, for an AI failure (or a refused key/model) only. A technical failure has
+                  -- had its two attempts and is the PC's (Audit Core tells
+                  -- them); a fast retry that never ran is still owed its turn.
+                  AND (
+                      NOT EXISTS (
+                          SELECT 1 FROM docintel.document_capture_v2_uploads v2
+                          WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
+                      )
+                      OR (
+                          (d.processing_status = 'RETRY_PENDING'
+                           OR d.processing_failure_code = ANY(:ai_codes))
+                          AND NOT EXISTS (
+                              SELECT 1 FROM docintel.processing_jobs night
+                              WHERE night.tenant_id = d.tenant_id
+                                AND night.document_id = d.document_id
+                                AND night.job_type = 'NIGHTLY_REPROCESS'
+                          )
+                      )
+                  )
                   -- one attempt at a time: a document whose earlier attempt
                   -- is still pending or running gets no second job alongside
                   AND NOT EXISTS (
@@ -513,6 +538,7 @@ async def insert_nightly_reprocessing_jobs(
             {
                 "first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO,
                 "non_reprocessable_codes": sorted(NIGHTLY_NON_REPROCESSABLE_CODES),
+                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
                 "recent_cutoff": now - NIGHTLY_REPROCESS_MIN_INTERVAL,
             },
         )
@@ -561,6 +587,64 @@ async def insert_nightly_reprocessing_jobs(
             )
 
     return queued
+
+
+async def insert_nightly_classification_retries(session: AsyncSession) -> int:
+    """The one night attempt for a Capture V2 page whose classification
+    failed in the AI (product owner's rule 2026-10-20): every upload FAILED
+    with a retryable AI code (or a refused key/model), that passed the
+    upload scan, and has not had
+    its night attempt yet goes back in the classification queue now. The
+    job's attempt number jumps to CLASSIFICATION_NIGHT_ATTEMPT_NO, so a
+    failure of this attempt is final. Returns the number of pages queued."""
+    from verigence.di.retry_policy import CLASSIFICATION_NIGHT_ATTEMPT_NO
+
+    now = datetime.now(UTC)
+    rows = (
+        await session.execute(
+            text("""
+                UPDATE docintel.document_capture_v2_classification_jobs j
+                SET job_status = 'PENDING', attempt_no = :night_attempt_no,
+                    due_at_utc = :now, locked_by = NULL, locked_at_utc = NULL,
+                    started_at_utc = NULL, completed_at_utc = NULL,
+                    updated_at_utc = :now
+                FROM docintel.document_capture_v2_uploads u
+                JOIN docintel.documents d
+                  ON d.tenant_id = u.tenant_id AND d.document_id = u.document_id
+                JOIN docintel.tenant_settings ts
+                  ON ts.tenant_id = u.tenant_id AND ts.status = 'ACTIVE'
+                WHERE j.tenant_id = u.tenant_id AND j.document_id = u.document_id
+                  AND j.job_status = 'FAILED'
+                  AND j.attempt_no < :night_attempt_no
+                  AND u.state = 'FAILED'
+                  AND u.failure_code = ANY(:ai_codes)
+                  AND d.upload_status = 'FIT'
+                RETURNING j.tenant_id, j.document_id
+            """),
+            {
+                "night_attempt_no": CLASSIFICATION_NIGHT_ATTEMPT_NO,
+                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
+                "now": now,
+            },
+        )
+    ).mappings().all()
+    for row in rows:
+        await session.execute(
+            text("""
+                UPDATE docintel.document_capture_v2_uploads
+                SET state = 'STORED', updated_at_utc = :now
+                WHERE tenant_id = :tenant_id AND document_id = :document_id AND state = 'FAILED'
+            """),
+            {"tenant_id": row["tenant_id"], "document_id": row["document_id"], "now": now},
+        )
+        logger.info(
+            "nightly_classification_retry_queued",
+            tenant_id=row["tenant_id"],
+            document_id=str(row["document_id"]),
+        )
+    if rows:
+        await session.execute(text("SELECT pg_notify('di_capture_v2_jobs', 'nightly')"))
+    return len(rows)
 
 
 async def insert_nightly_initial_jobs_for_unqueued(session: AsyncSession) -> int:

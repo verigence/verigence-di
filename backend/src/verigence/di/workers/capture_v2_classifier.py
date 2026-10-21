@@ -15,7 +15,6 @@ import asyncio
 import contextlib
 import hashlib
 import os
-import random
 import socket
 import time
 import uuid
@@ -34,6 +33,11 @@ from verigence.di.quality.validator import validate_upload
 from verigence.di.repositories.database import tenant_session
 from verigence.di.repositories.documents import update_document_upload_complete
 from verigence.di.repositories.processing_jobs import create_initial_job
+from verigence.di.retry_policy import (
+    AI_FAILURE_CODES,
+    TECHNICAL_MAX_ATTEMPTS,
+    retry_delay_seconds,
+)
 from verigence.di.runtime_errors import (
     BUSINESS,
     CodedError,
@@ -51,34 +55,23 @@ from verigence.di.workers.idle_wait import NOTIFY_BACKSTOP_SECONDS, idle_wait
 logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
-# Attempts a retryable classification failure (or an expired lease, see
-# scheduler/beat.py) gets before the upload is FAILED.
-# A retryable failure (Gemini 429 / 5xx, a timeout, a network blip) gets
-# exactly one more attempt, five minutes later (decision 2026-09-30: two
-# attempts in all, never a burst of retries against the model). A page
-# that fails both is left alone; Audit Core's nightly sweep sends it once
-# more the next night. A non-retryable failure fails at once.
-_RETRYABLE_RETRY_DELAYS_SECONDS = (300,)
-CLASSIFICATION_MAX_ATTEMPTS = len(_RETRYABLE_RETRY_DELAYS_SECONDS) + 1
-
-# A quota hit (429) is the burst's doing, not the page's: the job waits five
-# minutes, spread a little so a burst does not come back all at once, and
-# the attempt is not counted. Only once the job has been waiting on the
-# quota for _RATE_LIMIT_WAIT_MAX_SECONDS does a quota hit count like any
-# other retryable failure (decision 2026-09-30: load is never a failure).
-_RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
-_RATE_LIMIT_WAIT_SECONDS = 300
-_RATE_LIMIT_WAIT_JITTER_SECONDS = 60
-_RATE_LIMIT_WAIT_MAX_SECONDS = 8 * 3600  # until the night (decision 2026-10-01)
+# How often a failed classification is tried again (product owner's rule
+# 2026-10-20, see retry_policy.py): a Gemini failure (quota, outage, timeout,
+# unusable answer) 10 and 20 minutes later, then once more the same night
+# (scheduler/beat.py) when the page passed the upload scan; a technical
+# failure (storage, database) once more two minutes later; a failure the
+# page decides (unreadable file, refused content) never. A quota hit counts
+# as an attempt: the rule caps the attempts, and the night attempt is where
+# a quota that is out for the day is waited for.
+# An expired lease (scheduler/beat.py) is a technical failure: it gets the
+# technical number of attempts.
+CLASSIFICATION_MAX_ATTEMPTS = TECHNICAL_MAX_ATTEMPTS
 
 
-def _retry_delay_seconds(attempt_no: int) -> int:
-    """Seconds to wait after the attempt that just failed (numbered from 1)."""
-    return _RETRYABLE_RETRY_DELAYS_SECONDS[min(attempt_no, len(_RETRYABLE_RETRY_DELAYS_SECONDS)) - 1]
-
-
-def _rate_limit_wait_seconds() -> int:
-    return _RATE_LIMIT_WAIT_SECONDS + random.randint(0, _RATE_LIMIT_WAIT_JITTER_SECONDS)  # noqa: S311
+def _retry_delay_seconds(failure: TechnicalFailure, attempt_no: int) -> int | None:
+    """Seconds to wait after the attempt that just failed (numbered from 1),
+    or None when this failure is final."""
+    return retry_delay_seconds(failure.code, retryable=failure.retryable, attempt_no=attempt_no)
 
 
 def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
@@ -747,24 +740,6 @@ class CaptureV2ClassificationWorker:
         )
         del detail
 
-    async def _within_rate_limit_wait(
-        self, session: AsyncSession, *, tenant_id: str, job_id: uuid.UUID, now: datetime
-    ) -> bool:
-        """True while the job is young enough for a quota hit to be waited
-        out rather than counted as an attempt."""
-        created = (
-            await session.execute(
-                text(
-                    """
-                    SELECT created_at_utc FROM docintel.document_capture_v2_classification_jobs
-                    WHERE tenant_id=:tenant_id AND classification_job_id=:job_id
-                    """
-                ),
-                {"tenant_id": tenant_id, "job_id": job_id},
-            )
-        ).scalar_one_or_none()
-        return isinstance(created, datetime) and (now - created).total_seconds() < _RATE_LIMIT_WAIT_MAX_SECONDS
-
     async def _fail_job(
         self,
         *,
@@ -778,20 +753,15 @@ class CaptureV2ClassificationWorker:
     ) -> None:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
-            deferred = failure.code == _RATE_LIMITED_CODE and await self._within_rate_limit_wait(
-                session, tenant_id=tenant_id, job_id=job_id, now=now
-            )
-            if deferred or (failure.retryable and attempt_no < CLASSIFICATION_MAX_ATTEMPTS):
-                retry_delay = _rate_limit_wait_seconds() if deferred else _retry_delay_seconds(attempt_no)
+            retry_delay = _retry_delay_seconds(failure, attempt_no)
+            if retry_delay is not None:
                 retry_code = "CLASSIFICATION_RETRY"
-                retry_detail = safe_persisted_detail(retry_code)
                 logger.warning(
                     "capture_v2_classification_retry",
                     tenant_id=tenant_id,
                     document_id=str(document_id),
                     classification_job_id=str(job_id),
                     attempt_no=attempt_no,
-                    attempt_counted=not deferred,
                     technical_error_code=failure.code,
                     error_code=retry_code,
                     error_category=failure.category,
@@ -799,11 +769,14 @@ class CaptureV2ClassificationWorker:
                     retry_in_seconds=retry_delay,
                     correlation_id=correlation_id,
                 )
+                # The job keeps the failed attempt's own code (2026-10-20), so
+                # the status listing can say whether the AI or the system
+                # failed while the retry waits.
                 await session.execute(
                     text(
                         """
                         UPDATE docintel.document_capture_v2_classification_jobs
-                        SET job_status='PENDING', attempt_no=attempt_no+:attempt_step,
+                        SET job_status='PENDING', attempt_no=attempt_no+1,
                             due_at_utc=:due, locked_by=NULL, locked_at_utc=NULL,
                             error_code=:error_code, error_detail=:detail,
                             updated_at_utc=:now
@@ -813,10 +786,9 @@ class CaptureV2ClassificationWorker:
                     {
                         "tenant_id": tenant_id,
                         "job_id": job_id,
-                        "attempt_step": 0 if deferred else 1,
                         "due": now + timedelta(seconds=retry_delay),
-                        "error_code": retry_code,
-                        "detail": retry_detail,
+                        "error_code": failure.code[:120],
+                        "detail": safe_persisted_detail(retry_code),
                         "now": now,
                     },
                 )
@@ -831,10 +803,17 @@ class CaptureV2ClassificationWorker:
                     {"tenant_id": tenant_id, "document_id": document_id, "now": now},
                 )
             else:
-                # Exhausted retries keep the established CLASSIFICATION_FAILED;
-                # a non-retryable failure (unreadable file, rejected request,
-                # missing configuration) records its own code instead.
-                final_code = "CLASSIFICATION_FAILED" if failure.retryable else failure.code
+                # Exhausted technical retries keep the established
+                # CLASSIFICATION_FAILED. An AI failure keeps its own code
+                # (2026-10-20): that is what tells the nightly run to try the
+                # page once more and Audit Core to leave the PC alone until
+                # then. A non-retryable failure (unreadable file, rejected
+                # request, missing configuration) records its own code too.
+                final_code = (
+                    failure.code
+                    if not failure.retryable or failure.code in AI_FAILURE_CODES
+                    else "CLASSIFICATION_FAILED"
+                )
                 final_log = logger.info if failure.category == BUSINESS else logger.error
                 final_log(
                     "capture_v2_classification_failed",

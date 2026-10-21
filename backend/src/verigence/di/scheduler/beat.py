@@ -16,6 +16,9 @@ Runs four independent things in-process alongside FastAPI, every 60 seconds:
      technical one more processing attempt -- up to
      NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly tries (see
      repositories/processing_jobs.py::insert_nightly_reprocessing_jobs).
+     A Capture V2 page gets one night attempt, and only after an AI failure
+     (classification or reading; product owner's rule 2026-10-20, see
+     retry_policy.py).
      Distinct from (2): this catches documents already permanently FAILED
      (backed out), not the once-off RETRY_PENDING->EOD_RETRY handoff.
      The trigger window spans several ticks on every replica; a
@@ -55,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from verigence.di.repositories.backout import insert_backout_job, sweep_expired_backout_jobs
 from verigence.di.repositories.processing_jobs import (
     fail_job,
+    insert_nightly_classification_retries,
     insert_nightly_initial_jobs_for_unqueued,
     insert_nightly_reprocessing_jobs,
 )
@@ -90,6 +94,10 @@ _NIGHTLY_FAILURE_REPORT_RUN_NAME = "NIGHTLY_REPROCESS_FAILURE_REPORT"
 # times; the next expiry fails it, so a document that kills the worker every
 # time stops being retried.
 _MAX_LEASE_RECLAIMS = 2
+# A Capture V2 job is reclaimed at most once (product owner's rule
+# 2026-10-20): a worker dying mid-job is a technical failure, and a technical
+# failure gets two runs in all, never a third.
+_V2_MAX_LEASE_RECLAIMS = 1
 _LEASE_EXHAUSTED_CODE = "WORKER_LEASE_EXHAUSTED"
 
 
@@ -230,6 +238,9 @@ async def _run_nightly_reprocess(
             # Classified pages that never got a reading job (2026-10-01):
             # after the night, no classified page stays unread.
             queued += await insert_nightly_initial_jobs_for_unqueued(session)
+            # A page whose classification failed in the AI gets its one night
+            # attempt too (product owner's rule 2026-10-20).
+            queued += await insert_nightly_classification_retries(session)
             await complete_scheduler_run(
                 session, run_name=_NIGHTLY_RUN_NAME, run_date=run_date,
                 items_queued=queued, now=datetime.now(UTC),
@@ -364,6 +375,13 @@ async def _insert_eod_retry_jobs(
                         AND pj.document_id = d.document_id
                         AND pj.job_type = 'EOD_RETRY'
                   )
+                  -- legacy documents only: a Capture V2 document waiting on
+                  -- its own daytime retry must not get a second one stacked
+                  -- on it (product owner's rule 2026-10-20)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM docintel.document_capture_v2_uploads v2
+                      WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
+                  )
             """),
             {"tid": tenant_id},
         )
@@ -464,9 +482,13 @@ async def _reclaim_stale_jobs(
     rows = (
         await session.execute(
             text("""
-                SELECT tenant_id, processing_job_id, document_id, job_type,
-                       attempt_no, lease_reclaim_count
-                FROM docintel.processing_jobs
+                SELECT pj.tenant_id, pj.processing_job_id, pj.document_id, pj.job_type,
+                       pj.attempt_no, pj.lease_reclaim_count,
+                       EXISTS (
+                           SELECT 1 FROM docintel.document_capture_v2_uploads v2
+                           WHERE v2.tenant_id = pj.tenant_id AND v2.document_id = pj.document_id
+                       ) AS is_capture_v2
+                FROM docintel.processing_jobs pj
                 WHERE job_status = 'RUNNING'
                   AND locked_at_utc < :cutoff
                 ORDER BY locked_at_utc
@@ -482,7 +504,8 @@ async def _reclaim_stale_jobs(
     exhausted: list[str] = []
     for row in rows:
         job_id = str(row["processing_job_id"])
-        if int(row["lease_reclaim_count"]) >= _MAX_LEASE_RECLAIMS:
+        limit = _V2_MAX_LEASE_RECLAIMS if row.get("is_capture_v2") else _MAX_LEASE_RECLAIMS
+        if int(row["lease_reclaim_count"]) >= limit:
             detail = safe_persisted_detail(_LEASE_EXHAUSTED_CODE)
             await fail_job(
                 session,

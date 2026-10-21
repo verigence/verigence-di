@@ -636,68 +636,87 @@ async def test_non_retryable_classification_failure_is_not_retried(monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An outage waits five minutes for one more attempt rather than
-    failing the page after one quick retry; the second failure is final."""
+    """Product owner's rule (2026-10-20): a Gemini outage is tried again 10
+    and then 20 minutes later; the third failure is final and keeps its AI
+    code, which is what earns the page its one night attempt."""
     failure = technical_failure(
         v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_UNAVAILABLE", retryable=True),
         operation="capture_v2_classification",
     )
-    for attempt_no, delay in enumerate((300,), start=1):
+    for attempt_no, delay in enumerate((600, 1200), start=1):
         holder, log = _capture_fail_harness(monkeypatch)
         await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
             tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=attempt_no,
             correlation_id="c", failure=failure,
         )
-        [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
+        [(statement, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
         assert (params["due"] - params["now"]).total_seconds() == delay
-        assert params["attempt_step"] == 1
+        assert "attempt_no=attempt_no+1" in statement
+        # the waiting job says what failed, so the listing can tell the PC
+        assert params["error_code"] == "DOCUMENT_AI_UNAVAILABLE"
         [(level, fields)] = log.find("capture_v2_classification_retry")
-        assert level == "warning" and fields["retry_in_seconds"] == delay and fields["attempt_counted"] is True
+        assert level == "warning" and fields["retry_in_seconds"] == delay
 
     holder, log = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
         tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
-        attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
+        attempt_no=3, correlation_id="c", failure=failure,
     )
     assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
-    assert any(params.get("code") == "CLASSIFICATION_FAILED" for _, params in _executed_sql(holder))
+    assert any(params.get("code") == "DOCUMENT_AI_UNAVAILABLE" for _, params in _executed_sql(holder))
     assert log.find("capture_v2_classification_failed")[0][0] == "error"
 
 
 @pytest.mark.asyncio
-async def test_a_quota_hit_is_waited_out_without_spending_the_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Load is never a failure (2026-09-30): a 429 puts the job back in the
-    queue five minutes or so later at the same attempt number, however many
-    times, until the job has waited on the quota for eight hours; after that
-    it counts like any other retryable failure."""
-    from datetime import UTC, datetime, timedelta
-
+async def test_a_technical_classification_failure_gets_two_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A storage read failure is tried once more two minutes later, then the
+    page fails with CLASSIFICATION_FAILED for the PC (no night attempt)."""
     failure = technical_failure(
-        v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
+        capture_v2_classifier.CodedError("STORAGE_READ_ERROR", retryable=True),
         operation="capture_v2_classification",
     )
-    holder, log = _capture_fail_harness(monkeypatch)
-    holder.session.execute.return_value.scalar_one_or_none = MagicMock(
-        return_value=datetime.now(UTC) - timedelta(hours=1))
+    holder, _ = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
-        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
-        attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=1,
+        correlation_id="c", failure=failure,
     )
     [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
-    assert params["attempt_step"] == 0
-    assert 300 <= (params["due"] - params["now"]).total_seconds() <= 360
-    [(level, fields)] = log.find("capture_v2_classification_retry")
-    assert level == "warning" and fields["attempt_counted"] is False
+    assert (params["due"] - params["now"]).total_seconds() == 120
 
-    holder, log = _capture_fail_harness(monkeypatch)
-    holder.session.execute.return_value.scalar_one_or_none = MagicMock(
-        return_value=datetime.now(UTC) - timedelta(hours=9))
+    holder, _ = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
         tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(),
         attempt_no=capture_v2_classifier.CLASSIFICATION_MAX_ATTEMPTS, correlation_id="c", failure=failure,
     )
     assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
     assert any(params.get("code") == "CLASSIFICATION_FAILED" for _, params in _executed_sql(holder))
+
+
+@pytest.mark.asyncio
+async def test_a_quota_hit_counts_as_an_ai_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Product owner's rule (2026-10-20, replacing the eight-hour quota wait
+    of 2026-09-30): a 429 is an AI failure like any other -- 10 and 20
+    minutes, then the night attempt -- and never an uncounted re-queue."""
+    failure = technical_failure(
+        v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
+        operation="capture_v2_classification",
+    )
+    holder, _ = _capture_fail_harness(monkeypatch)
+    await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=1,
+        correlation_id="c", failure=failure,
+    )
+    [(statement, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
+    assert "attempt_no=attempt_no+1" in statement
+    assert (params["due"] - params["now"]).total_seconds() == 600
+
+    holder, _ = _capture_fail_harness(monkeypatch)
+    await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
+        tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=3,
+        correlation_id="c", failure=failure,
+    )
+    assert not any("job_status='PENDING'" in statement for statement, _ in _executed_sql(holder))
+    assert any(params.get("code") == "DOCUMENT_AI_RATE_LIMITED" for _, params in _executed_sql(holder))
 
 
 def test_capture_v2_unknown_is_info_and_missing_type_is_configuration() -> None:
@@ -759,6 +778,8 @@ async def test_nightly_run_is_performed_and_reported_once(monkeypatch: pytest.Mo
     monkeypatch.setattr(beat, "insert_nightly_reprocessing_jobs", insert)
     unqueued = AsyncMock(return_value=0)
     monkeypatch.setattr(beat, "insert_nightly_initial_jobs_for_unqueued", unqueued)
+    classification = AsyncMock(return_value=2)
+    monkeypatch.setattr(beat, "insert_nightly_classification_retries", classification)
     report = AsyncMock()
     monkeypatch.setattr(beat, "_report_nightly_reprocess_run", report)
 
@@ -768,8 +789,9 @@ async def test_nightly_run_is_performed_and_reported_once(monkeypatch: pytest.Mo
 
     insert.assert_awaited_once()
     unqueued.assert_awaited_once()
+    classification.assert_awaited_once()
     report.assert_awaited_once()
-    assert report.call_args.kwargs["queued_count"] == 7
+    assert report.call_args.kwargs["queued_count"] == 9
 
 
 @pytest.mark.asyncio
