@@ -56,13 +56,10 @@ logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 # How often a failed classification is tried again (product owner's rule
-# 2026-10-20, see retry_policy.py): a Gemini failure (quota, outage, timeout,
-# unusable answer) 10 and 20 minutes later, then once more the same night
-# (scheduler/beat.py) when the page passed the upload scan; a technical
-# failure (storage, database) once more two minutes later; a failure the
-# page decides (unreadable file, refused content) never. A quota hit counts
-# as an attempt: the rule caps the attempts, and the night attempt is where
-# a quota that is out for the day is waited for.
+# 2026-10-21, see retry_policy.py): a Gemini failure (quota, outage, timeout,
+# unusable answer) or a technical one (storage, database) at T0+10 and T0+20
+# minutes, then FAILED; a failure the page decides (unreadable file, refused
+# content) never. A quota hit counts as an attempt.
 # An expired lease (scheduler/beat.py) is a technical failure: it gets the
 # technical number of attempts.
 CLASSIFICATION_MAX_ATTEMPTS = TECHNICAL_MAX_ATTEMPTS

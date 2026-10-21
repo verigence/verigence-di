@@ -90,17 +90,17 @@ async def test_the_second_daytime_retry_is_attempt_three(db_session: AsyncSessio
 
 
 @pytest.mark.asyncio
-async def test_an_ai_reading_failure_gets_exactly_one_night_attempt(db_session: AsyncSession) -> None:
+async def test_a_reading_our_setup_refused_gets_exactly_one_night_re_read(db_session: AsyncSession) -> None:
+    """2026-10-21: the only night attempt left is the re-read of a page Gemini
+    refused because of our key or model (fixed by night)."""
     tenant_id = f"v2-night-{uuid.uuid4().hex[:8]}"
-    document_id = await _v2_page_failed_reading(db_session, tenant_id, "DOCUMENT_AI_UNAVAILABLE")
+    document_id = await _v2_page_failed_reading(db_session, tenant_id, "DOCUMENT_AI_NOT_CONFIGURED")
 
     assert await insert_nightly_reprocessing_jobs(db_session) == 1
     night = [tuple(j)[:3] for j in await _jobs_for(db_session, tenant_id, document_id)
              if j[0] == "NIGHTLY_REPROCESS"]
     assert night == [("NIGHTLY_REPROCESS", 3, "PENDING")]
 
-    # The night attempt fails; a later night does not try again (legacy
-    # documents would get up to three nights).
     await db_session.execute(
         text("UPDATE docintel.processing_jobs SET job_status='FAILED', created_at_utc=now() - interval '2 days' "
              "WHERE tenant_id=:t AND job_type='NIGHTLY_REPROCESS'"),
@@ -110,23 +110,26 @@ async def test_an_ai_reading_failure_gets_exactly_one_night_attempt(db_session: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["STORAGE_READ_ERROR", "WORKER_INTERNAL_ERROR", "DOCUMENT_AI_REQUEST_REJECTED"])
-async def test_a_technical_or_refused_reading_gets_no_night_attempt(db_session: AsyncSession, code: str) -> None:
+@pytest.mark.parametrize("code", ["DOCUMENT_AI_UNAVAILABLE", "DOCUMENT_AI_RATE_LIMITED", "STORAGE_READ_ERROR",
+                                  "WORKER_INTERNAL_ERROR", "DOCUMENT_AI_REQUEST_REJECTED"])
+async def test_no_night_attempt_for_any_other_reading_failure(db_session: AsyncSession, code: str) -> None:
+    """2026-10-21: an AI or technical failure has had T0, T0+10 and T0+20; it
+    is the PC's to resubmit, never read again by night."""
     tenant_id = f"v2-tech-{uuid.uuid4().hex[:8]}"
     await _v2_page_failed_reading(db_session, tenant_id, code)
     assert await insert_nightly_reprocessing_jobs(db_session) == 0
 
 
 @pytest.mark.asyncio
-async def test_an_ai_classification_failure_gets_one_night_attempt(db_session: AsyncSession) -> None:
+async def test_a_classification_our_setup_refused_gets_one_night_re_read(db_session: AsyncSession) -> None:
     tenant_id = f"v2-cls-{uuid.uuid4().hex[:8]}"
-    document_id = await _v2_page_failed_classification(db_session, tenant_id, "DOCUMENT_AI_RATE_LIMITED")
+    document_id = await _v2_page_failed_classification(db_session, tenant_id, "DOCUMENT_AI_NOT_CONFIGURED")
 
     assert await insert_nightly_classification_retries(db_session) == 1
     assert await _classification(db_session, tenant_id, document_id) == (
         "PENDING", CLASSIFICATION_NIGHT_ATTEMPT_NO, "STORED",
     )
-    # Once the night attempt has failed too, it is never queued again.
+    # Once the night re-read has failed too, it is never queued again.
     await db_session.execute(
         text("UPDATE docintel.document_capture_v2_classification_jobs SET job_status='FAILED' "
              "WHERE tenant_id=:t AND document_id=:d"),
@@ -142,10 +145,10 @@ async def test_an_ai_classification_failure_gets_one_night_attempt(db_session: A
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "upload_status"),
-    [("CLASSIFICATION_FAILED", "FIT"), ("INVALID_FILE_CONTENT", "CORRUPT"),
-     ("DOCUMENT_AI_UNAVAILABLE", "VALIDATING")],
+    [("DOCUMENT_AI_RATE_LIMITED", "FIT"), ("CLASSIFICATION_FAILED", "FIT"), ("INVALID_FILE_CONTENT", "CORRUPT"),
+     ("DOCUMENT_AI_NOT_CONFIGURED", "VALIDATING")],
 )
-async def test_no_night_classification_without_an_ai_failure_on_a_scanned_page(
+async def test_no_night_classification_for_other_failures_or_unscanned_pages(
     db_session: AsyncSession, code: str, upload_status: str,
 ) -> None:
     tenant_id = f"v2-clsno-{uuid.uuid4().hex[:8]}"
@@ -172,16 +175,22 @@ def test_listing_a_reading_waiting_on_its_daytime_retry() -> None:
     status = retry_status({
         "state": "CLASSIFIED", "processing_status": "RETRY_PENDING", "upload_status": "FIT",
         "processing_failure_code": "DOCUMENT_AI_RESPONSE_INVALID", "processing_next_due_at_utc": due,
+        "processing_attempts": 1,
     })
     assert status == {"scanPassed": True, "failureKind": "AI", "retryFailureCode": "DOCUMENT_AI_RESPONSE_INVALID",
-                      "nextAttemptAtUtc": due, "inNightAttempt": False, "retryTonight": False}
+                      "nextAttemptAtUtc": due, "inNightAttempt": False, "retryTonight": False, "attemptsMade": 1}
 
 
-def test_listing_a_failed_reading_left_for_the_night() -> None:
+def test_listing_a_failed_reading() -> None:
+    """2026-10-21: an AI failure is not left for the night; only our refused
+    setup is."""
     row = {"state": "CLASSIFIED", "processing_status": "FAILED", "upload_status": "FIT",
-           "processing_failure_code": "DOCUMENT_AI_UNAVAILABLE", "night_reprocess_used": False}
-    assert retry_status(row)["retryTonight"] is True
-    assert retry_status({**row, "night_reprocess_used": True})["retryTonight"] is False
+           "processing_failure_code": "DOCUMENT_AI_UNAVAILABLE", "night_reprocess_used": False,
+           "processing_attempts": 3}
+    assert (retry_status(row)["retryTonight"], retry_status(row)["attemptsMade"]) == (False, 3)
+    setup = {**row, "processing_failure_code": "DOCUMENT_AI_NOT_CONFIGURED", "processing_attempts": 1}
+    assert retry_status(setup)["failureKind"] == "CONFIGURATION" and retry_status(setup)["retryTonight"] is True
+    assert retry_status({**setup, "night_reprocess_used": True})["retryTonight"] is False
     technical = retry_status({**row, "processing_failure_code": "STORAGE_READ_ERROR"})
     assert (technical["failureKind"], technical["retryTonight"]) == ("TECHNICAL", False)
 
@@ -193,17 +202,19 @@ def test_listing_a_classification_retry_and_its_failures() -> None:
         "classification_attempt_no": 2, "classification_error_code": "DOCUMENT_AI_RATE_LIMITED",
         "classification_due_at_utc": due,
     })
-    assert (waiting["failureKind"], waiting["nextAttemptAtUtc"]) == ("AI", due)
+    assert (waiting["failureKind"], waiting["nextAttemptAtUtc"], waiting["attemptsMade"]) == ("AI", due, 2)
     first_try = retry_status({"state": "STORED", "upload_status": None, "classification_job_status": "PENDING",
                               "classification_attempt_no": 1})
     assert first_try["failureKind"] is None and first_try["scanPassed"] is None
 
     failed = {"state": "FAILED", "upload_status": "FIT", "failure_code": "DOCUMENT_AI_UNAVAILABLE",
-              "classification_attempt_no": 3}
-    assert retry_status(failed)["retryTonight"] is True
-    assert retry_status({**failed, "classification_attempt_no": CLASSIFICATION_NIGHT_ATTEMPT_NO})["retryTonight"] is False
-    # an AI failure on a page that never passed the scan is not left for the night
-    assert retry_status({**failed, "upload_status": "VALIDATING"})["retryTonight"] is False
+              "classification_attempt_no": 3, "classification_job_status": "FAILED"}
+    assert (retry_status(failed)["retryTonight"], retry_status(failed)["attemptsMade"]) == (False, 3)
+    setup = {**failed, "failure_code": "DOCUMENT_AI_NOT_CONFIGURED", "classification_attempt_no": 1}
+    assert retry_status(setup)["retryTonight"] is True
+    assert retry_status({**setup, "classification_attempt_no": CLASSIFICATION_NIGHT_ATTEMPT_NO})["retryTonight"] is False
+    # never left for the night when the page has not passed the scan
+    assert retry_status({**setup, "upload_status": "VALIDATING"})["retryTonight"] is False
     rejected = retry_status({"state": "FAILED", "upload_status": "NOT_FIT",
                              "failure_code": "DI_QUALITY_IMAGE_BLUR_SCORE"})
     assert (rejected["scanPassed"], rejected["failureKind"], rejected["retryTonight"]) == (False, "DOCUMENT", False)
@@ -219,7 +230,7 @@ async def test_the_listing_query_carries_the_retry_fields(
     from verigence.di.api.v2 import capture_documents
 
     tenant_id = f"v2-list-{uuid.uuid4().hex[:8]}"
-    document_id = await _v2_page_failed_reading(db_session, tenant_id, "DOCUMENT_AI_UNAVAILABLE")
+    document_id = await _v2_page_failed_reading(db_session, tenant_id, "DOCUMENT_AI_NOT_CONFIGURED")
     context_ref = (await db_session.execute(
         text("SELECT external_context_ref FROM docintel.document_capture_v2_uploads "
              "WHERE tenant_id=:t AND document_id=:d"),
@@ -233,8 +244,9 @@ async def test_the_listing_query_carries_the_retry_fields(
     monkeypatch.setattr(capture_documents, "tenant_session", same_session)
     [row] = await capture_documents._status_rows(tenant_id, context_ref, None)
     fields = capture_documents._retry_fields(row)
-    assert fields == {"scanPassed": True, "failureKind": "AI", "processingFailureCode": "DOCUMENT_AI_UNAVAILABLE",
-                      "nextAttemptAtUtc": None, "inNightAttempt": False, "retryTonight": True}
+    assert fields == {"scanPassed": True, "failureKind": "CONFIGURATION",
+                      "processingFailureCode": "DOCUMENT_AI_NOT_CONFIGURED", "nextAttemptAtUtc": None,
+                      "inNightAttempt": False, "retryTonight": True, "attemptsMade": 3}
 
     # 2026-10-20 review (race): the night run has queued the attempt but no
     # worker has run it yet. The document still says FAILED; the listing

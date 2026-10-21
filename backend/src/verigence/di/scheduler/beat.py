@@ -16,9 +16,10 @@ Runs four independent things in-process alongside FastAPI, every 60 seconds:
      technical one more processing attempt -- up to
      NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly tries (see
      repositories/processing_jobs.py::insert_nightly_reprocessing_jobs).
-     A Capture V2 page gets one night attempt, and only after an AI failure
-     (classification or reading; product owner's rule 2026-10-20, see
-     retry_policy.py).
+     A Capture V2 page gets no night attempt (product owner's rule
+     2026-10-21, see retry_policy.py), except one re-read of a page our
+     setup refused (a refused Gemini key or model), classification or
+     reading.
      Distinct from (2): this catches documents already permanently FAILED
      (backed out), not the once-off RETRY_PENDING->EOD_RETRY handoff.
      The trigger window spans several ticks on every replica; a

@@ -526,7 +526,7 @@ class TestHandleFailure:
         second = await self._v2_failure(error_code="DOCUMENT_AI_RESPONSE_INVALID", attempt_no=2,
                                         job_type="V2_FAST_RETRY")
         assert second["fast"].call_args.kwargs["attempt_no"] == 3
-        assert second["fast"].call_args.kwargs["delay_seconds"] == 1200
+        assert second["fast"].call_args.kwargs["delay_seconds"] == 600  # T0+20 (2026-10-21)
         assert second["log"].warning.call_args.kwargs["failure_kind"] == "AI"
 
         third = await self._v2_failure(error_code="DOCUMENT_AI_UNAVAILABLE", attempt_no=3,
@@ -541,14 +541,19 @@ class TestHandleFailure:
         assert outcome["fast"].call_args.kwargs["delay_seconds"] == 600
 
     @pytest.mark.asyncio
-    async def test_v2_technical_failure_gets_two_attempts(self) -> None:
+    async def test_v2_technical_failure_follows_the_same_ladder(self) -> None:
+        """2026-10-21: a technical failure too is retried at T0+10 and T0+20."""
         first = await self._v2_failure(error_code="STORAGE_READ_ERROR", attempt_no=1, job_type="INITIAL")
         assert first["fast"].call_args.kwargs["attempt_no"] == 2
-        assert first["fast"].call_args.kwargs["delay_seconds"] == 120
+        assert first["fast"].call_args.kwargs["delay_seconds"] == 600
         second = await self._v2_failure(error_code="WORKER_INTERNAL_ERROR", attempt_no=2,
                                         job_type="V2_FAST_RETRY")
-        second["fast"].assert_not_called()
-        second["fail"].assert_called_once()
+        assert second["fast"].call_args.kwargs["attempt_no"] == 3
+        assert second["fast"].call_args.kwargs["delay_seconds"] == 600
+        third = await self._v2_failure(error_code="WORKER_INTERNAL_ERROR", attempt_no=3,
+                                       job_type="V2_FAST_RETRY")
+        third["fast"].assert_not_called()
+        third["fail"].assert_called_once()
 
     @pytest.mark.asyncio
     async def test_v2_night_attempt_and_manual_reread_are_one_attempt_each(self) -> None:

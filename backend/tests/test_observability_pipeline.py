@@ -636,14 +636,14 @@ async def test_non_retryable_classification_failure_is_not_retried(monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Product owner's rule (2026-10-20): a Gemini outage is tried again 10
-    and then 20 minutes later; the third failure is final and keeps its AI
-    code, which is what earns the page its one night attempt."""
+    """Product owner's rule (2026-10-21): a Gemini outage is tried again at
+    T0+10 and T0+20 minutes; the third failure is final and keeps its AI code
+    (Audit Core's resubmit task and failure report say so)."""
     failure = technical_failure(
         v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_UNAVAILABLE", retryable=True),
         operation="capture_v2_classification",
     )
-    for attempt_no, delay in enumerate((600, 1200), start=1):
+    for attempt_no, delay in enumerate((600, 600), start=1):
         holder, log = _capture_fail_harness(monkeypatch)
         await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(
             tenant_id="t1", job_id=uuid.uuid4(), document_id=uuid.uuid4(), attempt_no=attempt_no,
@@ -669,7 +669,7 @@ async def test_retryable_classification_failure_backs_off_then_fails(monkeypatch
 
 @pytest.mark.asyncio
 async def test_a_technical_classification_failure_gets_two_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A storage read failure is tried once more two minutes later, then the
+    """A storage read failure is retried at T0+10 and T0+20 minutes, then the
     page fails with CLASSIFICATION_FAILED for the PC (no night attempt)."""
     failure = technical_failure(
         capture_v2_classifier.CodedError("STORAGE_READ_ERROR", retryable=True),
@@ -681,7 +681,7 @@ async def test_a_technical_classification_failure_gets_two_attempts(monkeypatch:
         correlation_id="c", failure=failure,
     )
     [(_, params)] = [(s, p) for s, p in _executed_sql(holder) if "job_status='PENDING'" in s]
-    assert (params["due"] - params["now"]).total_seconds() == 120
+    assert (params["due"] - params["now"]).total_seconds() == 600
 
     holder, _ = _capture_fail_harness(monkeypatch)
     await capture_v2_classifier.CaptureV2ClassificationWorker()._fail_job(

@@ -1,7 +1,7 @@
-"""Product owner's retry rule (2026-10-20): a Gemini failure is tried again
-10 and 20 minutes later (three attempts), then once that night; a technical
-failure gets two attempts in all, two minutes apart; a failure the page
-itself decides is never retried. Classification and extraction share it."""
+"""Product owner's retry rule (2026-10-21): a Gemini or technical failure is
+tried at T0, T0+10 and T0+20 minutes, then FAILED (no night attempt); a
+failure the page itself decides is never retried. Classification and
+extraction share it."""
 
 from __future__ import annotations
 
@@ -35,11 +35,11 @@ pytestmark = pytest.mark.no_docker
 )
 def test_an_ai_failure_is_retried_at_10_then_20_minutes_and_then_stops(code: str) -> None:
     assert failure_kind(code) == "AI"
-    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 600
-    assert retry_delay_seconds(code, retryable=True, attempt_no=2) == 1200
+    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 600  # T0+10
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2) == 600  # T0+20
     assert retry_delay_seconds(code, retryable=True, attempt_no=3) is None
     assert AI_MAX_ATTEMPTS == 3
-    # the night attempt is one past the daytime ladder, so its failure is final
+    # the night re-read (refused setup only) is one past the ladder: final
     assert CLASSIFICATION_NIGHT_ATTEMPT_NO == 4
     assert retry_delay_seconds(code, retryable=True, attempt_no=CLASSIFICATION_NIGHT_ATTEMPT_NO) is None
 
@@ -48,13 +48,14 @@ def test_an_ai_failure_is_retried_at_10_then_20_minutes_and_then_stops(code: str
     "code",
     ["STORAGE_READ_ERROR", "DATABASE_UNAVAILABLE", "WORKER_INTERNAL_ERROR", "CLASSIFICATION_RETRY"],
 )
-def test_a_technical_failure_gets_two_attempts_two_minutes_apart(code: str) -> None:
+def test_a_technical_failure_follows_the_same_ten_minute_ladder(code: str) -> None:
     assert failure_kind(code) == "TECHNICAL"
-    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 120
-    assert retry_delay_seconds(code, retryable=True, attempt_no=2) is None
-    assert TECHNICAL_MAX_ATTEMPTS == 2
-    # an expired lease (scheduler/beat.py) is technical: same two attempts
-    assert CLASSIFICATION_MAX_ATTEMPTS == 2
+    assert retry_delay_seconds(code, retryable=True, attempt_no=1) == 600
+    assert retry_delay_seconds(code, retryable=True, attempt_no=2) == 600
+    assert retry_delay_seconds(code, retryable=True, attempt_no=3) is None
+    assert TECHNICAL_MAX_ATTEMPTS == 3
+    # an expired lease (scheduler/beat.py) is technical: same three attempts
+    assert CLASSIFICATION_MAX_ATTEMPTS == 3
 
 
 @pytest.mark.parametrize(
@@ -80,8 +81,8 @@ def test_the_classifier_follows_the_shared_ladder() -> None:
     ai = TechnicalFailure("DOCUMENT_AI_UNAVAILABLE", "x", True)
     technical = TechnicalFailure("STORAGE_READ_ERROR", "x", True)
     refused = TechnicalFailure("INVALID_FILE_CONTENT", "x", False)
-    assert [_retry_delay_seconds(ai, n) for n in (1, 2, 3)] == [600, 1200, None]
-    assert [_retry_delay_seconds(technical, n) for n in (1, 2)] == [120, None]
+    assert [_retry_delay_seconds(ai, n) for n in (1, 2, 3)] == [600, 600, None]
+    assert [_retry_delay_seconds(technical, n) for n in (1, 2, 3)] == [600, 600, None]
     assert _retry_delay_seconds(refused, 1) is None
 
 
