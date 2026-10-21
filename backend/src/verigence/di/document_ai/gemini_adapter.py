@@ -712,6 +712,68 @@ def _complete_answer_with_trailing_marks(text_value: str) -> Any | None:
     return data
 
 
+# Fields a multi-page document prints at its end: the last page's figure wins
+# when pages disagree (an earlier page may carry a running subtotal).
+_END_OF_DOCUMENT_FIELDS = frozenset({
+    "grand_total_amount", "amount_in_words", "round_off_amount", "taxable_amount",
+    "cgst_amount", "sgst_amount", "igst_amount", "cess_amount", "tcs_amount",
+    "net_amount", "total_amount", "invoice_discount_amount", "gross_amount_before_discount",
+})
+
+
+def _item_pages(item: dict[str, Any]) -> set[int]:
+    return {
+        page for value in item.values()
+        if isinstance(value, dict) and (page := _parse_page_no(value)) is not None
+    }
+
+
+def _merge_one_object_per_page(data: list[Any]) -> dict[str, Any] | None:
+    """One document spread over several pages, answered as one object per
+    page (2026-10-21: every two-page accessory invoice came back as two
+    objects, each citing only its own page, and was refused day and night).
+
+    Merged only when every item is an object citing pages no other item
+    cites, in page order. Per field: a value only one page gives is taken;
+    totals printed at the end come from the last page that has them; any
+    other field comes from the first page that has it; line items are joined
+    in page order. Anything else stays refused."""
+    if len(data) < 2 or not all(isinstance(item, dict) for item in data):
+        return None
+    pages = [_item_pages(item) for item in data]
+    if any(not p for p in pages):
+        return None
+    for earlier, later in zip(pages, pages[1:], strict=False):
+        if max(earlier) >= min(later):
+            return None
+    merged: dict[str, Any] = {}
+    line_items: list[Any] = []
+    line_item_meta: dict[str, Any] | None = None
+    for item in data:
+        for key, value in item.items():
+            if not isinstance(value, dict) or value.get("value") is None:
+                merged.setdefault(key, value)
+                continue
+            if key == "line_items":
+                raw = value.get("value")
+                line_items.extend(raw if isinstance(raw, list) else [raw])
+                line_item_meta = line_item_meta or value
+                continue
+            current = merged.get(key)
+            has_current = isinstance(current, dict) and current.get("value") is not None
+            if not has_current or key in _END_OF_DOCUMENT_FIELDS:
+                merged[key] = value
+    if line_item_meta is not None:
+        merged["line_items"] = {**line_item_meta, "value": line_items}
+    logger.info(
+        "gemini_per_page_answer_merged",
+        items=len(data),
+        pages=[sorted(p) for p in pages],
+        line_items=len(line_items),
+    )
+    return merged
+
+
 def _log_answer_shape(data: list[Any], db_fields: list[ExtractionField]) -> None:
     """Content-free shape of a multi-item answer: how many items, and for each
     the number of requested fields it carries, the pages its fields cite, and
@@ -774,6 +836,8 @@ def _parse_response(
     if isinstance(data, list):
         if len(data) == 1 and isinstance(data[0], dict):
             data = data[0]
+        elif (merged := _merge_one_object_per_page(data)) is not None:
+            data = merged
         else:
             _log_answer_shape(data, db_fields)
             raise GeminiResponseInvalidError(
