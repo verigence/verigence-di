@@ -156,6 +156,13 @@ jobs:
             echo '::error::RAILWAY_API_TOKEN is required for DI DEV integration preflight.'
             exit 1
           }
+          # What the token looks like to this job (2026-10-22): length, stray
+          # whitespace, and whether it equals the project id (no part of the token).
+          # Never the token itself. Added to find why railway link says Unauthorized.
+          tok="${RAILWAY_API_TOKEN}"
+          ws=no; [[ "$tok" =~ [[:space:]] ]] && ws=yes
+          same=no; [ "$tok" = "${PLATFORM_PROJECT_ID}" ] && same=yes
+          echo "::notice title=RAILWAY_API_TOKEN fingerprint::length=${#tok} whitespace=${ws} equals_project_id=${same}"
           # The step failed with only "exit code 1" and no reason (2026-10-22):
           # say which Railway command failed and what it answered, as an
           # annotation (job logs cannot be downloaded from some environments).
