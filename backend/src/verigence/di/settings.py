@@ -125,11 +125,11 @@ class Settings(BaseSettings):
     worker_notify_db_url: str = ""
 
     # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24).
-    # 72h (3 days) rather than the original 12h: the Nightly Reprocessing job
-    # (scheduler/beat.py) gives a FAILED document up to NIGHTLY_REPROCESS_MAX_ATTEMPTS
-    # more tries, one per night -- the backout row needs to outlive all of them so
-    # its audit trail (error_class/error_code/error_detail) is still there to inspect
-    # if every attempt fails, not just the most recent one's.
+    # 72h (3 days) rather than the original 12h. It was set so that the backout
+    # row outlived the nightly reprocessing tries; there is no nightly
+    # reprocessing since 2026-10-22, and 72h is kept so that a failed
+    # document's audit trail (error_class/error_code/error_detail) stays
+    # available to inspect for three days.
     backout_ttl_hours: int = 72
 
     # Worker lease timeout — RUNNING jobs older than this are reclaimed by the stale job reaper

@@ -9,7 +9,6 @@ import pytest
 
 from verigence.di.retry_policy import (
     AI_MAX_ATTEMPTS,
-    CLASSIFICATION_NIGHT_ATTEMPT_NO,
     TECHNICAL_MAX_ATTEMPTS,
     failure_kind,
     retry_delay_seconds,
@@ -39,9 +38,8 @@ def test_an_ai_failure_is_retried_at_10_then_20_minutes_and_then_stops(code: str
     assert retry_delay_seconds(code, retryable=True, attempt_no=2) == 600  # T0+20
     assert retry_delay_seconds(code, retryable=True, attempt_no=3) is None
     assert AI_MAX_ATTEMPTS == 3
-    # the night re-read (refused setup only) is one past the ladder: final
-    assert CLASSIFICATION_NIGHT_ATTEMPT_NO == 4
-    assert retry_delay_seconds(code, retryable=True, attempt_no=CLASSIFICATION_NIGHT_ATTEMPT_NO) is None
+    # nothing is read again at night (2026-10-22): the fourth attempt does not exist
+    assert retry_delay_seconds(code, retryable=True, attempt_no=4) is None
 
 
 @pytest.mark.parametrize(

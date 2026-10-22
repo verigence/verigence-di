@@ -701,7 +701,7 @@ async def test_a_technical_classification_failure_gets_two_attempts(monkeypatch:
 async def test_a_quota_hit_counts_as_an_ai_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Product owner's rule (2026-10-20, replacing the eight-hour quota wait
     of 2026-09-30): a 429 is an AI failure like any other -- 10 and 20
-    minutes, then the night attempt -- and never an uncounted re-queue."""
+    minutes, then FAILED -- and never an uncounted re-queue."""
     failure = technical_failure(
         v2_classifier.V2ClassificationError("x", technical_code="DOCUMENT_AI_RATE_LIMITED", retryable=True),
         operation="capture_v2_classification",
@@ -738,7 +738,7 @@ def test_capture_v2_unknown_is_info_and_missing_type_is_configuration() -> None:
     assert (failure.code, failure.retryable, failure.category) == ("DOCUMENT_TYPE_NOT_FOUND", False, CONFIGURATION)
 
 
-# ── Scheduler: correlation reuse, report once, safe errors ────────────────────
+# ── Scheduler: correlation reuse, safe errors ─────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_eod_retry_reuses_the_original_correlation_id() -> None:
@@ -752,78 +752,6 @@ async def test_eod_retry_reuses_the_original_correlation_id() -> None:
     first, second = (call.args[1]["corr"] for call in session.execute.call_args_list[1:])
     assert first == "audit-core-corr"
     assert second.startswith("eod.")
-
-
-@pytest.mark.asyncio
-async def test_nightly_reuses_the_original_correlation_id() -> None:
-    from verigence.di.repositories.processing_jobs import insert_nightly_reprocessing_jobs
-
-    session = AsyncMock()
-    select_result = MagicMock()
-    select_result.mappings.return_value.all.return_value = [
-        {"tenant_id": "t1", "document_id": uuid.uuid4(), "last_attempt_no": 2,
-         "original_correlation_id": "audit-core-corr"},
-    ]
-    session.execute = AsyncMock(side_effect=[select_result, MagicMock()])
-
-    await insert_nightly_reprocessing_jobs(session)
-
-    select_params = session.execute.call_args_list[0].args[1]
-    assert "CLASSIFICATION_AMBIGUOUS" in select_params["non_reprocessable_codes"]
-    assert "recent_cutoff" in select_params
-    assert session.execute.call_args_list[1].args[1]["corr"] == "audit-core-corr"
-
-
-@pytest.mark.asyncio
-async def test_nightly_run_is_performed_and_reported_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    claims = iter([True, False, False])
-    monkeypatch.setattr(beat, "claim_scheduler_run", AsyncMock(side_effect=lambda *_a, **_k: next(claims)))
-    monkeypatch.setattr(beat, "complete_scheduler_run", AsyncMock())
-    insert = AsyncMock(return_value=7)
-    monkeypatch.setattr(beat, "insert_nightly_reprocessing_jobs", insert)
-    unqueued = AsyncMock(return_value=0)
-    monkeypatch.setattr(beat, "insert_nightly_initial_jobs_for_unqueued", unqueued)
-    classification = AsyncMock(return_value=2)
-    monkeypatch.setattr(beat, "insert_nightly_classification_retries", classification)
-    report = AsyncMock()
-    monkeypatch.setattr(beat, "_report_nightly_reprocess_run", report)
-
-    now = beat.datetime.now(beat.UTC)
-    for _ in range(3):
-        await beat._run_nightly_reprocess(_session_factory(), now, log=_Log())
-
-    insert.assert_awaited_once()
-    unqueued.assert_awaited_once()
-    classification.assert_awaited_once()
-    report.assert_awaited_once()
-    assert report.call_args.kwargs["queued_count"] == 9
-
-
-@pytest.mark.asyncio
-async def test_nightly_failure_reports_a_safe_summary_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    failure_claims = iter([True, False])
-
-    async def claim(_session: Any, **kwargs: Any) -> bool:
-        if kwargs["run_name"] == beat._NIGHTLY_FAILURE_REPORT_RUN_NAME:
-            return next(failure_claims)
-        return True
-
-    monkeypatch.setattr(beat, "claim_scheduler_run", claim)
-    monkeypatch.setattr(beat, "insert_nightly_reprocessing_jobs", AsyncMock(side_effect=RuntimeError(SECRET)))
-    report = AsyncMock()
-    monkeypatch.setattr(beat, "_report_nightly_reprocess_run", report)
-    log = _Log()
-
-    now = beat.datetime.now(beat.UTC)
-    for _ in range(2):
-        await beat._run_nightly_reprocess(_session_factory(), now, log=log)
-
-    report.assert_awaited_once()
-    error = report.call_args.kwargs["error"]
-    assert SECRET not in error and "RuntimeError" in error
-    [(level, fields), _] = log.find("nightly_reprocess_failed")
-    assert level == "error" and fields["exception_type"] == "RuntimeError"
-    assert "error" not in fields
 
 
 def test_scheduler_failure_events_use_safe_exception_context() -> None:

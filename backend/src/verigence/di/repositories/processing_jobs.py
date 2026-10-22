@@ -10,11 +10,8 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from verigence.di.retry_policy import AI_RETRY_DELAYS_SECONDS, NIGHT_ELIGIBLE_FAILURE_CODES
+from verigence.di.retry_policy import AI_RETRY_DELAYS_SECONDS
 from verigence.di.runtime_errors import (
-    BUSINESS_FAILURE_CODES,
-    CONFIGURATION_FAILURE_CODES,
-    safe_exception_context,
     safe_persisted_detail,
 )
 
@@ -347,7 +344,7 @@ async def schedule_v2_fast_retry(
     to ~24h with no way for a PC to tell it already failed once.
 
     Idempotent via the same (tenant_id, document_id, job_type, attempt_no)
-    uniqueness EOD_RETRY and NIGHTLY_REPROCESS also rely on -- a second
+    uniqueness EOD_RETRY also relies on -- a second
     failed attempt at the SAME job_type+attempt_no can't insert a
     duplicate, and by the time a genuinely new upload of the same
     document_id could exist, this row is long since resolved.
@@ -385,7 +382,8 @@ RATE_LIMITED_CODE = "DOCUMENT_AI_RATE_LIMITED"
 RATE_LIMIT_DEFER_SECONDS = 300
 RATE_LIMIT_DEFER_JITTER_SECONDS = 60
 # Eight hours (decision 2026-10-01): a quota that is out for the day is
-# waited for until the night, when the nightly run takes over.
+# waited for that long, then the attempt counts like any other retryable
+# failure.
 RATE_LIMIT_DEFER_MAX_SECONDS = 8 * 3600
 
 
@@ -430,287 +428,11 @@ async def defer_job_after_rate_limit(
     return delay if deferred.scalar_one_or_none() is not None else None
 
 
-NIGHTLY_REPROCESS_MAX_ATTEMPTS = 3
-_NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO = 3  # 1=INITIAL, 2=EOD_RETRY/V2_FAST_RETRY, 3.. = nightly
-
-# A document gets at most one nightly attempt per night. The trigger window
-# spans several ticks, so an attempt that fails within it must not be
-# re-queued by the next tick; 20h is comfortably shorter than a day and
-# longer than any window.
-NIGHTLY_REPROCESS_MIN_INTERVAL = timedelta(hours=20)
-
-# Failures a re-run cannot change: the document's own outcome (ambiguous,
-# unreadable, blank, unsupported, blocked), a configuration gap an admin must
-# fix, or a document that repeatedly killed the worker.
-NIGHTLY_NON_REPROCESSABLE_CODES = frozenset(
-    BUSINESS_FAILURE_CODES | CONFIGURATION_FAILURE_CODES | {"WORKER_LEASE_EXHAUSTED"}
-) - NIGHT_ELIGIBLE_FAILURE_CODES  # a refused key/model is fixed by night (2026-10-20)
-
-
-async def insert_nightly_reprocessing_jobs(
-    session: AsyncSession,
-) -> int:
-    """Give every currently-FAILED document (any active Tenant) one more
-    extraction attempt, up to NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly
-    tries -- called once nightly by scheduler/beat.py, not per-Tenant (see
-    its own module docstring: one fixed global trigger time, not each
-    Tenant's own local EOD).
-
-    A document already sitting on its NIGHTLY_REPROCESS_MAX_ATTEMPTS-th
-    attempt (or beyond, if the count were ever exceeded some other way) is
-    left alone -- it stays FAILED, its backout_jobs row is its permanent
-    record, and no further reprocessing job is ever queued for it again.
-
-    Returns the number of jobs inserted (i.e. documents queued for another
-    attempt tonight).
-    """
-    now = datetime.now(UTC)
-    eligible_rows = (
-        await session.execute(
-            text("""
-                SELECT d.tenant_id, d.document_id,
-                       COALESCE(
-                           (SELECT max(pj.attempt_no)
-                            FROM docintel.processing_jobs pj
-                            WHERE pj.tenant_id = d.tenant_id
-                              AND pj.document_id = d.document_id
-                              AND pj.job_type = 'NIGHTLY_REPROCESS'),
-                           :first_attempt_no - 1
-                       ) AS last_attempt_no,
-                       COALESCE(
-                           (SELECT pj2.correlation_id
-                            FROM docintel.processing_jobs pj2
-                            WHERE pj2.tenant_id = d.tenant_id
-                              AND pj2.document_id = d.document_id
-                              AND pj2.job_type = 'INITIAL'
-                            ORDER BY pj2.created_at_utc DESC
-                            LIMIT 1),
-                           d.correlation_id
-                       ) AS original_correlation_id
-                FROM docintel.documents d
-                JOIN docintel.tenant_settings ts
-                  ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
-                WHERE d.upload_status = 'FIT'
-                  -- RETRY_PENDING too (2026-10-01): a document whose fast second
-                  -- attempt never ran otherwise waits on the legacy EOD scheduler alone.
-                  AND d.processing_status IN ('FAILED', 'RETRY_PENDING')
-                  -- only technical failures: a re-run cannot change a business
-                  -- outcome or a configuration gap
-                  AND (d.processing_failure_code IS NULL
-                       OR NOT (d.processing_failure_code = ANY(:non_reprocessable_codes)))
-                  -- Capture V2 (product owner's rule 2026-10-21): no night
-                  -- attempt, except one re-read of a page our setup refused
-                  -- (a refused key/model, fixed by night). Every other failure
-                  -- has had its attempts and is the PC's to resubmit.
-                  AND (
-                      NOT EXISTS (
-                          SELECT 1 FROM docintel.document_capture_v2_uploads v2
-                          WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
-                      )
-                      OR (
-                          d.processing_failure_code = ANY(:ai_codes)
-                          AND NOT EXISTS (
-                              SELECT 1 FROM docintel.processing_jobs night
-                              WHERE night.tenant_id = d.tenant_id
-                                AND night.document_id = d.document_id
-                                AND night.job_type = 'NIGHTLY_REPROCESS'
-                          )
-                      )
-                  )
-                  -- one attempt at a time: a document whose earlier attempt
-                  -- is still pending or running gets no second job alongside
-                  AND NOT EXISTS (
-                      SELECT 1 FROM docintel.processing_jobs active
-                      WHERE active.tenant_id = d.tenant_id
-                        AND active.document_id = d.document_id
-                        AND active.job_status IN ('PENDING', 'RUNNING')
-                  )
-                  -- one nightly attempt per night, however quickly it failed
-                  AND NOT EXISTS (
-                      SELECT 1 FROM docintel.processing_jobs tonight
-                      WHERE tonight.tenant_id = d.tenant_id
-                        AND tonight.document_id = d.document_id
-                        AND tonight.job_type = 'NIGHTLY_REPROCESS'
-                        AND tonight.created_at_utc > :recent_cutoff
-                  )
-            """),
-            {
-                "first_attempt_no": _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO,
-                "non_reprocessable_codes": sorted(NIGHTLY_NON_REPROCESSABLE_CODES),
-                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
-                "recent_cutoff": now - NIGHTLY_REPROCESS_MIN_INTERVAL,
-            },
-        )
-    ).mappings().all()
-
-    queued = 0
-    for row in eligible_rows:
-        next_attempt_no = int(row["last_attempt_no"]) + 1
-        if next_attempt_no > _NIGHTLY_REPROCESS_FIRST_ATTEMPT_NO + NIGHTLY_REPROCESS_MAX_ATTEMPTS - 1:
-            continue
-        # Keep the original request's correlation id so the attempt links back
-        # to Audit Core's upload; generate one only when none was recorded.
-        correlation_id = row["original_correlation_id"] or f"nightly.{uuid.uuid4()}"
-        try:
-            await session.execute(
-                text("""
-                    INSERT INTO docintel.processing_jobs
-                        (tenant_id, processing_job_id, document_id, correlation_id,
-                         job_type, job_status, due_at_utc, attempt_no, created_at_utc)
-                    VALUES
-                        (:tenant_id, :job_id, :doc_id, :corr,
-                         'NIGHTLY_REPROCESS', 'PENDING', :now, :attempt_no, :now)
-                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
-                """),
-                {
-                    "tenant_id": row["tenant_id"],
-                    "job_id": uuid.uuid4(),
-                    "doc_id": row["document_id"],
-                    "corr": correlation_id,
-                    "now": now,
-                    "attempt_no": next_attempt_no,
-                },
-            )
-            queued += 1
-        except Exception as exc:
-            # Matches _insert_eod_retry_jobs' own established handling of
-            # this same shape of loop -- log and move on rather than let one
-            # bad row abort the whole nightly pass.
-            logger.warning(
-                "nightly_reprocess_job_insert_failed",
-                tenant_id=row["tenant_id"],
-                document_id=str(row["document_id"]),
-                correlation_id=correlation_id,
-                attempt_no=next_attempt_no,
-                **safe_exception_context(exc),
-            )
-
-    return queued
-
-
-async def insert_nightly_classification_retries(session: AsyncSession) -> int:
-    """The night re-read of a Capture V2 page whose classification our setup
-    refused (a refused key/model, product owner's rule 2026-10-21): every
-    upload FAILED with a night-eligible code, that passed the upload scan, and
-    has not had its night re-read yet goes back in the classification queue
-    now. The
-    job's attempt number jumps to CLASSIFICATION_NIGHT_ATTEMPT_NO, so a
-    failure of this attempt is final. Returns the number of pages queued."""
-    from verigence.di.retry_policy import CLASSIFICATION_NIGHT_ATTEMPT_NO
-
-    now = datetime.now(UTC)
-    rows = (
-        await session.execute(
-            text("""
-                UPDATE docintel.document_capture_v2_classification_jobs j
-                SET job_status = 'PENDING', attempt_no = :night_attempt_no,
-                    due_at_utc = :now, locked_by = NULL, locked_at_utc = NULL,
-                    started_at_utc = NULL, completed_at_utc = NULL,
-                    updated_at_utc = :now
-                FROM docintel.document_capture_v2_uploads u
-                JOIN docintel.documents d
-                  ON d.tenant_id = u.tenant_id AND d.document_id = u.document_id
-                JOIN docintel.tenant_settings ts
-                  ON ts.tenant_id = u.tenant_id AND ts.status = 'ACTIVE'
-                WHERE j.tenant_id = u.tenant_id AND j.document_id = u.document_id
-                  AND j.job_status = 'FAILED'
-                  AND j.attempt_no < :night_attempt_no
-                  AND u.state = 'FAILED'
-                  AND u.failure_code = ANY(:ai_codes)
-                  AND d.upload_status = 'FIT'
-                RETURNING j.tenant_id, j.document_id
-            """),
-            {
-                "night_attempt_no": CLASSIFICATION_NIGHT_ATTEMPT_NO,
-                "ai_codes": sorted(NIGHT_ELIGIBLE_FAILURE_CODES),
-                "now": now,
-            },
-        )
-    ).mappings().all()
-    for row in rows:
-        await session.execute(
-            text("""
-                UPDATE docintel.document_capture_v2_uploads
-                SET state = 'STORED', updated_at_utc = :now
-                WHERE tenant_id = :tenant_id AND document_id = :document_id AND state = 'FAILED'
-            """),
-            {"tenant_id": row["tenant_id"], "document_id": row["document_id"], "now": now},
-        )
-        logger.info(
-            "nightly_classification_retry_queued",
-            tenant_id=row["tenant_id"],
-            document_id=str(row["document_id"]),
-        )
-    if rows:
-        await session.execute(text("SELECT pg_notify('di_capture_v2_jobs', 'nightly')"))
-    return len(rows)
-
-
-async def insert_nightly_initial_jobs_for_unqueued(session: AsyncSession) -> int:
-    """Every classified Capture V2 document that never got a reading job at
-    all gets its INITIAL job tonight (decision 2026-10-01: after the night,
-    no classified page stays unread). Until 2026-10-01 the classifier queued
-    reading only for a page with an open checklist slot, so such documents
-    exist; the classifier no longer skips them, and this is the backstop.
-    Returns the number of jobs inserted."""
-    now = datetime.now(UTC)
-    rows = (
-        await session.execute(
-            text("""
-                SELECT d.tenant_id, d.document_id, d.correlation_id,
-                       u.classified_document_type_key
-                FROM docintel.documents d
-                JOIN docintel.tenant_settings ts
-                  ON ts.tenant_id = d.tenant_id AND ts.status = 'ACTIVE'
-                JOIN docintel.document_capture_v2_uploads u
-                  ON u.tenant_id = d.tenant_id AND u.document_id = d.document_id
-                WHERE d.upload_status = 'FIT'
-                  AND d.processing_status = 'NOT_STARTED'
-                  AND u.state = 'CLASSIFIED'
-                  AND u.classified_document_type_key IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM docintel.processing_jobs pj
-                      WHERE pj.tenant_id = d.tenant_id AND pj.document_id = d.document_id
-                  )
-                ORDER BY d.registered_at_utc
-            """),
-        )
-    ).mappings().all()
-    queued = 0
-    for row in rows:
-        try:
-            await session.execute(
-                text("""
-                    INSERT INTO docintel.processing_jobs
-                        (tenant_id, processing_job_id, document_id, correlation_id,
-                         job_type, job_status, due_at_utc, attempt_no, created_at_utc)
-                    VALUES
-                        (:tenant_id, :job_id, :doc_id, :corr, 'INITIAL', 'PENDING', :now, 1, :now)
-                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
-                """),
-                {
-                    "tenant_id": row["tenant_id"],
-                    "job_id": uuid.uuid4(),
-                    "doc_id": row["document_id"],
-                    "corr": row["correlation_id"] or f"nightly.{uuid.uuid4()}",
-                    "now": now,
-                },
-            )
-            queued += 1
-            logger.info(
-                "nightly_unqueued_document_queued",
-                tenant_id=row["tenant_id"],
-                document_id=str(row["document_id"]),
-                document_type_key=row["classified_document_type_key"],
-            )
-        except Exception as exc:
-            logger.warning(
-                "nightly_unqueued_job_insert_failed",
-                tenant_id=row["tenant_id"],
-                document_id=str(row["document_id"]),
-                **safe_exception_context(exc),
-            )
-    return queued
+# There is no nightly reprocessing (product owner, 2026-10-22): nothing is
+# processed at night. A document that ended FAILED stays FAILED; Audit Core
+# raises the PC's "Document to resubmit" task and the PC uploads it again.
+# The NIGHTLY_REPROCESS job type stays valid in the database only for rows
+# written before that date.
 
 
 MANUAL_REREAD_JOB_TYPE = "MANUAL_REREAD"

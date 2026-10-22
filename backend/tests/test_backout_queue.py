@@ -11,9 +11,9 @@ Coverage:
   - retryable=True, attempt_no=1  → RETRY_PENDING path (retry_job called, no backout)
   - retryable=True, attempt_no=2  → D24 backout path (fail_job + insert_backout_job)
   - retryable=False, any attempt  → D24 backout path immediately
-- settings backout_ttl_hours default is 72 (3 days, since 2026-09-14 --
-  needs to outlive every Nightly Reprocessing attempt, not just the
-  original failure)
+- settings backout_ttl_hours default is 72 (3 days, since 2026-09-14, set
+  to outlive the nightly reprocessing tries; kept after nightly reprocessing
+  was removed on 2026-10-22)
 """
 from __future__ import annotations
 

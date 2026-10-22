@@ -501,7 +501,7 @@ async def _execute_claimed_job_in_context(
     job_log = log
     job_log.info("job_claimed")
 
-    # A retry / nightly reprocess queued while the document was failing may
+    # A retry queued while the document was failing may
     # run after another attempt already PROCESSED it: nothing to do.
     if job_type != "INITIAL":
         async with session_factory() as session, session.begin():
@@ -642,8 +642,8 @@ async def _handle_failure(
     # Capture V2 follows the product owner's retry rule (2026-10-21, see
     # retry_policy.py): an AI or technical failure is tried again at T0+10
     # and T0+20 minutes, and only the first attempt and its retries take
-    # part -- a night re-read and a person's "Read again" are one attempt
-    # each. A quota hit counts like any other AI failure.
+    # part -- a person's "Read again" is one attempt of its own. There is no
+    # night re-read (2026-10-22). A quota hit counts like any other AI failure.
     if is_capture_v2:
         delay = None
         if job_type in _V2_DAYTIME_JOB_TYPES:
