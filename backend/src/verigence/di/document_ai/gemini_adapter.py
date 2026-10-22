@@ -196,7 +196,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
         # One request per call (decision 2026-09-30: never a quick second
         # request from in here). A failure goes back to the job, whose own
         # rules space the next attempt out (retry_policy.py, product owner's
-        # rule 2026-10-20: 10 and 20 minutes later, then once that night).
+        # rule 2026-10-21: again at T0+10 and T0+20 minutes, then FAILED).
         max_attempts = _IN_CALL_ATTEMPTS
 
         for attempt in range(max_attempts):

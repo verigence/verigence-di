@@ -129,6 +129,8 @@ class V2CaptureDocumentStatus(BaseModel):
     nextAttemptAtUtc: datetime | None = None
     inNightAttempt: bool | None = None
     retryTonight: bool | None = None
+    # attemptsMade: attempts the failed (or retried) step has made so far.
+    attemptsMade: int | None = None
 
 
 class V2CaptureDocumentList(BaseModel):
@@ -687,6 +689,9 @@ async def _status_rows(
                            cj.error_code AS classification_error_code,
                            cj.due_at_utc AS classification_due_at_utc,
                            pn.due_at_utc AS processing_next_due_at_utc,
+                           (SELECT COUNT(*) FROM docintel.processing_jobs pa
+                            WHERE pa.tenant_id=u.tenant_id AND pa.document_id=u.document_id
+                              AND pa.job_status IN ('COMPLETED','FAILED')) AS processing_attempts,
                            pn.job_type AS processing_next_job_type,
                            -- only a finished night attempt is "used": one queued
                            -- or running is still to come (2026-10-20 review)
@@ -772,6 +777,7 @@ def _retry_fields(row: RowMapping) -> dict[str, object]:
         "nextAttemptAtUtc": status["nextAttemptAtUtc"],
         "inNightAttempt": status["inNightAttempt"],
         "retryTonight": status["retryTonight"],
+        "attemptsMade": status["attemptsMade"],
     }
 
 

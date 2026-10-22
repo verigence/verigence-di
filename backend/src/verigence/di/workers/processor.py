@@ -49,7 +49,7 @@ from verigence.di.repositories.processing_jobs import (
     retry_job,
     schedule_v2_fast_retry,
 )
-from verigence.di.retry_policy import failure_kind, retry_delay_seconds
+from verigence.di.retry_policy import budget_attempt, failure_kind, retry_delay_seconds
 from verigence.di.runtime_errors import (
     BUSINESS,
     CONFIGURATION,
@@ -639,19 +639,35 @@ async def _handle_failure(
     error_class = "RETRYABLE" if retryable else "NON_RETRYABLE"
     error_category = failure_category(safe_code)
 
-    # Capture V2 follows the product owner's retry rule (2026-10-20, see
-    # retry_policy.py): an AI failure is tried again 10 and 20 minutes later,
-    # a technical one once more two minutes later, and only the first
-    # attempt and its daytime retries take part -- the night attempt and a
-    # person's "Read again" are one attempt each. A quota hit counts like
-    # any other AI failure; the night attempt waits out a quota that is out
-    # for the day.
+    # Capture V2 follows the product owner's retry rule (2026-10-21, see
+    # retry_policy.py): an AI or technical failure is tried again at T0+10
+    # and T0+20 minutes, and only the first attempt and its retries take
+    # part -- a night re-read and a person's "Read again" are one attempt
+    # each. A quota hit counts like any other AI failure.
     if is_capture_v2:
-        delay = (
-            retry_delay_seconds(safe_code, retryable=retryable, attempt_no=attempt_no)
-            if job_type in _V2_DAYTIME_JOB_TYPES
-            else None
-        )
+        delay = None
+        if job_type in _V2_DAYTIME_JOB_TYPES:
+            # One budget per document, inside 25 minutes of receipt
+            # (2026-10-21 review): attempt_no continues classification's.
+            async with session_factory() as session:
+                budget = (
+                    await session.execute(
+                        text(
+                            "SELECT u.created_at_utc, "
+                            "  (SELECT MAX(c.attempt_no) FROM docintel.document_capture_v2_classification_jobs c "
+                            "   WHERE c.tenant_id=u.tenant_id AND c.document_id=u.document_id) AS classification_attempt "
+                            "FROM docintel.document_capture_v2_uploads u "
+                            "WHERE u.tenant_id=:tenant_id AND u.document_id=:document_id"
+                        ),
+                        {"tenant_id": tenant_id, "document_id": document_id},
+                    )
+                ).mappings().one_or_none()
+            delay = retry_delay_seconds(
+                safe_code,
+                retryable=retryable,
+                attempt_no=budget_attempt(attempt_no, budget["classification_attempt"] if budget else None),
+                received_at=budget["created_at_utc"] if budget else None,
+            )
         if delay is not None:
             async with session_factory() as session, session.begin():
                 await retry_job(

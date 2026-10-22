@@ -56,22 +56,23 @@ logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 # How often a failed classification is tried again (product owner's rule
-# 2026-10-20, see retry_policy.py): a Gemini failure (quota, outage, timeout,
-# unusable answer) 10 and 20 minutes later, then once more the same night
-# (scheduler/beat.py) when the page passed the upload scan; a technical
-# failure (storage, database) once more two minutes later; a failure the
-# page decides (unreadable file, refused content) never. A quota hit counts
-# as an attempt: the rule caps the attempts, and the night attempt is where
-# a quota that is out for the day is waited for.
+# 2026-10-21, see retry_policy.py): a Gemini failure (quota, outage, timeout,
+# unusable answer) or a technical one (storage, database) at T0+10 and T0+20
+# minutes, then FAILED; a failure the page decides (unreadable file, refused
+# content) never. A quota hit counts as an attempt.
 # An expired lease (scheduler/beat.py) is a technical failure: it gets the
 # technical number of attempts.
 CLASSIFICATION_MAX_ATTEMPTS = TECHNICAL_MAX_ATTEMPTS
 
 
-def _retry_delay_seconds(failure: TechnicalFailure, attempt_no: int) -> int | None:
+def _retry_delay_seconds(
+    failure: TechnicalFailure, attempt_no: int, received_at: datetime | None = None,
+) -> int | None:
     """Seconds to wait after the attempt that just failed (numbered from 1),
-    or None when this failure is final."""
-    return retry_delay_seconds(failure.code, retryable=failure.retryable, attempt_no=attempt_no)
+    or None when this failure is final (attempts used up, or the retry would
+    start more than 25 minutes after the page was received)."""
+    return retry_delay_seconds(failure.code, retryable=failure.retryable, attempt_no=attempt_no,
+                               received_at=received_at)
 
 
 def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None:
@@ -650,6 +651,9 @@ class CaptureV2ClassificationWorker:
                 has_published_profile=bool(type_row["has_published_profile"]),
             )
             if skipped_reason is None:
+                # One attempt budget per document (2026-10-21 review): the
+                # reading's retries count this job's attempt_no as attempts
+                # already spent (processor._handle_failure, budget_attempt).
                 processing_job_id = await create_initial_job(
                     session,
                     tenant_id=tenant_id,
@@ -753,7 +757,16 @@ class CaptureV2ClassificationWorker:
     ) -> None:
         async with tenant_session(tenant_id) as session:
             now = datetime.now(UTC)
-            retry_delay = _retry_delay_seconds(failure, attempt_no)
+            received_at = (
+                await session.execute(
+                    text(
+                        "SELECT created_at_utc FROM docintel.document_capture_v2_uploads "
+                        "WHERE tenant_id=:tenant_id AND document_id=:document_id"
+                    ),
+                    {"tenant_id": tenant_id, "document_id": document_id},
+                )
+            ).scalar_one_or_none()
+            retry_delay = _retry_delay_seconds(failure, attempt_no, received_at)
             if retry_delay is not None:
                 retry_code = "CLASSIFICATION_RETRY"
                 logger.warning(

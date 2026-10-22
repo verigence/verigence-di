@@ -29,8 +29,8 @@ _MAX_ERROR_CODE = 128
 # legacy EOD Retry Scheduler, which can leave a document showing nothing
 # more than "still processing" for up to ~24h (see schedule_v2_fast_retry
 # below). How long each retry waits is retry_policy's (product owner's rule
-# 2026-10-20: an AI failure 10 then 20 minutes, a technical one 2 minutes);
-# this is the wait when a caller does not say.
+# 2026-10-21: retried at T0+10 and T0+20 minutes); this is the wait when a
+# caller does not say.
 V2_FAST_RETRY_DELAY_SECONDS = AI_RETRY_DELAYS_SECONDS[0]
 
 
@@ -498,18 +498,17 @@ async def insert_nightly_reprocessing_jobs(
                   -- outcome or a configuration gap
                   AND (d.processing_failure_code IS NULL
                        OR NOT (d.processing_failure_code = ANY(:non_reprocessable_codes)))
-                  -- Capture V2 (product owner's rule 2026-10-20): one night
-                  -- attempt, for an AI failure (or a refused key/model) only. A technical failure has
-                  -- had its two attempts and is the PC's (Audit Core tells
-                  -- them); a fast retry that never ran is still owed its turn.
+                  -- Capture V2 (product owner's rule 2026-10-21): no night
+                  -- attempt, except one re-read of a page our setup refused
+                  -- (a refused key/model, fixed by night). Every other failure
+                  -- has had its attempts and is the PC's to resubmit.
                   AND (
                       NOT EXISTS (
                           SELECT 1 FROM docintel.document_capture_v2_uploads v2
                           WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
                       )
                       OR (
-                          (d.processing_status = 'RETRY_PENDING'
-                           OR d.processing_failure_code = ANY(:ai_codes))
+                          d.processing_failure_code = ANY(:ai_codes)
                           AND NOT EXISTS (
                               SELECT 1 FROM docintel.processing_jobs night
                               WHERE night.tenant_id = d.tenant_id
@@ -590,11 +589,11 @@ async def insert_nightly_reprocessing_jobs(
 
 
 async def insert_nightly_classification_retries(session: AsyncSession) -> int:
-    """The one night attempt for a Capture V2 page whose classification
-    failed in the AI (product owner's rule 2026-10-20): every upload FAILED
-    with a retryable AI code (or a refused key/model), that passed the
-    upload scan, and has not had
-    its night attempt yet goes back in the classification queue now. The
+    """The night re-read of a Capture V2 page whose classification our setup
+    refused (a refused key/model, product owner's rule 2026-10-21): every
+    upload FAILED with a night-eligible code, that passed the upload scan, and
+    has not had its night re-read yet goes back in the classification queue
+    now. The
     job's attempt number jumps to CLASSIFICATION_NIGHT_ATTEMPT_NO, so a
     failure of this attempt is final. Returns the number of pages queued."""
     from verigence.di.retry_policy import CLASSIFICATION_NIGHT_ATTEMPT_NO
