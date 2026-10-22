@@ -156,9 +156,20 @@ jobs:
             echo '::error::RAILWAY_API_TOKEN is required for DI DEV integration preflight.'
             exit 1
           }
-          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/link.json
-          railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars.json
-          railway variable list --service "$DI_WORKER_SERVICE" --json >/tmp/di-worker-vars.json
+          # The step failed with only "exit code 1" and no reason (2026-10-22):
+          # say which Railway command failed and what it answered, as an
+          # annotation (job logs cannot be downloaded from some environments).
+          rail() {
+            local out="$1"; shift
+            if ! railway "$@" >"$out" 2>/tmp/rail.err; then
+              echo "::warning title=railway $1::$(head -c 300 /tmp/rail.err | tr '\n' ' ') | out: $(head -c 200 "$out" | tr '\n' ' ')"
+              echo "::error::railway $* failed."
+              exit 1
+            fi
+          }
+          rail /tmp/link.json link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json
+          rail /tmp/di-api-vars.json variable list --service "$DI_API_SERVICE" --json
+          rail /tmp/di-worker-vars.json variable list --service "$DI_WORKER_SERVICE" --json
           python - <<'PY'
           import json
           from pathlib import Path

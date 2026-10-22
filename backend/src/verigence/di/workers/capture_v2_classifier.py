@@ -818,10 +818,9 @@ class CaptureV2ClassificationWorker:
             else:
                 # Exhausted technical retries keep the established
                 # CLASSIFICATION_FAILED. An AI failure keeps its own code
-                # (2026-10-20): that is what tells the nightly run to try the
-                # page once more and Audit Core to leave the PC alone until
-                # then. A non-retryable failure (unreadable file, rejected
-                # request, missing configuration) records its own code too.
+                # (2026-10-20), so Audit Core can tell the PC the plain reason.
+                # A non-retryable failure (unreadable file, rejected request,
+                # missing configuration) records its own code too.
                 final_code = (
                     failure.code
                     if not failure.retryable or failure.code in AI_FAILURE_CODES

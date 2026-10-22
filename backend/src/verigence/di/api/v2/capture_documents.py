@@ -119,10 +119,11 @@ class V2CaptureDocumentStatus(BaseModel):
     # processingFailureCode: the reading (extraction) failure's code;
     #   failureCode above is the upload / classification failure's.
     # nextAttemptAtUtc: when the attempt DI holds queued or running is due
-    #   (a daytime retry, the night attempt, a Read again); while it is set
-    #   the page is still in DI's hands, whatever processingStatus says.
-    # inNightAttempt: that attempt is the night attempt.
-    # retryTonight: the night attempt is still to come or under way.
+    #   (a daytime retry, a Read again); while it is set the page is still
+    #   in DI's hands, whatever processingStatus says.
+    # inNightAttempt, retryTonight: always false since 2026-10-22 (there is
+    #   no night attempt); kept so Audit Core reads the same response before
+    #   and after.
     scanPassed: bool | None = None
     failureKind: str | None = None
     processingFailureCode: str | None = None
@@ -692,15 +693,6 @@ async def _status_rows(
                            (SELECT COUNT(*) FROM docintel.processing_jobs pa
                             WHERE pa.tenant_id=u.tenant_id AND pa.document_id=u.document_id
                               AND pa.job_status IN ('COMPLETED','FAILED')) AS processing_attempts,
-                           pn.job_type AS processing_next_job_type,
-                           -- only a finished night attempt is "used": one queued
-                           -- or running is still to come (2026-10-20 review)
-                           EXISTS (
-                               SELECT 1 FROM docintel.processing_jobs nr
-                               WHERE nr.tenant_id=u.tenant_id AND nr.document_id=u.document_id
-                                 AND nr.job_type='NIGHTLY_REPROCESS'
-                                 AND nr.job_status IN ('COMPLETED','FAILED','CANCELLED')
-                           ) AS night_reprocess_used,
                            EXISTS (
                                SELECT 1 FROM docintel.processing_jobs pj
                                WHERE pj.tenant_id=u.tenant_id AND pj.document_id=u.document_id
