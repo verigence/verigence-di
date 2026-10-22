@@ -10,8 +10,9 @@ failed again, forever.
 
 Now: a retry/reprocess job for an already-PROCESSED document is CANCELLED as
 superseded without touching the document; fail_job never demotes a PROCESSED
-document; a nightly job is never queued alongside a pending/running one; and a
-failure handler that itself fails still closes the job.
+document; and a failure handler that itself fails still closes the job.
+(Nothing queues NIGHTLY_REPROCESS jobs since 2026-10-22; the guard stays for
+a job of any type queued while the document was failing.)
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ from verigence.di.document_ai.adapter import get_document_ai_adapter
 from verigence.di.document_ai.v2_preclassified_adapter import V2PreclassifiedAdapter
 from verigence.di.repositories import processing_jobs
 from verigence.di.repositories.database import set_tenant_context
-from verigence.di.repositories.processing_jobs import fail_job, insert_nightly_reprocessing_jobs
+from verigence.di.repositories.processing_jobs import fail_job
 from verigence.di.repositories.tenants import (
     provision_actor,
     provision_retention_policy,
@@ -167,19 +168,6 @@ async def test_fail_job_never_demotes_a_processed_document(db_session: AsyncSess
     assert tuple(row) == ("PROCESSED", "CONFIRMED")
 
 
-@pytest.mark.asyncio
-async def test_no_nightly_job_is_queued_beside_one_still_pending(db_session: AsyncSession) -> None:
-    tenant_id = f"superseded-{uuid.uuid4().hex[:10]}"
-    document_id = await _document(db_session, tenant_id, processed=False)
-    await _job(db_session, tenant_id, document_id, attempt_no=3, status="PENDING")
-    await insert_nightly_reprocessing_jobs(db_session)
-    count = (await db_session.execute(
-        text("SELECT COUNT(*) FROM docintel.processing_jobs WHERE tenant_id=:t AND document_id=:d"),
-        {"t": tenant_id, "d": document_id},
-    )).scalar_one()
-    assert count == 1
-
-
 @pytest.mark.no_docker
 @pytest.mark.asyncio
 async def test_a_failure_handler_that_fails_still_closes_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,5 +198,3 @@ async def test_a_failure_handler_that_fails_still_closes_the_job(monkeypatch: py
 def test_fail_job_sql_guards_processed_documents() -> None:
     source = inspect.getsource(processing_jobs.fail_job)
     assert "processing_status <> 'PROCESSED'" in source
-    nightly = inspect.getsource(processing_jobs.insert_nightly_reprocessing_jobs)
-    assert "job_status IN ('PENDING', 'RUNNING')" in nightly

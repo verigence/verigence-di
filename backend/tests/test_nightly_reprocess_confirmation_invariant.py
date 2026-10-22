@@ -57,8 +57,8 @@ async def _make_failed_document(db_session, tenant_id: str) -> uuid.UUID:  # typ
         {"tenant_id": tenant_id, "document_id": document_id, "policy_id": policy_id},
     )
     # Reach the exact terminal state fail_job() leaves a permanently-FAILED
-    # document in -- the state every NIGHTLY_REPROCESS-eligible document is
-    # actually found in by insert_nightly_reprocessing_jobs' own query.
+    # document in -- the state a NIGHTLY_REPROCESS job queued before
+    # 2026-10-22 finds its document in.
     await db_session.execute(
         text(
             """

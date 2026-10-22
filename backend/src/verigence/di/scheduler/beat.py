@@ -1,6 +1,6 @@
 """scheduler/beat.py — background job scheduler.
 
-Runs four independent things in-process alongside FastAPI, every 60 seconds:
+Runs three independent things in-process alongside FastAPI, every 60 seconds:
 
   0. Reclaim stale RUNNING jobs (lease timeout exceeded).
   1. Sweep expired backout_jobs rows (D24).
@@ -11,27 +11,20 @@ Runs four independent things in-process alongside FastAPI, every 60 seconds:
      trade-in evidence, feedback attachments, etc.), independent of the
      one legacy Booking evidence-upload screen retired alongside this
      change; retiring that one UI path does not retire this mechanism.
-  3. Nightly Reprocessing: once a day, at a fixed global time, give every
-     currently-FAILED document (any active Tenant) whose failure was
-     technical one more processing attempt -- up to
-     NIGHTLY_REPROCESS_MAX_ATTEMPTS total nightly tries (see
-     repositories/processing_jobs.py::insert_nightly_reprocessing_jobs).
-     A Capture V2 page gets no night attempt (product owner's rule
-     2026-10-21, see retry_policy.py), except one re-read of a page our
-     setup refused (a refused Gemini key or model), classification or
-     reading.
-     Distinct from (2): this catches documents already permanently FAILED
-     (backed out), not the once-off RETRY_PENDING->EOD_RETRY handoff.
-     The trigger window spans several ticks on every replica; a
-     docintel.scheduler_runs marker lets exactly one tick run and report it.
+
+  There is no nightly reprocessing (product owner, 2026-10-22): nothing is
+  processed at night. The run that gave every FAILED document more tries at
+  17:00 UTC (and queued reading for classified pages that never got a job, and
+  the night re-read of a page our setup refused) is gone with its Audit Core
+  status report. A document that ended FAILED stays FAILED; Audit Core raises
+  the PC's "Document to resubmit" task and the PC uploads it again.
 
 Design:
 - APScheduler AsyncIOScheduler runs in-process alongside FastAPI
 - Runs every 60 seconds; (2) uses per-Tenant timezone + eod_retry_local_time
-  to decide whether EOD has just passed, (3) uses a fixed UTC time with a
-  ±90s window
+  to decide whether EOD has just passed
 - Idempotent: UNIQUE (tenant_id, document_id, job_type, attempt_no) on
-  processing_jobs prevents duplicates for either job type
+  processing_jobs prevents duplicate EOD retries
 
 Configuration (from tenant_settings, EOD retry only):
   timezone_name          — e.g. "Africa/Johannesburg"
@@ -44,8 +37,6 @@ Lifecycle:
 """
 from __future__ import annotations
 
-import os
-import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
@@ -57,20 +48,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.repositories.backout import insert_backout_job, sweep_expired_backout_jobs
-from verigence.di.repositories.processing_jobs import (
-    fail_job,
-    insert_nightly_classification_retries,
-    insert_nightly_initial_jobs_for_unqueued,
-    insert_nightly_reprocessing_jobs,
-)
-from verigence.di.repositories.scheduler_runs import (
-    claim_scheduler_run,
-    complete_scheduler_run,
-)
+from verigence.di.repositories.processing_jobs import fail_job
 from verigence.di.runtime_errors import (
     safe_exception_context,
     safe_persisted_detail,
-    technical_failure,
 )
 
 logger = structlog.get_logger(__name__)
@@ -78,18 +59,6 @@ logger = structlog.get_logger(__name__)
 # How many seconds around the EOD window we consider "just passed"
 # (scheduler fires every 60s; ±90s window prevents both double-fire and misses)
 _EOD_WINDOW_SECONDS = 90
-
-# Same window logic, for the fixed-time Nightly Reprocessing trigger below.
-_NIGHTLY_WINDOW_SECONDS = 90
-
-# 10:30 PM IST, fixed for every Tenant regardless of its own timezone
-# (IST = UTC+5:30, so 22:30 IST = 17:00 UTC).
-_NIGHTLY_REPROCESS_UTC_TIME = dtime(17, 0, 0)
-
-_NIGHTLY_RUN_NAME = "NIGHTLY_REPROCESS"
-# Separate marker so a failed pass is reported once while a later tick in the
-# same window may still retry (and report) the run itself.
-_NIGHTLY_FAILURE_REPORT_RUN_NAME = "NIGHTLY_REPROCESS_FAILURE_REPORT"
 
 # An expired RUNNING processing job is put back to PENDING at most this many
 # times; the next expiry fails it, so a document that kills the worker every
@@ -100,14 +69,6 @@ _MAX_LEASE_RECLAIMS = 2
 # failure gets two runs in all, never a third.
 _V2_MAX_LEASE_RECLAIMS = 1
 _LEASE_EXHAUSTED_CODE = "WORKER_LEASE_EXHAUSTED"
-
-
-def _scheduler_instance_id() -> str:
-    try:
-        hostname = socket.gethostname()
-    except Exception:
-        hostname = "unknown"
-    return f"scheduler.{hostname}.{os.getpid()}"
 
 
 class EODRetryScheduler:
@@ -147,7 +108,7 @@ class EODRetryScheduler:
 
 
 async def _run_scheduler_tick(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Periodic check (every 60 s) -- see module docstring for the four
+    """Periodic check (every 60 s) -- see module docstring for the three
     independent things this does."""
     now_utc = datetime.now(UTC)
     tick_correlation_id = f"scheduler.{uuid.uuid4()}"
@@ -205,93 +166,6 @@ async def _run_scheduler_tick_in_context(
                          jobs_inserted=count)
     except Exception as exc:
         log.warning("eod_retry_check_failed", **safe_exception_context(exc))
-
-    # ── 3. Nightly Reprocessing — one fixed global time, every Tenant at once ──
-    if not _is_nightly_window(now_utc):
-        return
-
-    log.debug("nightly_reprocess_window_matched")
-    await _run_nightly_reprocess(session_factory, now_utc, log=log)
-
-
-async def _run_nightly_reprocess(
-    session_factory: async_sessionmaker[AsyncSession],
-    now_utc: datetime,
-    *,
-    log: Any,
-) -> None:
-    """Queue tonight's reprocessing and report it, once across all ticks and
-    replicas in the trigger window."""
-    run_date = now_utc.date()
-    instance_id = _scheduler_instance_id()
-    run_correlation_id = f"nightly.{uuid.uuid4()}"
-    run_log = log.bind(run_date=run_date.isoformat(), nightly_run_correlation_id=run_correlation_id)
-    try:
-        async with session_factory() as session, session.begin():
-            claimed = await claim_scheduler_run(
-                session, run_name=_NIGHTLY_RUN_NAME, run_date=run_date,
-                claimed_by=instance_id, now=now_utc,
-            )
-            if not claimed:
-                run_log.debug("nightly_reprocess_already_ran")
-                return
-            queued = await insert_nightly_reprocessing_jobs(session)
-            # Classified pages that never got a reading job (2026-10-01):
-            # after the night, no classified page stays unread.
-            queued += await insert_nightly_initial_jobs_for_unqueued(session)
-            # A page whose classification failed in the AI gets its one night
-            # attempt too (product owner's rule 2026-10-20).
-            queued += await insert_nightly_classification_retries(session)
-            await complete_scheduler_run(
-                session, run_name=_NIGHTLY_RUN_NAME, run_date=run_date,
-                items_queued=queued, now=datetime.now(UTC),
-            )
-    except Exception as exc:
-        failure = technical_failure(exc, operation="worker")
-        run_log.error(
-            "nightly_reprocess_failed",
-            error_code=failure.code,
-            retryable=failure.retryable,
-            **safe_exception_context(exc),
-        )
-        if await _claim_failure_report(session_factory, run_date, instance_id, failure.code, log=run_log):
-            await _report_nightly_reprocess_run(
-                queued_count=None, ran_at_utc=now_utc, log=run_log,
-                error=_safe_run_error(failure.code, exc), correlation_id=run_correlation_id,
-            )
-        return
-
-    run_log.info("nightly_reprocess_jobs_queued", jobs_queued=queued)
-    await _report_nightly_reprocess_run(
-        queued_count=queued, ran_at_utc=now_utc, log=run_log, correlation_id=run_correlation_id,
-    )
-
-
-async def _claim_failure_report(
-    session_factory: async_sessionmaker[AsyncSession],
-    run_date: Any,
-    instance_id: str,
-    error_code: str,
-    *,
-    log: Any,
-) -> bool:
-    try:
-        async with session_factory() as session, session.begin():
-            return await claim_scheduler_run(
-                session, run_name=_NIGHTLY_FAILURE_REPORT_RUN_NAME, run_date=run_date,
-                claimed_by=instance_id, now=datetime.now(UTC), error_code=error_code,
-            )
-    except Exception as exc:
-        # The database itself is failing: report anyway so the status tile
-        # shows the failure, accepting a duplicate over silence.
-        log.warning("nightly_reprocess_failure_marker_failed", **safe_exception_context(exc))
-        return True
-
-
-def _safe_run_error(code: str, exc: BaseException) -> str:
-    """Audit Core shows this on a status tile: code and exception type only,
-    never the exception text (SQL, parameters, hostnames)."""
-    return f"{code}: {type(exc).__name__}"
 
 
 async def _load_enabled_tenants(session: AsyncSession) -> list[dict[str, Any]]:
@@ -421,47 +295,6 @@ async def _insert_eod_retry_jobs(
                            **safe_exception_context(exc))
 
     return count
-
-
-def _is_nightly_window(now_utc: datetime) -> bool:
-    """True when the fixed global Nightly Reprocessing time (10:30 PM IST /
-    17:00 UTC) falls within the ±_NIGHTLY_WINDOW_SECONDS window right now."""
-    now_seconds = now_utc.hour * 3600 + now_utc.minute * 60 + now_utc.second
-    trigger_seconds = (
-        _NIGHTLY_REPROCESS_UTC_TIME.hour * 3600
-        + _NIGHTLY_REPROCESS_UTC_TIME.minute * 60
-        + _NIGHTLY_REPROCESS_UTC_TIME.second
-    )
-    return abs(now_seconds - trigger_seconds) <= _NIGHTLY_WINDOW_SECONDS
-
-
-async def _report_nightly_reprocess_run(
-    *,
-    queued_count: int | None,
-    ran_at_utc: datetime,
-    log: Any,
-    error: str | None = None,
-    correlation_id: str | None = None,
-) -> None:
-    """Best-effort: tell Audit Core this run happened, for the PMO/TL
-    "Failed Extraction Reprocessing" status tile. Never lets a reporting
-    failure affect the run itself -- the run already committed above."""
-    try:
-        from verigence.di.integrations.audit_core import get_audit_core_link_client
-        client = get_audit_core_link_client()
-        await client.report_nightly_reprocessing_run(
-            ran_at_utc=ran_at_utc,
-            documents_queued=queued_count,
-            error=error,
-            correlation_id=correlation_id,
-        )
-    except Exception as exc:
-        failure = technical_failure(exc, operation="audit_core_link")
-        log.warning(
-            "nightly_reprocess_report_failed",
-            error_code=failure.code,
-            **safe_exception_context(exc),
-        )
 
 
 async def _reclaim_stale_jobs(
