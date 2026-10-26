@@ -17,7 +17,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
     document_type_key="customer_ledger",
     display_name="Customer Ledger",
-    schema_version="1.0",
+    schema_version="1.1",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=False, description="Dealership/company name whose books the ledger belongs to, exactly as printed"),
         FieldSpec(key="customer_name", field_type="string", required=True, description="Customer/party/account name the ledger is maintained for, exactly as printed"),
@@ -34,6 +34,21 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         FieldSpec(key="cash_credit_total", field_type="number", required=False, description="Total of credit entries whose narration/voucher type is cash, only when the ledger prints such a subtotal; do not derive it", normalization="indian_currency"),
         FieldSpec(key="loan_credit", field_type="number", required=False, description="Credit entry representing bank/financier loan or finance disbursement, only when a row explicitly identifies it; do not infer from amount", normalization="indian_currency"),
         FieldSpec(key="exchange_credit", field_type="number", required=False, description="Credit entry representing exchange/trade-in adjustment, only when a row explicitly identifies it", normalization="indian_currency"),
+        FieldSpec(key="statement_title", field_type="string", required=False, description="Title printed at the top of the dealer's own account statement form, verbatim (for example Account Statement, Vehicle Account Statement, Accounts Statement); empty for a DMS or Tally ledger export"),
+        FieldSpec(key="vehicle_model", field_type="string", required=False, description="Vehicle model printed on the account statement form, exactly as printed"),
+        FieldSpec(key="vin_number", field_type="string", required=False, description="Vehicle VIN / chassis number printed on the account statement form, exactly as printed"),
+        FieldSpec(key="invoice_number", field_type="string", required=False, description="Invoice number printed on the account statement form, exactly as printed"),
+        FieldSpec(key="invoice_date", field_type="date", required=False, description="Invoice date printed on the account statement form", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="booking_date", field_type="date", required=False, description="Booking date printed on the account statement form", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="delivery_date", field_type="date", required=False, description="Delivery date printed on the account statement form", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="gross_value", field_type="number", required=False, description="The amount printed against Gross Value on the account statement form, before the discount", normalization="indian_currency"),
+        FieldSpec(key="discount_value", field_type="number", required=False, description="The amount printed against Less: Discount on the account statement form", normalization="indian_currency"),
+        FieldSpec(key="net_value", field_type="number", required=False, description="The final amount the customer is to pay, as printed against Net Value, Net Receivable (A+B) or Final Price on the account statement form; never Gross Value, Total Cost or Total (A)", normalization="indian_currency"),
+        FieldSpec(key="total_cost", field_type="number", required=False, description="The amount printed against Total Cost on a Vehicle Account Statement (the figure before the other discount)", normalization="indian_currency"),
+        FieldSpec(key="total_receipts", field_type="number", required=False, description="The amount printed against Total Receipts, Total Receipt or Net Amount Received (E) on the account statement form", normalization="indian_currency"),
+        FieldSpec(key="balance_amount", field_type="number", required=False, description="The amount printed against Short / Excess, Due or Balance Excess/Shortage (C-E) on the account statement form, as printed", normalization="indian_currency"),
+        FieldSpec(key="discount_details", field_type="array", required=False, description="JSON array of the rows of the Discount Details box of the account statement form that carry an amount, each as label (verbatim: Scheme, Loyalty, Accessory, Insurance, Other, MR, Exchange Bonus, Extended Warranty) and amount; empty when the form has no such box"),
+        FieldSpec(key="discount_details_total", field_type="number", required=False, description="The amount printed against Total in the Discount Details box of the account statement form", normalization="indian_currency"),
         FieldSpec(key="line_items", field_type="array", required=False, description="JSON array of visible ledger rows. For each row preserve entry_date (date), particulars_raw, voucher_type, voucher_number, debit_amount, credit_amount and running_balance exactly as printed; do not merge rows or compute missing values"),
     ],
     system_prompt=(
@@ -54,5 +69,11 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         "voucher_type is the printed type such as Receipt, Payment, Journal, Contra, Sales; return it verbatim.",
         "running_balance is the balance printed on that row only; never carry a value forward yourself.",
         "If the ledger shows only a final figure and no row-level build-up, return the totals/closing_balance and an empty line_items array.",
+        "DEALER ACCOUNT STATEMENT FORMS (handwritten forms titled Account Statement, Vehicle Account Statement or Accounts Statement): "
+        "read the summary figures into their own fields - gross_value, discount_value, net_value, total_cost, total_receipts, balance_amount - "
+        "exactly as written, never calculated, and never copy one of them into another. Do not put those summary rows, or the rows of the Discount Details box, in line_items; "
+        "line_items carries only the particulars (charges), the payments received and the discount rows of the main table. The Discount Details box goes to discount_details.",
+        "net_value is the amount the customer finally pays: the figure against Net Value, Net Receivable (A+B) or Final Price. Gross Value, Total Cost and Total (A) are not net_value.",
+        "Leave every statement field empty on a DMS or Tally ledger export; an empty box on the form is empty, not zero.",
     ],
 )
