@@ -590,7 +590,7 @@ async def finalize_capture_document(
 
 class V2CaptureReprocessResponse(BaseModel):
     documentId: UUID
-    # queued | in_progress | already_processed | not_classified
+    # queued | in_progress | already_processed | not_classified | has_corrections
     outcome: str
     processingJobId: UUID | None = None
 
@@ -604,12 +604,18 @@ async def reprocess_capture_document(
     externalContextRef: str,
     documentId: UUID,
     principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+    force: bool = False,
 ) -> V2CaptureReprocessResponse:
     """Read a classified document again, at a person's request relayed by
     Audit Core ("Read again" on the Upload / Edit Documents card, decision
     2026-10-01). No re-upload, no re-classification: one reading job for a
     document DI already holds. Idempotent: a job already pending or running
-    is reported, never doubled."""
+    is reported, never doubled.
+
+    ``force=true`` reads a document that was already read once more (Audit
+    Core's one-off re-read after a schema gained a field). It is refused with
+    outcome ``has_corrections`` when a person verified the document or
+    corrected a value in DI."""
     rows = await _status_rows(tenantId, externalContextRef, None, documentId)
     if not rows:
         raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
@@ -623,7 +629,7 @@ async def reprocess_capture_document(
         async with tenant_session(tenantId) as session:
             result = await request_manual_reread(
                 session, tenant_id=tenantId, document_id=documentId,
-                requested_by=principal.service_id,
+                requested_by=principal.service_id, force=force,
             )
     except Exception as exc:
         failure = technical_failure(exc, operation="worker")

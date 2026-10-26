@@ -44,8 +44,8 @@ from verigence.di.repositories.processing_jobs import (
     close_job_after_handler_error,
     complete_job,
     defer_job_after_rate_limit,
-    document_processing_status,
     fail_job,
+    job_superseded,
     retry_job,
     schedule_v2_fast_retry,
 )
@@ -505,10 +505,12 @@ async def _execute_claimed_job_in_context(
     # run after another attempt already PROCESSED it: nothing to do.
     if job_type != "INITIAL":
         async with session_factory() as session, session.begin():
-            status = await document_processing_status(session, tenant_id=tenant_id, document_id=document_id)
-            if status == "PROCESSED":
+            superseded = await job_superseded(
+                session, tenant_id=tenant_id, document_id=document_id, processing_job_id=job_id,
+            )
+            if superseded:
                 await cancel_superseded_job(session, tenant_id=tenant_id, processing_job_id=job_id)
-        if status == "PROCESSED":
+        if superseded:
             job_log.info("job_superseded", error_code=SUPERSEDED_ERROR_CODE)
             return "superseded"
 

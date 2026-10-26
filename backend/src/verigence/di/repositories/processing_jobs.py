@@ -440,6 +440,7 @@ MANUAL_REREAD_JOB_TYPE = "MANUAL_REREAD"
 
 async def request_manual_reread(
     session: AsyncSession, *, tenant_id: str, document_id: uuid.UUID, requested_by: str,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Queue one more reading of a classified document DI already holds,
     at a person's request (Audit Core's "Read again", decision 2026-10-01).
@@ -448,13 +449,22 @@ async def request_manual_reread(
       not_found          no such document for the tenant
       not_classified     DI has not (or could not) classified it yet
       already_processed  the document was read; the caller syncs instead
+                         (unless ``force``: a deliberate second reading of a
+                         document already read, e.g. after its schema gained
+                         a field)
+      has_corrections    ``force`` refused: a person verified the document or
+                         corrected a value in DI, and a new reading would
+                         replace their work
       in_progress        a job is already pending or running
       queued             a job was inserted (processingJobId returned)
     """
     row = (
         await session.execute(
             text("""
-                SELECT d.processing_status, d.correlation_id,
+                SELECT d.processing_status, d.correlation_id, d.verification_state,
+                       (SELECT COUNT(*) FROM docintel.document_field_values f
+                         WHERE f.tenant_id = d.tenant_id AND f.document_id = d.document_id
+                           AND f.is_current = true AND f.value_source <> 'MACHINE') AS person_values,
                        u.state AS capture_state, u.classified_document_type_key,
                        (SELECT COUNT(*) FROM docintel.processing_jobs a
                          WHERE a.tenant_id = d.tenant_id AND a.document_id = d.document_id
@@ -474,7 +484,10 @@ async def request_manual_reread(
     if row["capture_state"] != "CLASSIFIED" or not row["classified_document_type_key"]:
         return {"outcome": "not_classified", "captureState": row["capture_state"]}
     if row["processing_status"] == "PROCESSED":
-        return {"outcome": "already_processed"}
+        if not force:
+            return {"outcome": "already_processed"}
+        if row["verification_state"] == "VERIFIED" or int(row["person_values"] or 0) > 0:
+            return {"outcome": "has_corrections"}
     if int(row["active_jobs"] or 0) > 0:
         return {"outcome": "in_progress"}
 
@@ -514,6 +527,7 @@ async def request_manual_reread(
         job_type=job_type,
         attempt_no=attempt_no,
         requested_by=requested_by,
+        force=force,
     )
     return {"outcome": "queued", "processingJobId": str(job_id), "jobType": job_type, "attemptNo": attempt_no}
 
@@ -533,6 +547,33 @@ async def document_processing_status(
             {"tenant_id": tenant_id, "document_id": document_id},
         )
     ).scalar_one_or_none()
+
+
+async def job_superseded(
+    session: AsyncSession, *, tenant_id: str, document_id: uuid.UUID, processing_job_id: uuid.UUID,
+) -> bool:
+    """True when another attempt PROCESSED the document after this job was
+    queued, so this job has nothing left to do. A MANUAL_REREAD is a person's
+    request and may be queued for an already-PROCESSED document (a forced
+    re-read), so for it only a PROCESSING after the job was queued counts."""
+    return (
+        (
+            await session.execute(
+                text("""
+                    SELECT d.processing_status = 'PROCESSED'
+                           AND (j.job_type <> :manual OR d.updated_at_utc > j.created_at_utc)
+                    FROM docintel.processing_jobs j
+                    JOIN docintel.documents d
+                      ON d.tenant_id = j.tenant_id AND d.document_id = j.document_id
+                    WHERE j.tenant_id = :tenant_id AND j.processing_job_id = :job_id
+                      AND j.document_id = :document_id
+                """),
+                {"tenant_id": tenant_id, "job_id": processing_job_id,
+                 "document_id": document_id, "manual": MANUAL_REREAD_JOB_TYPE},
+            )
+        ).scalar_one_or_none()
+        is True
+    )
 
 
 async def cancel_superseded_job(
