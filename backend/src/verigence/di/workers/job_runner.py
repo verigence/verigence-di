@@ -317,6 +317,10 @@ async def _execute_steps(
             UPDATE docintel.documents
             SET processing_status = 'PROCESSING',
                 confirmation_status = 'PENDING',
+                confidence_score = NULL,
+                verification_threshold_applied = NULL,
+                human_verification_status = NULL,
+                verification_state = 'NOT_VERIFIED',
                 current_processing_run_id = :run_id,
                 updated_at_utc = :now
             WHERE tenant_id = :tid AND document_id = :doc_id
@@ -605,6 +609,23 @@ async def _execute_steps(
     await _ensure_system_actor(session, tenant_id, system_actor_id)
 
     norm_map = {n.extracted_fact_id: n for n in runner_output.normalized}
+
+    # A forced re-read of a document that was already read: the earlier
+    # machine values stop being current only now that this run has read the
+    # document, so a read that fails leaves the earlier values in place. (The
+    # insert below keeps an existing current value on conflict, so without
+    # this the new reading would never replace the old one.) A document with
+    # a person's corrected values is never force-read (request_manual_reread),
+    # and a first reading has no earlier values: this changes nothing for it.
+    await session.execute(
+        text("""
+            UPDATE docintel.document_field_values
+            SET is_current = false
+            WHERE tenant_id = :tid AND document_id = :doc_id
+              AND is_current = true AND value_source = 'MACHINE'
+        """),
+        {"tid": tenant_id, "doc_id": document_id},
+    )
 
     for pf in profile_fields:
         provider_key = _provider_field_key(pf)
