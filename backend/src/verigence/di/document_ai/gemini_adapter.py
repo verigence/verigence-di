@@ -815,7 +815,9 @@ def _parse_response(
     db_fields: list[ExtractionField],
 ) -> list[FieldResult]:
     """Parse Gemini JSON response into provider-neutral field results."""
-    identifier_codes = {spec.key for spec in schema.fields if spec.normalization == "identifier_code"}
+    identifier_codes = {
+        spec.key for spec in getattr(schema, "fields", None) or () if spec.normalization == "identifier_code"
+    }
     text_value = raw_text.strip()
     if text_value.startswith("```"):
         lines = text_value.split("\n")
