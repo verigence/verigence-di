@@ -7,10 +7,11 @@ Lifespan: starts/stops the ProcessingWorker background task.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from http import HTTPStatus
 from typing import Any
 
@@ -237,10 +238,22 @@ def create_app() -> FastAPI:
             worker.start()
             capture_v2_worker.start()
             scheduler.start()
+        # Boot row, a beat a minute and CPU/memory for the SuperAdmin System Health
+        # page (2026-10-27); a clean stop is stamped on shutdown.
+        from verigence.di.platform_heartbeat import run_platform_heartbeat  # noqa: PLC0415
+
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            run_platform_heartbeat(str(settings.database_url), "di-api", heartbeat_stop),
+            name="di-platform-heartbeat",
+        )
         try:
             await _validate_schema_profile_consistency()
             yield
         finally:
+            heartbeat_stop.set()
+            with suppress(Exception):
+                await asyncio.wait_for(heartbeat_task, timeout=5)
             if settings.worker_enabled:
                 await capture_v2_worker.stop()
                 await worker.stop()
