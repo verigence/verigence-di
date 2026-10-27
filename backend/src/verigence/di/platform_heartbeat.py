@@ -1,17 +1,19 @@
 """Platform heartbeat for the SuperAdmin System Health page (product owner 2026-10-27).
 
-Writes to the shared platform_ops tables that Audit Core's migration 0170 creates:
+Writes to DI's own tables (migration 0056; DI's database is not Audit Core's),
+which Audit Core reads through GET /v1/platform/health:
 
-- one row in platform_ops.service_heartbeats per process start (a "boot"),
+- one row in docintel.service_heartbeats per process start (a "boot"),
   last_seen refreshed every minute, stopped_at stamped on a clean shutdown.
   A new boot in the same Railway deployment is a restart; a boot that went
   quiet without a stop stamp ended unclean (crash, kill);
 - container CPU and memory read from the cgroup every 5 seconds, kept as the
   per-minute average and peak against the container's limits, in
-  platform_ops.service_resource_minutes.
+  docintel.service_resource_minutes.
 
-Best effort throughout: a failed write is logged and dropped. If the tables do
-not exist yet it keeps trying quietly; it never stops or slows DI.
+Best effort throughout: a failed write is logged and dropped, and a beat that
+finds no boot row writes it, so a start that could not write (tables missing,
+database unreachable) still shows. It never stops or slows DI.
 """
 from __future__ import annotations
 
@@ -119,7 +121,7 @@ class PlatformHeartbeat:
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(
-                    "INSERT INTO platform_ops.service_heartbeats (boot_id, service_name, replica_id, deployment_id, "
+                    "INSERT INTO docintel.service_heartbeats (boot_id, service_name, replica_id, deployment_id, "
                     "version) VALUES (CAST(:b AS uuid), :s, :r, :d, :v) "
                     "ON CONFLICT (boot_id) DO UPDATE SET last_seen_at_utc = now()"
                 ),
@@ -130,23 +132,32 @@ class PlatformHeartbeat:
         current = _minute(time.time())
         done = {m: self._minutes.pop(m) for m in list(self._minutes) if include_current or m < current}
         async with self.engine.begin() as connection:
-            await connection.execute(
-                text("UPDATE platform_ops.service_heartbeats SET last_seen_at_utc = now() "
+            seen = await connection.execute(
+                text("UPDATE docintel.service_heartbeats SET last_seen_at_utc = now() "
                      "WHERE boot_id = CAST(:b AS uuid)"),
                 {"b": self.boot_id},
             )
+            if seen.rowcount == 0:
+                await connection.execute(
+                    text(
+                        "INSERT INTO docintel.service_heartbeats (boot_id, service_name, replica_id, "
+                        "deployment_id, version) VALUES (CAST(:b AS uuid), :s, :r, :d, :v) "
+                        "ON CONFLICT (boot_id) DO UPDATE SET last_seen_at_utc = now()"
+                    ),
+                    {"b": self.boot_id, "s": self.service, "r": self.replica, "d": self.deployment, "v": self.version},
+                )
             for minute, r in done.items():
                 await connection.execute(
                     text(
                         """
-                        INSERT INTO platform_ops.service_resource_minutes
+                        INSERT INTO docintel.service_resource_minutes
                           (boot_id, service_name, minute_utc, cpu_cores_avg, cpu_cores_max, cpu_limit_cores,
                            memory_bytes_max, memory_limit_bytes)
                         VALUES (CAST(:b AS uuid), :s, :m, :avg, :max, :cl, :mm, :ml)
                         ON CONFLICT (boot_id, minute_utc) DO UPDATE SET
-                          cpu_cores_max = GREATEST(platform_ops.service_resource_minutes.cpu_cores_max,
+                          cpu_cores_max = GREATEST(docintel.service_resource_minutes.cpu_cores_max,
                                                    EXCLUDED.cpu_cores_max),
-                          memory_bytes_max = GREATEST(platform_ops.service_resource_minutes.memory_bytes_max,
+                          memory_bytes_max = GREATEST(docintel.service_resource_minutes.memory_bytes_max,
                                                       EXCLUDED.memory_bytes_max)
                         """
                     ),
@@ -162,7 +173,7 @@ class PlatformHeartbeat:
             await self.beat(include_current=True)
         async with self.engine.begin() as connection:
             await connection.execute(
-                text("UPDATE platform_ops.service_heartbeats SET stopped_at_utc = now(), last_seen_at_utc = now(), "
+                text("UPDATE docintel.service_heartbeats SET stopped_at_utc = now(), last_seen_at_utc = now(), "
                      "stop_reason = :r WHERE boot_id = CAST(:b AS uuid)"),
                 {"b": self.boot_id, "r": reason[:80]},
             )
@@ -172,7 +183,11 @@ async def _safe(action: str, coro: Any) -> None:
     try:
         await coro
     except Exception as exc:  # noqa: BLE001 - health reporting must never take DI down
-        logger.warning("platform_heartbeat_failed", action=action, error=type(exc).__name__, detail=str(exc)[:200])
+        # "error"/"detail" are stripped by the log sanitiser; the type and SQLSTATE are not.
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(getattr(orig, "__cause__", None), "sqlstate", None)
+        logger.warning("platform_heartbeat_failed", action=action, error_type=type(exc).__name__,
+                       cause_type=type(orig).__name__ if orig is not None else None, sqlstate=sqlstate)
 
 
 async def run_platform_heartbeat(
