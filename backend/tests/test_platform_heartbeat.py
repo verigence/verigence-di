@@ -38,3 +38,34 @@ async def test_an_unreachable_database_never_stops_the_service():
     await asyncio.sleep(0.2)
     stop.set()
     await asyncio.wait_for(task, timeout=10)  # finished cleanly, no exception
+
+
+async def test_a_missing_boot_row_is_written_by_the_next_beat() -> None:
+    """The process may start before the tables exist; its first beat after they appear
+    writes the boot row, so the page sees it without a restart."""
+    executed: list[str] = []
+
+    class _Result:
+        def __init__(self, rowcount: int) -> None:
+            self.rowcount = rowcount
+
+    class _Conn:
+        async def execute(self, statement, params=None):  # type: ignore[no-untyped-def]
+            sql = str(statement)
+            executed.append(sql.split()[0])
+            return _Result(0 if sql.startswith("UPDATE") else 1)
+
+    class _Begin:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return _Conn()
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+    class _Engine:
+        def begin(self) -> _Begin:
+            return _Begin()
+
+    beat = hb.PlatformHeartbeat(_Engine(), "di-api")  # type: ignore[arg-type]
+    await beat.beat()
+    assert executed == ["UPDATE", "INSERT"]

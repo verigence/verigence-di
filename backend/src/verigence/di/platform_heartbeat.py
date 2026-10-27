@@ -130,11 +130,22 @@ class PlatformHeartbeat:
         current = _minute(time.time())
         done = {m: self._minutes.pop(m) for m in list(self._minutes) if include_current or m < current}
         async with self.engine.begin() as connection:
-            await connection.execute(
+            seen = await connection.execute(
                 text("UPDATE platform_ops.service_heartbeats SET last_seen_at_utc = now() "
                      "WHERE boot_id = CAST(:b AS uuid)"),
                 {"b": self.boot_id},
             )
+            if seen.rowcount == 0:
+                # The boot row was never written (e.g. the process started before
+                # the tables existed): write it now so the page sees this process.
+                await connection.execute(
+                    text(
+                        "INSERT INTO platform_ops.service_heartbeats (boot_id, service_name, replica_id, "
+                        "deployment_id, version) VALUES (CAST(:b AS uuid), :s, :r, :d, :v) "
+                        "ON CONFLICT (boot_id) DO UPDATE SET last_seen_at_utc = now()"
+                    ),
+                    {"b": self.boot_id, "s": self.service, "r": self.replica, "d": self.deployment, "v": self.version},
+                )
             for minute, r in done.items():
                 await connection.execute(
                     text(
@@ -172,7 +183,11 @@ async def _safe(action: str, coro: Any) -> None:
     try:
         await coro
     except Exception as exc:  # noqa: BLE001 - health reporting must never take DI down
-        logger.warning("platform_heartbeat_failed", action=action, error=type(exc).__name__, detail=str(exc)[:200])
+        # "error"/"detail" are stripped by the log sanitiser; the type and SQLSTATE are not.
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(getattr(orig, "__cause__", None), "sqlstate", None)
+        logger.warning("platform_heartbeat_failed", action=action, error_type=type(exc).__name__,
+                       cause_type=type(orig).__name__ if orig is not None else None, sqlstate=sqlstate)
 
 
 async def run_platform_heartbeat(
