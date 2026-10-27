@@ -135,6 +135,15 @@ async def _main() -> None:
         name="di-worker-heartbeat",
     )
 
+    # Boot row, a beat a minute and CPU/memory for the SuperAdmin System Health
+    # page (2026-10-27); a clean stop is stamped when the worker stops.
+    from verigence.di.platform_heartbeat import run_platform_heartbeat  # noqa: PLC0415
+
+    platform_heartbeat_task = asyncio.create_task(
+        run_platform_heartbeat(str(settings.database_url), f"di-worker-{mode.value}", stop_event),
+        name="di-platform-heartbeat",
+    )
+
     scheduler_started = False
     try:
         if scheduler is not None:
@@ -169,6 +178,8 @@ async def _main() -> None:
         stop_event.set()
         with suppress(Exception):
             await asyncio.wait_for(heartbeat_task, timeout=5)
+        with suppress(Exception):
+            await asyncio.wait_for(platform_heartbeat_task, timeout=5)
         with suppress(Exception):
             await heartbeat_engine.dispose()
         await asyncio.gather(
