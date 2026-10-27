@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     # Sentry
     sentry_dsn: str = ""
 
+    # SuperAdmin System Health (2026-10-27): the ServiceIntegration subjects that
+    # may read GET /v1/platform/health (comma-separated).
+    platform_health_service_ids: str = "audit-core"
+
     # Processing Worker
     # Default poll interval is 30s — used as fallback safety net only when
     # DI_WORKER_NOTIFY_DB_URL is set and pg_notify is active.

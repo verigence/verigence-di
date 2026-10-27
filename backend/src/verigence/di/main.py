@@ -215,6 +215,8 @@ async def _validate_schema_profile_consistency() -> None:
         )
 
 
+
+
 def create_app() -> FastAPI:
     from verigence.di.logging_config import configure_logging  # noqa: PLC0415
 
@@ -501,6 +503,7 @@ def create_app() -> FastAPI:
     from verigence.di.api.v1.pc_booking_documents import (  # noqa: PLC0415
         router as pc_booking_documents_router,
     )
+    from verigence.di.api.v1.platform_health import router as platform_health_router  # noqa: PLC0415
     from verigence.di.api.v1.project_masters import (
         router as project_masters_router,  # noqa: PLC0415
     )
@@ -545,6 +548,7 @@ def create_app() -> FastAPI:
     app.include_router(whatsapp_system_router)
     app.include_router(analyse_router)
     app.include_router(capture_v2_router)
+    app.include_router(platform_health_router)
 
     if settings.sentry_dsn:
         try:
