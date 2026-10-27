@@ -10,9 +10,17 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 INSURANCE_COVER_SCHEMA = SchemaDefinition(
     document_type_key="insurance_cover",
     display_name="Insurance Cover Note",
-    schema_version="1.1",
+    schema_version="1.2",
     fields=[
-        FieldSpec(key="insurer_name", field_type="string", required=True, description="Insurance company name exactly as printed"),
+        FieldSpec(
+            key="insurer_name",
+            field_type="string",
+            required=True,
+            description=(
+                "Insurance company name exactly as printed; when it reads 'X (formerly known as Y)', return X, "
+                "the current name"
+            ),
+        ),
         FieldSpec(key="policy_number", field_type="string", required=True, description="Policy/cover-note number exactly as printed"),
         FieldSpec(
             key="policy_type",
@@ -33,8 +41,27 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
         FieldSpec(key="issue_date", field_type="date", required=False, description="Policy/cover-note issue date if present", normalization="date_dd_mm_yyyy"),
         FieldSpec(key="add_ons", field_type="array", required=False, description="Add-on covers explicitly listed, such as zero depreciation, RSA, engine protect, consumables, key cover, etc.; return null if none are printed"),
         FieldSpec(key="agent_intermediary_name", field_type="string", required=False, description="Agent/intermediary/broker name exactly as printed, if the policy was sold through one"),
-        FieldSpec(key="agent_intermediary_code", field_type="string", required=False, description="Agent/intermediary/broker code or license number exactly as printed"),
-        FieldSpec(key="misp_code", field_type="string", required=False, description="MISP (Motor Insurance Service Provider) code exactly as printed, when the dealership itself is registered as the selling MISP"),
+        FieldSpec(
+            key="agent_intermediary_code",
+            field_type="string",
+            required=False,
+            description=(
+                "Agent/intermediary/broker code or licence number exactly as printed against a 'Code', 'Agent Code', "
+                "'Intermediary Code' or 'Licence No' label, e.g. MIBL/M&M/AAECA5786A/000. Never a contact, mobile, "
+                "phone or toll-free number, and never a policy, proposal, receipt or reference number"
+            ),
+            normalization="identifier_code",
+        ),
+        FieldSpec(
+            key="misp_code",
+            field_type="string",
+            required=False,
+            description=(
+                "MISP (Motor Insurance Service Provider) code exactly as printed in a 'MISP Details' block, the value "
+                "after 'Code:' (e.g. MIBL/M&M/AAECA5786A/000). Never the MISP's contact number"
+            ),
+            normalization="identifier_code",
+        ),
     ],
     system_prompt=(
         "You are a document data extraction assistant specialising in Indian motor insurance policies and cover notes.\n"
@@ -47,6 +74,9 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
         "add_ons: return only covers explicitly listed in the document; otherwise return null with low confidence.",
         "policy_type: do not infer from premium components or add-ons; extract only an explicitly stated policy type.",
         "agent_intermediary_name/agent_intermediary_code and misp_code are independent labels -- a policy can show either, both, or neither; never fill one from the other.",
+        "In an intermediary or MISP line such as 'Name: ADITYA MOTORS Contact Number: 7873999101 Code: MIBL/M&M/AAECA5786A/000', "
+        "the code is the value after 'Code:'; a contact or phone number is never a code. If only a phone number is printed, "
+        "leave the code out.",
         "Normalize INR formatting only for amounts that are explicitly present.",
     ],
 )

@@ -17,6 +17,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -462,6 +463,7 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
                 "indian_currency": "normalise to plain integer (strip commas/Indian formatting)",
                 "date_dd_mm_yyyy": "normalise to YYYY-MM-DD format",
                 "phone_e164": "normalise to E.164 format (+91XXXXXXXXXX)",
+                "identifier_code": "a code exactly as printed; never a phone or mobile number",
             }
             description_parts.append(
                 norm_hints.get(spec.normalization, spec.normalization)
@@ -813,7 +815,7 @@ def _parse_response(
     db_fields: list[ExtractionField],
 ) -> list[FieldResult]:
     """Parse Gemini JSON response into provider-neutral field results."""
-    del schema
+    identifier_codes = {spec.key for spec in schema.fields if spec.normalization == "identifier_code"}
     text_value = raw_text.strip()
     if text_value.startswith("```"):
         lines = text_value.split("\n")
@@ -864,6 +866,14 @@ def _parse_response(
             results.append(_not_found_result(key))
             continue
 
+        # A code field (agent/intermediary/MISP code) never holds a phone number:
+        # confirmed live 2026-10-27, an insurance policy's MISP contact number was
+        # read as its agent code. Treat it as not found rather than keep a wrong value.
+        if key in identifier_codes and looks_like_phone_number(raw_value):
+            logger.info("di_field_rejected_phone_as_code", field_key=key)
+            results.append(_not_found_result(key))
+            continue
+
         confidence = _CONFIDENCE_MAP.get(conf_str, Decimal("40.00"))
         # A plain str() on an array/object value (e.g. an invoice's line_items)
         # produces Python's single-quoted repr, which is not valid JSON and can
@@ -892,6 +902,19 @@ def _parse_response(
         )
 
     return results
+
+
+_PHONE_PATTERN = re.compile(r"(?:\+?91|0)?[6-9]\d{9}|1800\d{6,7}|0\d{2,4}\d{6,8}")
+
+
+def looks_like_phone_number(value: Any) -> bool:
+    """True for an Indian mobile, landline or toll-free number, with or without spaces,
+    dashes or a +91/0 prefix. A real code (MIBL/M&M/AAECA5786A/000) has letters or
+    separators and never matches."""
+    if not isinstance(value, (str, int)):
+        return False
+    compact = re.sub(r"[\s\-().]", "", str(value))
+    return bool(_PHONE_PATTERN.fullmatch(compact))
 
 
 def _not_found_result(field_key: str) -> FieldResult:
