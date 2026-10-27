@@ -76,3 +76,11 @@ def test_the_prompt_says_a_contact_number_is_never_a_code_and_names_the_current_
     assert "never a phone or mobile number" in prompt
     assert "Never a contact, mobile" in prompt
     assert "formerly known as" in prompt
+
+
+def test_the_policy_hypothecation_is_read() -> None:
+    # Product owner 2026-10-27: an insurance hypothecation is one of the three
+    # proofs of finance (with the RTO challan and a receipt from the financier).
+    field = next(f for f in INSURANCE_COVER_SCHEMA.fields if f.key == "hypothecated_to")
+    assert not field.required and "Cash" in field.description
+    assert INSURANCE_COVER_SCHEMA.schema_version == "1.3"

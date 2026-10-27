@@ -10,7 +10,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 INSURANCE_COVER_SCHEMA = SchemaDefinition(
     document_type_key="insurance_cover",
     display_name="Insurance Cover Note",
-    schema_version="1.2",
+    schema_version="1.3",
     fields=[
         FieldSpec(
             key="insurer_name",
@@ -62,6 +62,16 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
             ),
             normalization="identifier_code",
         ),
+        FieldSpec(
+            key="hypothecated_to",
+            field_type="string",
+            required=False,
+            description=(
+                "Name of the financier (bank / finance company) the vehicle is hypothecated to, exactly as printed "
+                "against 'Hypothecation', 'Hypothecated to', 'Financier', 'Agreement with', 'HPA' or 'Lease/Hire "
+                "Purchase with'; null when the policy prints no financier, 'NA', 'Nil' or 'Cash'"
+            ),
+        ),
     ],
     system_prompt=(
         "You are a document data extraction assistant specialising in Indian motor insurance policies and cover notes.\n"
@@ -77,6 +87,8 @@ INSURANCE_COVER_SCHEMA = SchemaDefinition(
         "In an intermediary or MISP line such as 'Name: ADITYA MOTORS Contact Number: 7873999101 Code: MIBL/M&M/AAECA5786A/000', "
         "the code is the value after 'Code:'; a contact or phone number is never a code. If only a phone number is printed, "
         "leave the code out.",
+        "hypothecated_to: only a financier printed against a hypothecation / financier / HPA label; never the "
+        "insurer, the intermediary or the dealer; null when none is printed.",
         "Normalize INR formatting only for amounts that are explicitly present.",
     ],
 )
