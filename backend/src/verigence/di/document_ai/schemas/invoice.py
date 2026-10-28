@@ -332,6 +332,15 @@ def _build_schema(
             "do not round extracted commercial evidence."
         ),
         (
+            "GST: copy the rate and the amount printed against CGST, SGST, IGST and Cess, from "
+            "the page only. Never split a GST total into CGST, SGST and cess from what you know "
+            "of GST slabs. Since 22 September 2025 (GST 2.0) motor vehicles are taxed at 40%, "
+            "18% or 5% -- half each as CGST and SGST, or all as IGST -- and the compensation "
+            "cess is gone, so the old 14% + 14% + cess split is wrong unless the page itself "
+            "prints it. Return cess_amount only when a line labelled Cess prints a non-zero "
+            "amount; a GST rate column showing 40.00 is not a cess."
+        ),
+        (
             "Do not call a base/taxable value ex-showroom unless the document explicitly "
             "labels it ex-showroom; this schema intentionally uses neutral commercial names."
         ),
