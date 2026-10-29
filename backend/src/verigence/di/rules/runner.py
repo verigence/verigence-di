@@ -246,6 +246,29 @@ async def _load_normalizer_configs(
     return result
 
 
+# Dates that are years old by nature (product owner 2026-10-29, calibration):
+# a date of birth, a vehicle's or a GST registration, a PAN / Aadhaar / GST
+# certificate's issue date. 0042 attached date_plausible_range (3 years back
+# at most) to every DATE field, so every one of these failed and forced a
+# review -- false findings, not misreads. The "not in the future" check stays.
+NOT_RECENT_DATE_FIELDS = frozenset({
+    "date_of_birth",
+    "registration_date",
+    "vehicle_registration_date",
+    "issue_date",
+    "certificate_issue_date",
+    "gst_certificate_issue_date",
+    "gst_date_of_liability",
+    "gst_valid_from",
+})
+_RECENT_DATE_RULE = "date_plausible_range"
+
+
+def applies_to_field(rule_key: str, field_key: str | None) -> bool:
+    """Whether a validator configured on a field is run for it."""
+    return not (rule_key == _RECENT_DATE_RULE and field_key in NOT_RECENT_DATE_FIELDS)
+
+
 async def _load_validator_configs(
     session: AsyncSession,
     profile_id: uuid.UUID,
@@ -259,12 +282,15 @@ async def _load_validator_configs(
                     pfv.rule_key,
                     pfv.parameters,
                     pfv.severity,
-                    vrc.implementation_key
+                    vrc.implementation_key,
+                    cf.field_key
                 FROM docintel.profile_field_validators pfv
                 JOIN docintel.validation_rule_catalog vrc
                   ON vrc.rule_key = pfv.rule_key AND vrc.status = 'ACTIVE'
                 JOIN docintel.extraction_profile_fields epf
                   ON epf.profile_field_id = pfv.profile_field_id
+                LEFT JOIN docintel.canonical_fields cf
+                  ON cf.canonical_field_id = epf.canonical_field_id
                 WHERE epf.profile_id = :pid
                   AND epf.enabled = true
                 ORDER BY pfv.profile_field_id, pfv.sequence_no
@@ -275,6 +301,8 @@ async def _load_validator_configs(
 
     result: dict[uuid.UUID, list[dict[str, Any]]] = {}
     for row in rows:
+        if not applies_to_field(str(row["rule_key"]), row.get("field_key")):
+            continue
         fid = uuid.UUID(str(row["profile_field_id"]))
         result.setdefault(fid, []).append({
             "rule_key": row["rule_key"],
