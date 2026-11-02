@@ -86,6 +86,19 @@ def trusted_single_candidate(mode: str, candidate_keys: list[str]) -> str | None
     return candidate_keys[0]
 
 
+def classifier_candidates(
+    rows: list[Any],
+) -> tuple[list[tuple[str, str]], dict[str, str | None]]:
+    """The (key, display name) candidates in the loaded order, and each key's
+    definition (document_types.description) for the prompt; the first row of
+    a key gives its definition."""
+    candidates = [(str(r["document_type_key"]), str(r["display_name"])) for r in rows]
+    definitions: dict[str, str | None] = {}
+    for r in rows:
+        definitions.setdefault(str(r["document_type_key"]), r.get("description"))
+    return candidates, definitions
+
+
 def _worker_id() -> str:
     try:
         host = socket.gethostname()
@@ -445,7 +458,7 @@ class CaptureV2ClassificationWorker:
                 await session.execute(
                     text(
                         """
-                        SELECT dt.document_type_key, dt.display_name
+                        SELECT dt.document_type_key, dt.display_name, dt.description
                         FROM docintel.document_types dt
                         JOIN docintel.tenant_document_types tdt
                           ON tdt.document_type_id=dt.document_type_id
@@ -485,12 +498,12 @@ class CaptureV2ClassificationWorker:
             )
             log.info("capture_v2_classification_trusted", document_type_key=trusted)
         else:
+            choices, definitions = classifier_candidates(list(candidates))
             result = await classify_document_v2(
                 document_bytes=document_bytes,
                 mime_type=validation.detected_mime or detected_mime,
-                candidates=[
-                    (r["document_type_key"], r["display_name"]) for r in candidates
-                ],
+                candidates=choices,
+                definitions=definitions,
             )
         accepted = (
             result.document_type_key

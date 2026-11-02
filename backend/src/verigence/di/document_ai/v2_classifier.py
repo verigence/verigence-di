@@ -16,6 +16,7 @@ import io
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -168,15 +169,49 @@ def _with_invoice_fallback(candidates: list[tuple[str, str]]) -> list[tuple[str,
     return candidates
 
 
-def _candidate_line(key: str, label: str) -> str:
+# A definition is document_types.description: configuration text, kept to one
+# line and bounded so a long tenant description cannot crowd out the page.
+DEFINITION_MAX_CHARS = 600
+
+
+def _definition_text(definition: str | None) -> str | None:
+    if definition is None:
+        return None
+    text = " ".join(str(definition).split())
+    return text[:DEFINITION_MAX_CHARS] or None
+
+
+def _candidate_line(key: str, label: str, definition: str | None = None) -> str:
     semantic_hint = INVOICE_CLASSIFICATION_HINTS.get(key)
+    defined = _definition_text(definition)
+    if defined is None:
+        if semantic_hint is None:
+            return f"- {key}: {label}"
+        return f"- {key}: {label}. Invoice discriminator: {semantic_hint}."
+    line = f"- {key}: {label} — {defined}"
     if semantic_hint is None:
-        return f"- {key}: {label}"
-    return f"- {key}: {label}. Invoice discriminator: {semantic_hint}."
+        return line
+    separator = "" if line.endswith(".") else "."
+    return f"{line}{separator} Invoice discriminator: {semantic_hint}."
 
 
-def _prompt(candidates: list[tuple[str, str]]) -> str:
-    choices = "\n".join(_candidate_line(key, label) for key, label in candidates)
+def _prompt(
+    candidates: list[tuple[str, str]],
+    definitions: Mapping[str, str | None] | None = None,
+) -> str:
+    """The classification prompt. ``definitions`` maps a candidate key to what
+    that page is (document_types.description); a candidate without one is
+    shown by key and display name only, as before."""
+    known = definitions or {}
+    lines = [_candidate_line(key, label, known.get(key)) for key, label in candidates]
+    choices = "\n".join(lines)
+    by_definition = (
+        "Where a candidate has a definition (after the dash), decide by what the page "
+        "is and what it contains, as that definition describes, not by its printed "
+        "title alone.\n\n"
+        if any(_definition_text(known.get(key)) for key, _ in candidates)
+        else ""
+    )
     return (
         "Classify the uploaded automobile-dealership audit document. "
         "Choose exactly one of the candidate document types below, or UNKNOWN if the "
@@ -188,6 +223,7 @@ def _prompt(candidates: list[tuple[str, str]]) -> str:
         "the document is clearly an invoice but none of the specific invoice candidates "
         "can be established reliably. This is one classification call; do not request a "
         "separate invoice subtype pass.\n\n"
+        f"{by_definition}"
         f"Candidates:\n{choices}\n- UNKNOWN: none of the candidates\n\n"
         "Return ONLY JSON in this form: "
         '{"documentTypeKey":"<candidate key or UNKNOWN>","confidence":<0-100 integer>}. '
@@ -200,6 +236,7 @@ async def classify_document_v2(
     document_bytes: bytes,
     mime_type: str,
     candidates: list[tuple[str, str]],
+    definitions: Mapping[str, str | None] | None = None,
 ) -> V2ClassificationResult:
     if not candidates:
         raise V2ClassificationError(
@@ -230,7 +267,7 @@ async def classify_document_v2(
                             "data": base64.b64encode(payload_bytes).decode("ascii"),
                         }
                     },
-                    {"text": _prompt(effective_candidates)},
+                    {"text": _prompt(effective_candidates, definitions)},
                 ]
             }
         ],
