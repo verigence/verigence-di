@@ -9,8 +9,10 @@ as a customer ledger).
 
 Each definition says what the page is and how it differs from its neighbour.
 Migration 0058 writes these onto the GLOBAL rows (owner_tenant_id IS NULL)
-that exist; tests/test_document_type_definitions.py pins the migration's
-snapshot to this constant. A change here needs a new migration.
+that exist; 0059 adds form_21 and delivery_receipt with theirs and rewrites
+supporting_document's. tests/test_document_type_definitions.py pins the
+migrations' snapshots (0058 updated by 0059) to this constant. A change here
+needs a new migration.
 """
 from __future__ import annotations
 
@@ -53,10 +55,13 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "date, the original invoice reference, VIN, taxable value, GST and total. It reduces or "
         "reverses an amount already invoiced; it is not a new sale invoice."
     ),
+    # 0059: a Form 21 and a delivery receipt have their own types now; they
+    # fall here only when those types are not among the candidates.
     "supporting_document": (
-        "Any page that is none of the other candidates, e.g. a Form 21 (Sale Certificate, "
-        "\"See Rule 47\"), a New Vehicle Delivery Receipt (vehicle handed over, no amount), an "
-        "email or approval note printout, or a covering letter."
+        "Any page that is none of the other candidates, e.g. an email or approval note printout "
+        "or a covering letter. A Form 21 (Sale Certificate, \"See Rule 47\") is form_21 and a New "
+        "Vehicle Delivery Receipt (vehicle handed over, no amount) is delivery_receipt when those "
+        "are candidates; otherwise they are supporting_document."
     ),
     "booking_form": (
         "The dealer's vehicle booking (order) form filled in at booking, printed or handwritten: "
@@ -139,5 +144,20 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "A document for a value-added service sold with the new vehicle, other than extended "
         "warranty or RSA, e.g. a service package certificate, protection plan or coating: title, "
         "issuer, reference number, date, customer and the service amount."
+    ),
+    # Added by migration 0059 with their global rows.
+    "form_21": (
+        "The RTO Form 21 Sale Certificate (\"FORM 21, See Rule 47(a) and (d)\", or titled only "
+        "Sale(s) Certificate) a dealer issues to register the vehicle: delivery to the buyer on "
+        "a date, the buyer's name and address, any financier (hypothecation), maker, model, "
+        "chassis and engine numbers, colour, month/year of manufacture. It may print the "
+        "invoice number but has no prices, tax or total."
+    ),
+    "delivery_receipt": (
+        "The customer's acknowledgement of taking delivery of the new vehicle, titled e.g. New "
+        "Vehicle Delivery Receipt or Delivery Note: receipt or note number, delivery date, "
+        "customer, model, chassis and engine numbers and any financier. It records the vehicle "
+        "handed over and no amount: not a money receipt, not the dealer's delivery order (DO) "
+        "cover sheet listing attached documents, not a gate pass."
     ),
 }

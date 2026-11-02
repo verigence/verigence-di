@@ -1,9 +1,10 @@
-"""Migration 0058 and the V2 classifier's candidate definitions.
+"""Migrations 0058/0059 and the V2 classifier's candidate definitions.
 
 The classifier shows each candidate as ``- key: display name — definition``
-(docintel.document_types.description). These tests pin the migration's
-definition snapshot to GLOBAL_DOCUMENT_TYPE_DEFINITIONS, the resulting DB
-state, the candidate line format and the worker's loading of definitions.
+(docintel.document_types.description). These tests pin the migrations'
+definition snapshots (0058's, updated by 0059's) to
+GLOBAL_DOCUMENT_TYPE_DEFINITIONS, the resulting DB state, the candidate line
+format and the worker's loading of definitions.
 """
 from __future__ import annotations
 
@@ -31,12 +32,15 @@ _LEDGER = GLOBAL_DOCUMENT_TYPE_DEFINITIONS["customer_ledger"]
 _COST_SHEET = GLOBAL_DOCUMENT_TYPE_DEFINITIONS["cost_sheet"]
 
 
-def _migration() -> ModuleType:
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "alembic" / "versions" / "0058_document_type_definitions.py"
-    )
-    spec = importlib.util.spec_from_file_location("mig_0058", path)
+_MIGRATIONS = {
+    "0058": "0058_document_type_definitions.py",
+    "0059": "0059_form_21_and_delivery_receipt_types.py",
+}
+
+
+def _migration(revision: str = "0058") -> ModuleType:
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / _MIGRATIONS[revision]
+    spec = importlib.util.spec_from_file_location(f"mig_{revision}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -45,9 +49,19 @@ def _migration() -> ModuleType:
 
 @pytest.mark.no_docker
 def test_migration_definition_snapshot_equals_the_constant() -> None:
-    snapshot = _migration()._DEFINITIONS
+    # What the rows hold after head: 0058's definitions, then 0059's over them.
+    snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS}
     assert list(snapshot) == list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)
     assert snapshot == GLOBAL_DOCUMENT_TYPE_DEFINITIONS
+
+
+@pytest.mark.no_docker
+def test_0059_adds_the_two_types_and_rewrites_only_supporting_document() -> None:
+    old, new = _migration("0058")._DEFINITIONS, _migration("0059")._DEFINITIONS
+    assert set(new) == {"form_21", "delivery_receipt", "supporting_document"}
+    assert "form_21" not in old and "delivery_receipt" not in old
+    assert new["supporting_document"] != old["supporting_document"]
+    assert {key for key, _, _ in _migration("0059")._NEW_DOCUMENT_TYPES} == {"form_21", "delivery_receipt"}
 
 
 @pytest.mark.no_docker
@@ -72,7 +86,15 @@ def test_neighbour_definitions_say_how_they_differ() -> None:
         assert "Form 21" in defs[invoice]
     for page in ("Form 21", "New Vehicle Delivery Receipt", "email", "covering letter"):
         assert page in defs["supporting_document"]
+    # ... and sends those two to their own types when they are candidates.
+    assert "is form_21" in defs["supporting_document"]
+    assert "is delivery_receipt" in defs["supporting_document"]
     assert "Rule 53" in defs["credit_note"]
+    # The two new types say how they differ from what they were filed as.
+    assert "Rule 47" in defs["form_21"] and "no prices" in defs["form_21"]
+    assert "Sale(s) Certificate" in defs["form_21"]
+    for unlike in ("no amount", "not a money receipt", "delivery order (DO)", "gate pass"):
+        assert unlike in defs["delivery_receipt"]
 
 
 @pytest.mark.no_docker
@@ -196,7 +218,8 @@ async def test_global_rows_carry_the_definitions(db_session: AsyncSession) -> No
         "SELECT document_type_key, description FROM docintel.document_types "
         "WHERE owner_tenant_id IS NULL AND document_type_key = ANY(:keys)"
     ), {"keys": list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)})).all())
-    assert {"customer_ledger", "cost_sheet", "supporting_document", "credit_note"} <= rows.keys()
+    assert {"customer_ledger", "cost_sheet", "supporting_document", "credit_note",
+            "form_21", "delivery_receipt"} <= rows.keys()
     for key, description in rows.items():
         assert description == GLOBAL_DOCUMENT_TYPE_DEFINITIONS[key], key
 

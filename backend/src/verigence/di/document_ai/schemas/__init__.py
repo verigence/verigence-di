@@ -27,6 +27,8 @@ from verigence.di.document_ai.schemas.customer_ledger import CUSTOMER_LEDGER_SCH
 from verigence.di.document_ai.schemas.dealer_receipt import DEALER_RECEIPT_SCHEMA
 from verigence.di.document_ai.schemas.debit_note import DEBIT_NOTE_SCHEMA
 from verigence.di.document_ai.schemas.delivery_order import DELIVERY_ORDER_SCHEMA
+from verigence.di.document_ai.schemas.delivery_receipt import DELIVERY_RECEIPT_SCHEMA
+from verigence.di.document_ai.schemas.form_21 import FORM_21_SCHEMA
 from verigence.di.document_ai.schemas.gate_pass import GATE_PASS_SCHEMA
 from verigence.di.document_ai.schemas.gst_certificate import GST_CERTIFICATE_SCHEMA
 from verigence.di.document_ai.schemas.gst_declaration import GST_DECLARATION_SCHEMA
@@ -119,6 +121,11 @@ SCHEMA_REGISTRY: dict[str, SchemaDefinition] = {
     "cost_sheet": COST_SHEET_SCHEMA,
     "value_added_service_document": VALUE_ADDED_SERVICE_SCHEMA,
     "no_dues_certificate": NO_DUES_CERTIFICATE_SCHEMA,
+    # Migration 0059: pages that had no type of their own and were read as the
+    # nearest wrong one -- a Form 21 as a vehicle invoice, a New Vehicle
+    # Delivery Receipt as a money receipt with no amount.
+    "form_21": FORM_21_SCHEMA,
+    "delivery_receipt": DELIVERY_RECEIPT_SCHEMA,
 }
 
 
