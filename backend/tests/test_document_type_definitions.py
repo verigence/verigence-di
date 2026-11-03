@@ -35,6 +35,7 @@ _COST_SHEET = GLOBAL_DOCUMENT_TYPE_DEFINITIONS["cost_sheet"]
 _MIGRATIONS = {
     "0058": "0058_document_type_definitions.py",
     "0059": "0059_form_21_and_delivery_receipt_types.py",
+    "0060": "0060_booking_form_is_not_the_offer_letter.py",
 }
 
 
@@ -49,8 +50,9 @@ def _migration(revision: str = "0058") -> ModuleType:
 
 @pytest.mark.no_docker
 def test_migration_definition_snapshot_equals_the_constant() -> None:
-    # What the rows hold after head: 0058's definitions, then 0059's over them.
-    snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS}
+    # What the rows hold after head: 0058's definitions, then 0059's and 0060's over them.
+    snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS,
+                **_migration("0060")._DEFINITIONS}
     assert list(snapshot) == list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)
     assert snapshot == GLOBAL_DOCUMENT_TYPE_DEFINITIONS
 
@@ -79,6 +81,8 @@ def test_neighbour_definitions_say_how_they_differ() -> None:
     assert "customer_ledger" in defs["cost_sheet"] and "payments" in defs["cost_sheet"]
     for title in ("Account Statement", "Cost Sheet", "NDC", "Offer Letter / Payment Details"):
         assert title in _LEDGER.replace("Account(s)", "Account")
+    # 2026-11-03: Shivnath's Offer Letter prints a booking amount and was filed as booking_form.
+    assert "Offer Letter / Payment Details" in defs["booking_form"] and "customer_ledger" in defs["booking_form"]
     for receipt in ("payment_receipt", "dealer_receipt"):
         assert "New Vehicle Delivery Receipt" in defs[receipt]
     for invoice in ("customer_invoice_dms", "tax_invoice_tally", "tax_invoice_dms",
