@@ -75,5 +75,17 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         "line_items carries only the particulars (charges), the payments received and the discount rows of the main table. The Discount Details box goes to discount_details.",
         "net_value is the amount the customer finally pays: the figure against Net Value, Net Receivable (A+B) or Final Price. Gross Value, Total Cost and Total (A) are not net_value.",
         "Leave every statement field empty on a DMS or Tally ledger export; an empty box on the form is empty, not zero.",
+        "OFFER LETTER / PAYMENT DETAILS FORMS (a numbered grid with the charges on the left - Vehicle Price, Scheme, "
+        "Ex Showroom (1-2), TCS, Handling Charge, Insurance Amount, Temporary Registration, RTO, RTO Choice No., RSA, "
+        "Extended Warranty, 3M, Accessories, Permit, Others, Onroad Price, Balance Payment - and the deductions and "
+        "payments on the right - Exchange Vehicle Amt, Exchange/Loyalty Bonus, Corporate Discount, Additional Discount, "
+        "Booking Amount, Finance Amount, Sub Total, Downpayment, 1st EMI, Finance Fees, Misc Payment, Final Payment - "
+        "then a table of dated cash receipts): put every grid row that has an amount written against it in line_items, "
+        "particulars_raw = the printed row label followed by any words handwritten on that row (for example "
+        "'ACCESSORIES Free'), with the amount as debit_amount for a left-hand row and as credit_amount for a right-hand "
+        "row. Put each row of the receipt table in line_items too: entry_date = its date, voucher_number = its cash "
+        "receipt number, particulars_raw = 'RECEIPT ' followed by the receipt number, credit_amount = its amount, "
+        "voucher_type = its Cash/DD/RTGS mode. net_value is the amount against Onroad Price; total_receipts is the "
+        "amount against Final Payment; balance_amount is the amount against Balance Payment. Skip rows with no amount.",
     ],
 )
