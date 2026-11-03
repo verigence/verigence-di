@@ -87,5 +87,10 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         "receipt number, particulars_raw = 'RECEIPT ' followed by the receipt number, credit_amount = its amount, "
         "voucher_type = its Cash/DD/RTGS mode. net_value is the amount against Onroad Price; total_receipts is the "
         "amount against Final Payment; balance_amount is the amount against Balance Payment. Skip rows with no amount.",
+        "On that grid a printed row label struck out with another item handwritten over or beside it is that "
+        "handwritten item: particulars_raw = the handwritten item only (for example 'RSA' struck out and 'Fastag' "
+        "written -> 'FASTAG'; 'OTHERS' with 'FT' written -> 'OTHERS FASTAG'). An amount handwritten beside the "
+        "words of a row ('Fastag 600') is that row's amount (debit_amount 600), never part of particulars_raw and "
+        "never left at 0.",
     ],
 )

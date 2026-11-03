@@ -64,10 +64,10 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "are candidates; otherwise they are supporting_document."
     ),
     "booking_form": (
-        "The dealer's vehicle booking (order) form filled in at booking, printed or handwritten: "
-        "booking number and date, customer and contact details, model, variant and colour, the "
-        "price build-up with discounts and exchange, the booking amount paid and expected "
-        "delivery."
+        "The dealer's vehicle booking (order) form filled in at booking: booking number and date, "
+        "customer details, model, variant and colour, price build-up, booking amount paid, expected "
+        "delivery. Not an Offer Letter / Payment Details sheet (charges up to Onroad Price, Finance "
+        "Amount, Final Payment, cash receipts table), which is customer_ledger."
     ),
     "insurance_cover": (
         "A motor insurance policy or cover note for the vehicle: insurer, policy number and type, "
