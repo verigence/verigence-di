@@ -81,3 +81,35 @@ def test_scalar_field_values_are_unaffected() -> None:
     by_key = {r.field_key: r for r in results}
     assert by_key["invoice_number"].raw_value == "C1R27B00000604"
     assert by_key["grand_total_amount"].raw_value == "61308.0"
+
+
+def test_a_bare_array_value_is_kept_not_dropped() -> None:
+    """Live 2026-11-05: an NDC's rows came back as a bare array for line_items
+    (not {"value": [...]}) and were stored as not found on every read."""
+    rows = [{"particulars_raw": "Vehicle cost", "debit_amount": 2950000},
+            {"particulars_raw": "FINANCE D/O 8537", "credit_amount": 2563740}]
+    raw_text = json.dumps({"line_items": rows, "total_cost": {"value": 3241050, "confidence": "high"}})
+
+    results = _parse_response(
+        raw_text, _schema_stub(), [ExtractionField(field_key="line_items"), ExtractionField(field_key="total_cost")]
+    )
+
+    by_key = {r.field_key: r for r in results}
+    assert by_key["line_items"].found_status == FoundStatus.FOUND
+    assert by_key["line_items"].normalized_value == rows and json.loads(by_key["line_items"].raw_value) == rows
+    assert by_key["total_cost"].normalized_value == 3241050
+
+
+def test_a_bare_scalar_is_kept_and_a_bare_boolean_or_null_is_not() -> None:
+    raw_text = json.dumps({"invoice_number": "INV27C001593", "flag": True, "missing": None})
+    results = _parse_response(
+        raw_text, _schema_stub(),
+        [ExtractionField(field_key="invoice_number"), ExtractionField(field_key="flag"),
+         ExtractionField(field_key="missing")],
+    )
+    by_key = {r.field_key: r for r in results}
+    assert by_key["invoice_number"].found_status == FoundStatus.FOUND
+    assert by_key["invoice_number"].normalized_value == "INV27C001593"
+    assert by_key["flag"].found_status == FoundStatus.NOT_FOUND
+    assert by_key["missing"].found_status == FoundStatus.NOT_FOUND
+
