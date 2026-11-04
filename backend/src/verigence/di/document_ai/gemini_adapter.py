@@ -857,6 +857,14 @@ def _parse_response(
         key = db_field.field_key
         field_data = data.get(key)
 
+        # A value returned bare, not wrapped as {"value": ...}: kept as found, never
+        # dropped (2026-11-05). Live: the rows of 57 dealer account statements (NDCs)
+        # came back as a bare array for line_items and were stored as not found,
+        # every time they were read again, while their totals (wrapped) were kept.
+        if isinstance(field_data, (list, str, int, float)) and not isinstance(field_data, bool):
+            logger.info("di_field_bare_value", field_key=key, value_type=type(field_data).__name__)
+            field_data = {"value": field_data, "confidence": "medium"}
+
         if field_data is None or not isinstance(field_data, dict):
             results.append(_not_found_result(key))
             continue
