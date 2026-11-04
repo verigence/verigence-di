@@ -74,6 +74,23 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         "exactly as written, never calculated, and never copy one of them into another. Do not put those summary rows, or the rows of the Discount Details box, in line_items; "
         "line_items carries only the particulars (charges), the payments received and the discount rows of the main table. The Discount Details box goes to discount_details.",
         "net_value is the amount the customer finally pays: the figure against Net Value, Net Receivable (A+B) or Final Price. Gross Value, Total Cost and Total (A) are not net_value.",
+        "VEHICLE ACCOUNTS STATEMENT FORMS IN TWO COLUMNS (titled Final Vehicle Accounts Statement or Vehicle Account "
+        "Statement: a table with 'Vehicle a/c details' and a Dr. Amount column on the left - Vehicle cost, TCS, "
+        "Insurance amount, Registration, Permit, Accessories, Fastag charges, Shield warranty, RSA charges, VLTD, "
+        "MMFSL Cheque, Workshop billing amount, Home dly. charges, Misc (if any) - and 'Payment a/c details' with a "
+        "Date and a Cr. Amount column on the right - Finance D/O, MR No. rows, Corporate Discount, Scheme Discount, "
+        "Exchange/Loyalty, Exchange Value, Other Discount (if any) - then Total Cost, Refund, Total Receipt and Due "
+        "under it): every left row with an amount written against it goes in line_items with particulars_raw = its "
+        "printed label (a label struck out with another item written over it is the written item, for example 'RSA "
+        "Charges' struck out and 'Charges' or 'Accessories' written) and the amount as debit_amount. Every right row "
+        "with an amount goes in line_items as credit_amount: the finance row as particulars_raw 'FINANCE D/O' followed "
+        "by the number written on it, entry_date its date; each MR row as 'MR NO' followed by the receipt number "
+        "written on it, voucher_number = that number, entry_date its date; the discount and exchange rows by their "
+        "printed label followed by any word written on the row (for example 'EXCHANGE LOYALTY BONUS'). total_cost is "
+        "the amount against Total Cost, total_receipts the amount against Total Receipt, balance_amount the amount "
+        "against Refund or Due as written. Read the amounts exactly as written, ignoring a trailing '/' or '/-'.",
+        "Whenever the form prints amounts against its rows, line_items must carry those rows: never return only the "
+        "totals of a form whose rows have amounts written against them.",
         "Leave every statement field empty on a DMS or Tally ledger export; an empty box on the form is empty, not zero.",
         "OFFER LETTER / PAYMENT DETAILS FORMS (a numbered grid with the charges on the left - Vehicle Price, Scheme, "
         "Ex Showroom (1-2), TCS, Handling Charge, Insurance Amount, Temporary Registration, RTO, RTO Choice No., RSA, "
