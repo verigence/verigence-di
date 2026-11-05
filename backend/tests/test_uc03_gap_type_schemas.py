@@ -29,6 +29,15 @@ def _profiles() -> dict:
     return module._PROFILES
 
 
+def _republished_cost_sheet() -> tuple:
+    path = _MIGRATION.parent / "0061_cost_sheet_rows.py"
+    spec = importlib.util.spec_from_file_location("di_migration_0061", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module._FIELDS
+
+
 @pytest.mark.parametrize("document_type_key", _TYPES)
 def test_gap_type_has_a_dedicated_schema(document_type_key: str) -> None:
     schema = get_schema(document_type_key)
@@ -41,6 +50,9 @@ def test_gap_type_has_a_dedicated_schema(document_type_key: str) -> None:
 def test_schema_matches_the_published_profile(document_type_key: str) -> None:
     _, _, profile_fields = _profiles()[document_type_key]
     expected = {key: required for key, required, *_ in profile_fields}
+    if document_type_key == "cost_sheet":
+        # 0061 republished it with its rows and title (cost_sheet schema 1.1).
+        expected = {key: required for key, _, _, required, _ in _republished_cost_sheet()}
     schema = get_schema(document_type_key)
     assert {f.key: f.required for f in schema.fields} == expected
 
