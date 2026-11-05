@@ -109,5 +109,12 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
         "written -> 'FASTAG'; 'OTHERS' with 'FT' written -> 'OTHERS FASTAG'). An amount handwritten beside the "
         "words of a row ('Fastag 600') is that row's amount (debit_amount 600), never part of particulars_raw and "
         "never left at 0.",
+        "CHECK YOUR READING AGAINST THE FORM'S OWN TOTALS before you answer (the dealer's form adds up its own rows): "
+        "on a dealer account statement form, the charges you put in line_items should add up to the printed Total "
+        "Cost / Total (A) / Gross Value / Onroad Price, and the payments and discounts to the printed Total "
+        "Receipt(s) / Final Payment. When they do not, look at the page again for a row you missed, a row you read "
+        "twice, an amount read in the wrong column or a digit misread, and correct those rows. Never change, "
+        "invent or compute a printed total to make them agree: if the rows as written still do not add up, return "
+        "them as written.",
     ],
 )
