@@ -36,6 +36,7 @@ _MIGRATIONS = {
     "0058": "0058_document_type_definitions.py",
     "0059": "0059_form_21_and_delivery_receipt_types.py",
     "0060": "0060_booking_form_is_not_the_offer_letter.py",
+    "0062": "0062_transaction_regularization_form_is_supporting.py",
 }
 
 
@@ -52,7 +53,7 @@ def _migration(revision: str = "0058") -> ModuleType:
 def test_migration_definition_snapshot_equals_the_constant() -> None:
     # What the rows hold after head: 0058's definitions, then 0059's and 0060's over them.
     snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS,
-                **_migration("0060")._DEFINITIONS}
+                **_migration("0060")._DEFINITIONS, **_migration("0062")._DEFINITIONS}
     assert list(snapshot) == list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)
     assert snapshot == GLOBAL_DOCUMENT_TYPE_DEFINITIONS
 
@@ -93,6 +94,9 @@ def test_neighbour_definitions_say_how_they_differ() -> None:
     # ... and sends those two to their own types when they are candidates.
     assert "is form_21" in defs["supporting_document"]
     assert "is delivery_receipt" in defs["supporting_document"]
+    # 2026-11-05: the dealers' Transaction Regularization Form was classified cost_sheet.
+    assert "Transaction Regularization Form" in defs["cost_sheet"] and "supporting_document" in defs["cost_sheet"]
+    assert "Transaction Regularization Form" in defs["supporting_document"]
     assert "Rule 53" in defs["credit_note"]
     # The two new types say how they differ from what they were filed as.
     assert "Rule 47" in defs["form_21"] and "no prices" in defs["form_21"]

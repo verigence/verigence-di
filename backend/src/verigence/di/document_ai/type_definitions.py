@@ -10,7 +10,7 @@ as a customer ledger).
 Each definition says what the page is and how it differs from its neighbour.
 Migration 0058 writes these onto the GLOBAL rows (owner_tenant_id IS NULL)
 that exist; 0059 adds form_21 and delivery_receipt with theirs and rewrites
-supporting_document's. tests/test_document_type_definitions.py pins the
+supporting_document's; 0060 and 0062 rewrite booking_form's, cost_sheet's and supporting_document's. tests/test_document_type_definitions.py pins the
 migrations' snapshots (0058 updated by 0059) to this constant. A change here
 needs a new migration.
 """
@@ -40,7 +40,8 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "A dealer's price sheet for one vehicle: ex-showroom, RTO, insurance, accessories and "
         "discounts up to an on-road total. When customer_ledger is also a candidate, cost_sheet "
         "is only a bare price quotation with no payments; a deal sheet listing charges, "
-        "discounts and payments received is customer_ledger, whatever its title."
+        "discounts and payments received is customer_ledger, whatever its title. A Transaction "
+        "Regularization Form (internal margin and discount sanction) is supporting_document."
     ),
     "payment_receipt": _MONEY_RECEIPT,
     "dealer_receipt": _MONEY_RECEIPT,
@@ -58,8 +59,8 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
     # 0059: a Form 21 and a delivery receipt have their own types now; they
     # fall here only when those types are not among the candidates.
     "supporting_document": (
-        "Any page that is none of the other candidates, e.g. an email or approval note printout "
-        "or a covering letter. A Form 21 (Sale Certificate, \"See Rule 47\") is form_21 and a New "
+        "Any page that is none of the other candidates, e.g. an email or approval note printout, "
+        "a Transaction Regularization Form or a covering letter. A Form 21 (Sale Certificate, \"See Rule 47\") is form_21 and a New "
         "Vehicle Delivery Receipt (vehicle handed over, no amount) is delivery_receipt when those "
         "are candidates; otherwise they are supporting_document."
     ),
