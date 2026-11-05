@@ -41,7 +41,8 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "discounts up to an on-road total. When customer_ledger is also a candidate, cost_sheet "
         "is only a bare price quotation with no payments; a deal sheet listing charges, "
         "discounts and payments received is customer_ledger, whatever its title. A Transaction "
-        "Regularization Form (internal margin and discount sanction) is supporting_document."
+        "Regularization Form or a discount approval sheet (internal discount sanction) is "
+        "supporting_document."
     ),
     "payment_receipt": _MONEY_RECEIPT,
     "dealer_receipt": _MONEY_RECEIPT,

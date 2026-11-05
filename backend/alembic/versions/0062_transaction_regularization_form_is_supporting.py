@@ -9,9 +9,10 @@ The dealers' Transaction Regularization Form -- their internal margin and
 discount sanction (purchase price, holding cost, manufacturer support, sale
 price, discount offered, net profit; the approved scheme, cash discount and
 extras written in by hand) -- was classified cost_sheet on the live tenant
-(27 pages, Aditya and Utkal). It prints no on-road price and no payments; the
-product owner (2026-11-05) keeps it as a supporting document, never read for
-figures. cost_sheet's definition now says so, and supporting_document's names it.
+(27 pages, Aditya and Utkal), and so were Utkal's discount approval sheets
+("Approval Sheet", "Vehicle Extra Discount Approval Form", 20 pages). They
+print no on-road price and no payments; the product owner (2026-11-05) keeps
+them as supporting (additional) documents, never read for figures. cost_sheet's definition now says so, and supporting_document's names it.
 
 _DEFINITIONS is a snapshot (a migration must not import app code);
 tests/test_document_type_definitions.py pins it, over 0058's, 0059's and
@@ -34,7 +35,8 @@ _DEFINITIONS: dict[str, str] = {
         'discounts up to an on-road total. When customer_ledger is also a candidate, cost_sheet '
         'is only a bare price quotation with no payments; a deal sheet listing charges, discounts '
         'and payments received is customer_ledger, whatever its title. A Transaction '
-        'Regularization Form (internal margin and discount sanction) is supporting_document.'
+        'Regularization Form or a discount approval sheet (internal discount sanction) is '
+        'supporting_document.'
     ),
     'supporting_document': (
         'Any page that is none of the other candidates, e.g. an email or approval note printout, '
