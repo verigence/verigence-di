@@ -62,3 +62,15 @@ async def test_the_published_profile_carries_the_rows_and_the_title(db_session: 
         """
     ))).scalars())
     assert keys == {f.key for f in COST_SHEET_SCHEMA.fields}
+
+
+@pytest.mark.no_docker
+def test_the_reader_checks_its_rows_against_the_printed_totals_and_never_changes_a_total() -> None:
+    """Product owner 2026-11-05: the NDC's and the cost sheet's rows add up to
+    their printed totals; the reading is checked against them, never fitted."""
+    from verigence.di.document_ai.schemas import get_schema
+
+    for key in ("customer_ledger", "cost_sheet"):
+        notes = " ".join(get_schema(key).prompt_notes)
+        assert "CHECK YOUR READING AGAINST" in notes, key
+        assert "Never change" in notes and "return them as written" in notes, key

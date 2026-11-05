@@ -59,6 +59,11 @@ COST_SHEET_SCHEMA = SchemaDefinition(
         "extended warranty, accessories, FASTag, RSA, handling, others and each discount - exactly as printed, "
         "one row per printed row, never added together; a row without an amount is left out. The total / "
         "on-road / net amount row goes only to total_on_road_price.",
+        "CHECK YOUR READING AGAINST THE SHEET'S OWN TOTAL before you answer: the line_items amounts, less the "
+        "deduction rows, should add up to the printed on-road / grand total. When they do not, look at the page "
+        "again for a row you missed, a row read twice or a digit misread, and correct those rows. Never change or "
+        "compute the printed total to make them agree: if the rows as written still do not add up, return them as "
+        "written.",
         "If a field is not printed or is unclear, return null with low confidence.",
     ],
 )
