@@ -348,7 +348,7 @@ class CaptureV2ClassificationWorker:
                         """
                         SELECT u.logical_object_key, u.candidate_document_type_keys,
                                u.requirement_refs_by_document_type_key,
-                               u.classification_mode,
+                               u.classification_mode, u.quality_gate,
                                u.declared_mime_type, u.state,
                                d.original_filename, d.correlation_id
                         FROM docintel.document_capture_v2_uploads u
@@ -404,6 +404,7 @@ class CaptureV2ClassificationWorker:
                 data=document_bytes,
                 declared_mime=row["declared_mime_type"],
                 filename=row["original_filename"],
+                image_rules_advisory=str(row.get("quality_gate") or "ENFORCE") == "UPLOADER_CONFIRMED",
             )
             await update_document_upload_complete(
                 session,

@@ -62,6 +62,10 @@ class V2UploadIntentCommand(BaseModel):
     # TRUST_SINGLE_CANDIDATE: the caller already knows the type (exactly one
     # candidate), so DI skips the paid classification call and uses it.
     classificationMode: Literal["CLASSIFY", "TRUST_SINGLE_CANDIDATE"] = "CLASSIFY"
+    # UPLOADER_CONFIRMED: the person sent this page again after a scan-quality
+    # refusal; its size, blur and contrast scores are recorded, not enforced
+    # (migration 0063).
+    qualityGate: Literal["ENFORCE", "UPLOADER_CONFIRMED"] = "ENFORCE"
     files: list[V2UploadIntentItem] = Field(min_length=1, max_length=20)
 
 
@@ -406,7 +410,7 @@ async def create_capture_upload_intents(
                                     logical_object_key, original_filename, declared_mime_type,
                                     candidate_document_type_keys,
                                     requirement_refs_by_document_type_key,
-                                    classification_mode,
+                                    classification_mode, quality_gate,
                                     state, created_at_utc, updated_at_utc
                                 ) VALUES (
                                     :tenant_id, :document_id, :storage_context_id,
@@ -414,7 +418,7 @@ async def create_capture_upload_intents(
                                     :logical_key, :filename, :content_type,
                                     CAST(:candidate_keys AS jsonb),
                                     CAST(:requirement_refs AS jsonb),
-                                    :classification_mode,
+                                    :classification_mode, :quality_gate,
                                     'RECEIVING', now(), now()
                                 )
                                 """
@@ -434,6 +438,7 @@ async def create_capture_upload_intents(
                                 "candidate_keys": json.dumps(candidate_keys),
                                 "requirement_refs": requirement_refs_json,
                                 "classification_mode": command.classificationMode,
+                                "quality_gate": command.qualityGate,
                             },
                         )
                     else:
@@ -459,6 +464,7 @@ async def create_capture_upload_intents(
                                     SET requirement_refs_by_document_type_key=CAST(:refs AS jsonb),
                                         candidate_document_type_keys=CAST(:candidate_keys AS jsonb),
                                         classification_mode=:classification_mode,
+                                        quality_gate=:quality_gate,
                                         updated_at_utc=now()
                                     WHERE tenant_id=:tenant_id AND document_id=:document_id
                                       AND state='RECEIVING'
@@ -468,6 +474,7 @@ async def create_capture_upload_intents(
                                     "refs": requirement_refs_json,
                                     "candidate_keys": json.dumps(candidate_keys),
                                     "classification_mode": command.classificationMode,
+                                    "quality_gate": command.qualityGate,
                                     "tenant_id": tenantId,
                                     "document_id": existing["document_id"],
                                 },
@@ -549,6 +556,7 @@ async def create_capture_upload_intents(
         actor_type="SERVICE",
         phase=command.phase,
         classification_mode=command.classificationMode,
+        quality_gate=command.qualityGate,
         requested=len(command.files),
         issued=len(intents),
         failed=len(failures),
