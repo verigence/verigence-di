@@ -271,3 +271,50 @@ async def test_multiple_rules_one_fail_is_not_fit() -> None:
     outcomes = {r.rule_key: r.outcome for r in result.quality_results}
     assert outcomes["file_not_empty"] == "PASS"
     assert outcomes["file_size_max"] == "FAIL"
+
+
+# ── UPLOADER_CONFIRMED: the person sent a refused page again (2026-11-06) ─────
+
+def _small_png() -> bytes:
+    import io as _io
+
+    from PIL import Image
+
+    buf = _io.BytesIO()
+    Image.new("L", (300, 200), 255).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+_SIZE_POLICY = [{"rule_key": "di.quality.image_min_dimensions", "enabled": True,
+                 "parameters": {"min_width": 800, "min_height": 600}}]
+_SIZE_CATALOG = [{"rule_key": "di.quality.image_min_dimensions",
+                  "implementation_key": "di.quality.image_min_dimensions"}]
+
+
+@pytest.mark.asyncio
+async def test_a_small_page_is_refused_unless_the_uploader_confirmed_it() -> None:
+    pytest.importorskip("PIL")
+    enforced = await validate_upload(
+        session=_make_session(quality_policy=_SIZE_POLICY, catalog_rows=_SIZE_CATALOG),
+        tenant_id="t1", document_id=uuid.uuid4(), data=_small_png(), declared_mime="image/png", filename="p.png",
+    )
+    assert enforced.upload_status == UploadStatus.NOT_FIT
+    assert enforced.upload_issue_code == "DI_QUALITY_IMAGE_MIN_DIMENSIONS"
+
+    confirmed = await validate_upload(
+        session=_make_session(quality_policy=_SIZE_POLICY, catalog_rows=_SIZE_CATALOG),
+        tenant_id="t1", document_id=uuid.uuid4(), data=_small_png(), declared_mime="image/png", filename="p.png",
+        image_rules_advisory=True,
+    )
+    assert confirmed.upload_status == UploadStatus.FIT
+    # The score is still recorded for tuning.
+    assert [r.outcome for r in confirmed.quality_results] == ["FAIL"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_file_is_refused_even_when_confirmed() -> None:
+    result = await validate_upload(
+        session=AsyncMock(), tenant_id="t1", document_id=uuid.uuid4(), data=b"",
+        declared_mime="application/pdf", filename="empty.pdf", image_rules_advisory=True,
+    )
+    assert result.upload_status == UploadStatus.CORRUPT

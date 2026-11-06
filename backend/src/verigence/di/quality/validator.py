@@ -33,6 +33,15 @@ from verigence.di.quality.rules import QualityRuleResult, _detect_mime, get_rule
 
 logger = structlog.get_logger(__name__)
 
+# The scan-quality rules a person may override by sending the page again
+# (UPLOADER_CONFIRMED): they judge how the picture looks, not whether the
+# file can be read.
+IMAGE_SCAN_RULES = frozenset({
+    "di.quality.image_min_dimensions",
+    "di.quality.image_blur_score",
+    "di.quality.image_contrast",
+})
+
 
 @dataclass
 class ValidatorResult:
@@ -51,8 +60,15 @@ async def validate_upload(
     data: bytes,
     declared_mime: str | None,
     filename: str | None,
+    image_rules_advisory: bool = False,
 ) -> ValidatorResult:
     """Run integrity + quality checks and persist results.
+
+    ``image_rules_advisory`` (capture v2 quality_gate UPLOADER_CONFIRMED,
+    2026-11-06): the person sent this page again after a scan-quality refusal.
+    The size, blur and contrast rules still run and are recorded, but a FAIL
+    of theirs does not make the upload NOT_FIT. Integrity and the other rules
+    (empty file, page count) are enforced as always.
 
     Does NOT commit — caller manages the transaction.
     """
@@ -159,7 +175,7 @@ async def validate_upload(
                     )
 
         quality_results.append(result)
-        if result.outcome == "FAIL":
+        if result.outcome == "FAIL" and not (image_rules_advisory and rule_key in IMAGE_SCAN_RULES):
             has_fail = True
         # One line per rule and page, so thresholds can be tuned from the
         # logs as well as from document_quality_results (2026-10-20).
@@ -167,6 +183,7 @@ async def validate_upload(
             "quality_rule_result",
             rule_key=rule_key,
             outcome=result.outcome,
+            advisory=image_rules_advisory and rule_key in IMAGE_SCAN_RULES,
             document_id=str(document_id),
             **{f"m_{key}": value for key, value in (result.measurement or {}).items()
                if isinstance(value, (int, float, str))},
@@ -183,7 +200,10 @@ async def validate_upload(
     # ── Derive final upload status ────────────────────────────────────────────
     if has_fail:
         # Find first failing rule for the issue code
-        first_fail = next(r for r in quality_results if r.outcome == "FAIL")
+        first_fail = next(
+            r for r in quality_results
+            if r.outcome == "FAIL" and not (image_rules_advisory and r.rule_key in IMAGE_SCAN_RULES)
+        )
         return ValidatorResult(
             upload_status=UploadStatus.NOT_FIT,
             upload_issue_code=first_fail.rule_key.upper().replace(".", "_"),
