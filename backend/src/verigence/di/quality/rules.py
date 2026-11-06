@@ -111,7 +111,14 @@ def _rule_image_min_dimensions(
     rule_key: str,
     params: dict[str, Any],
 ) -> QualityRuleResult:
-    """Reject images below min_width × min_height pixels."""
+    """Reject images below min_width × min_height pixels, in either orientation.
+
+    The minimum is a size, not an orientation: a portrait phone photo or
+    scan (720×1600, an A4 page at 90 dpi: 744×1052) is as large as the same
+    page held landscape, and used to fail only because its width is the
+    short side (2026-11-06: single pages added to a Journey were refused as
+    "too small"). The long side is held to the larger minimum, the short
+    side to the smaller."""
     min_width: int  = int(params.get("min_width",  200))
     min_height: int = int(params.get("min_height", 200))
     applied = {"min_width": min_width, "min_height": min_height}
@@ -120,7 +127,8 @@ def _rule_image_min_dimensions(
         from PIL import Image
         img = Image.open(io.BytesIO(_image_bytes(data)))
         w, h = img.size
-        outcome = "PASS" if w >= min_width and h >= min_height else "FAIL"
+        need_long, need_short = max(min_width, min_height), min(min_width, min_height)
+        outcome = "PASS" if max(w, h) >= need_long and min(w, h) >= need_short else "FAIL"
         msg = None if outcome == "PASS" else f"Image {w}×{h} below minimum {min_width}×{min_height}"
         return QualityRuleResult(
             rule_key=rule_key,
