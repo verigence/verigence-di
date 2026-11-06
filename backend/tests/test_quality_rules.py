@@ -5,6 +5,7 @@ Each test exercises the rule function directly via the REGISTRY.
 """
 from __future__ import annotations
 
+import io
 import struct
 
 import pytest
@@ -170,6 +171,28 @@ def test_image_min_dimensions_pass_1x1_png() -> None:
     r = fn(png, "di.quality.image_min_dimensions", {"min_width": 1, "min_height": 1})
     # PIL present: PASS; PIL absent: SKIP — both acceptable
     assert r.outcome in ("PASS", "SKIP")
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        ((1200, 900), "PASS"),   # landscape, above 800×600
+        ((744, 1052), "PASS"),   # portrait A4 at 90 dpi: as large as 1052×744
+        ((720, 1600), "PASS"),   # portrait phone photo
+        ((799, 599), "FAIL"),    # a thumbnail, either way round
+        ((599, 1600), "FAIL"),   # short side below 600
+        ((1600, 599), "FAIL"),
+        ((790, 700), "FAIL"),    # long side below 800
+    ],
+)
+def test_image_min_dimensions_orientation_independent(size: tuple[int, int], expected: str) -> None:
+    PIL = pytest.importorskip("PIL.Image")
+    buf = io.BytesIO()
+    PIL.new("L", size, 255).save(buf, format="PNG")
+    fn = get_rule("di.quality.image_min_dimensions")
+    assert fn is not None
+    r = fn(buf.getvalue(), "di.quality.image_min_dimensions", {"min_width": 800, "min_height": 600})
+    assert r.outcome == expected, (size, r.measurement)
 
 
 # ── image_blur_score ──────────────────────────────────────────────────────────
