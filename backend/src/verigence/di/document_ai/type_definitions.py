@@ -10,7 +10,8 @@ as a customer ledger).
 Each definition says what the page is and how it differs from its neighbour.
 Migration 0058 writes these onto the GLOBAL rows (owner_tenant_id IS NULL)
 that exist; 0059 adds form_21 and delivery_receipt with theirs and rewrites
-supporting_document's; 0060 and 0062 rewrite booking_form's, cost_sheet's and supporting_document's. tests/test_document_type_definitions.py pins the
+supporting_document's; 0060 and 0062 rewrite booking_form's, cost_sheet's and supporting_document's;
+0064 rewrites gate_pass's and delivery_receipt's. tests/test_document_type_definitions.py pins the
 migrations' snapshots (0058 updated by 0059) to this constant. A change here
 needs a new migration.
 """
@@ -104,8 +105,10 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "condition grading, deductions and the final offer value."
     ),
     "gate_pass": (
-        "The dealer's gate pass letting the vehicle out on delivery: the gate pass or delivery "
-        "date and the car number as printed."
+        "The dealer's gate pass letting the vehicle out on delivery, titled Gate Pass: serial "
+        "number, date and time, customer name and address, model, chassis and engine numbers, "
+        "often a tools and accessories checklist the customer signs for the vehicle received. A "
+        "page titled Gate Pass is gate_pass, never delivery_receipt."
     ),
     "vehicle_rc": (
         "An Indian Vehicle Registration Certificate (RC), paper book or smart card, front or "
@@ -157,9 +160,9 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
     ),
     "delivery_receipt": (
         "The customer's acknowledgement of taking delivery of the new vehicle, titled e.g. New "
-        "Vehicle Delivery Receipt or Delivery Note: receipt or note number, delivery date, "
-        "customer, model, chassis and engine numbers and any financier. It records the vehicle "
-        "handed over and no amount: not a money receipt, not the dealer's delivery order (DO) "
-        "cover sheet listing attached documents, not a gate pass."
+        "Vehicle Delivery Receipt or Delivery Note: its number, delivery date, customer, model, "
+        "chassis and engine numbers, any financier. It has no amount: not a money receipt, not the "
+        "dealer's delivery order (DO) cover sheet. A page titled Gate Pass is the gate pass "
+        "(gate_pass), also when the customer signs it."
     ),
 }
