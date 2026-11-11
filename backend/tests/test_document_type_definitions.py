@@ -37,6 +37,8 @@ _MIGRATIONS = {
     "0059": "0059_form_21_and_delivery_receipt_types.py",
     "0060": "0060_booking_form_is_not_the_offer_letter.py",
     "0062": "0062_transaction_regularization_form_is_supporting.py",
+    "0064": "0064_gate_pass_is_not_a_delivery_receipt.py",
+    "0065": "0065_money_receipt_is_the_dealerships.py",
 }
 
 
@@ -53,7 +55,8 @@ def _migration(revision: str = "0058") -> ModuleType:
 def test_migration_definition_snapshot_equals_the_constant() -> None:
     # What the rows hold after head: 0058's definitions, then 0059's and 0060's over them.
     snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS,
-                **_migration("0060")._DEFINITIONS, **_migration("0062")._DEFINITIONS}
+                **_migration("0060")._DEFINITIONS, **_migration("0062")._DEFINITIONS,
+                **_migration("0064")._DEFINITIONS, **_migration("0065")._DEFINITIONS}
     assert list(snapshot) == list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)
     assert snapshot == GLOBAL_DOCUMENT_TYPE_DEFINITIONS
 
@@ -89,6 +92,12 @@ def test_neighbour_definitions_say_how_they_differ() -> None:
     for invoice in ("customer_invoice_dms", "tax_invoice_tally", "tax_invoice_dms",
                     "tax_invoice", "customer_invoice_dms_v2", "wholesale_invoice"):
         assert "Form 21" in defs[invoice]
+    # 2026-11-11: an insurer's premium receipt was classified dealer_receipt and counted as a payment
+    # to the dealership. A money receipt is the dealership's own; another party's is supporting.
+    for receipt in ("payment_receipt", "dealer_receipt"):
+        assert "the vehicle dealership issues" in defs[receipt]
+        assert "insurance company's premium receipt" in defs[receipt] and "supporting_document" in defs[receipt]
+    assert "insurer's premium receipt" in defs["supporting_document"]
     for page in ("Form 21", "New Vehicle Delivery Receipt", "email", "covering letter"):
         assert page in defs["supporting_document"]
     # ... and sends those two to their own types when they are candidates.
@@ -103,6 +112,11 @@ def test_neighbour_definitions_say_how_they_differ() -> None:
     assert "Sale(s) Certificate" in defs["form_21"]
     for unlike in ("no amount", "not a money receipt", "delivery order (DO)", "gate pass"):
         assert unlike in defs["delivery_receipt"]
+    # 2026-11-11: Utkal's gate pass (a checklist the customer signs for the vehicle) was classified
+    # delivery_receipt on 64 pages; a page titled Gate Pass is the gate pass, said from both sides.
+    assert "titled Gate Pass is gate_pass, never delivery_receipt" in defs["gate_pass"]
+    assert "customer signs" in defs["gate_pass"] and "chassis" in defs["gate_pass"]
+    assert "titled Gate Pass is the gate pass (gate_pass)" in defs["delivery_receipt"]
 
 
 @pytest.mark.no_docker
