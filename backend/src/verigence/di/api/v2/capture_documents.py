@@ -66,6 +66,10 @@ class V2UploadIntentCommand(BaseModel):
     # refusal; its size, blur and contrast scores are recorded, not enforced
     # (migration 0063).
     qualityGate: Literal["ENFORCE", "UPLOADER_CONFIRMED"] = "ENFORCE"
+    # Types to classify but not read (migration 0066, 12 Nov 2026): what the journey
+    # already holds, a UPI screenshot, a page of a document read once merged. Audit Core
+    # decides; a page classified as one of them is not queued for extraction.
+    skipReadingDocumentTypeKeys: list[str] = Field(default_factory=list, max_length=64)
     files: list[V2UploadIntentItem] = Field(min_length=1, max_length=20)
 
 
@@ -299,6 +303,9 @@ async def create_capture_upload_intents(
             detail="Requirement-ref mapping contains a non-candidate document type.",
         )
     requirement_refs_json = json.dumps(requirement_refs, sort_keys=True)
+    read_skip_json = json.dumps(
+        sorted({key.strip() for key in command.skipReadingDocumentTypeKeys if key.strip()})
+    )
 
     intents: list[V2UploadIntent] = []
     failures: list[V2UploadIntentFailure] = []
@@ -336,7 +343,8 @@ async def create_capture_upload_intents(
                             text(
                                 """
                                 SELECT document_id, logical_object_key, state,
-                                       requirement_refs_by_document_type_key
+                                       requirement_refs_by_document_type_key,
+                                       read_skip_document_type_keys
                                 FROM docintel.document_capture_v2_uploads
                                 WHERE tenant_id=:tenant_id
                                   AND external_context_ref=:external_context_ref
@@ -411,6 +419,7 @@ async def create_capture_upload_intents(
                                     candidate_document_type_keys,
                                     requirement_refs_by_document_type_key,
                                     classification_mode, quality_gate,
+                                    read_skip_document_type_keys,
                                     state, created_at_utc, updated_at_utc
                                 ) VALUES (
                                     :tenant_id, :document_id, :storage_context_id,
@@ -419,6 +428,7 @@ async def create_capture_upload_intents(
                                     CAST(:candidate_keys AS jsonb),
                                     CAST(:requirement_refs AS jsonb),
                                     :classification_mode, :quality_gate,
+                                    CAST(:read_skip AS jsonb),
                                     'RECEIVING', now(), now()
                                 )
                                 """
@@ -439,6 +449,7 @@ async def create_capture_upload_intents(
                                 "requirement_refs": requirement_refs_json,
                                 "classification_mode": command.classificationMode,
                                 "quality_gate": command.qualityGate,
+                                "read_skip": read_skip_json,
                             },
                         )
                     else:
@@ -448,7 +459,12 @@ async def create_capture_upload_intents(
                                 existing["requirement_refs_by_document_type_key"] or {}
                             ).items()
                         }
-                        if existing_refs != requirement_refs and existing["state"] == "RECEIVING":
+                        existing_skip = json.dumps(
+                            sorted(str(k) for k in (existing.get("read_skip_document_type_keys") or []))
+                        )
+                        if (
+                            existing_refs != requirement_refs or existing_skip != read_skip_json
+                        ) and existing["state"] == "RECEIVING":
                             # The file never arrived (the caller timed out
                             # waiting for the first answer and asks again):
                             # nothing was read under the earlier mapping, so
@@ -465,6 +481,7 @@ async def create_capture_upload_intents(
                                         candidate_document_type_keys=CAST(:candidate_keys AS jsonb),
                                         classification_mode=:classification_mode,
                                         quality_gate=:quality_gate,
+                                        read_skip_document_type_keys=CAST(:read_skip AS jsonb),
                                         updated_at_utc=now()
                                     WHERE tenant_id=:tenant_id AND document_id=:document_id
                                       AND state='RECEIVING'
@@ -475,6 +492,7 @@ async def create_capture_upload_intents(
                                     "candidate_keys": json.dumps(candidate_keys),
                                     "classification_mode": command.classificationMode,
                                     "quality_gate": command.qualityGate,
+                                    "read_skip": read_skip_json,
                                     "tenant_id": tenantId,
                                     "document_id": existing["document_id"],
                                 },

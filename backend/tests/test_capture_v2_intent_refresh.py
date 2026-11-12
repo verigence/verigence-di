@@ -128,3 +128,42 @@ async def test_a_stored_file_under_another_mapping_is_still_a_conflict(monkeypat
     response = await _init(session, monkeypatch)
     assert response.uploads == []
     assert [f.errorCode for f in response.failures] == ["CONFLICT"]
+
+
+
+@pytest.mark.asyncio
+async def test_the_types_not_to_read_are_stored_with_the_intent_and_refreshed_while_receiving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """12 Nov 2026: Audit Core sends the types to classify but not read."""
+    command = _command().model_copy(update={"skipReadingDocumentTypeKeys": ["upi_screenshot", " pan_card ", "pan_card"]})
+    new = _Session(None)  # type: ignore[arg-type]
+    _patch(monkeypatch, new)
+    monkeypatch.setattr(capture_documents, "create_document_receiving",
+                        lambda *a, **k: _async({"document_id": _DOC}))
+    monkeypatch.setattr(capture_documents, "build_audit_original_key", lambda **k: "key")
+    monkeypatch.setattr(capture_documents, "_context_uuid", lambda context, name: uuid.uuid4())
+    monkeypatch.setattr(capture_documents, "_context_string", lambda context, name: name)
+    await capture_documents.create_capture_upload_intents(
+        tenantId=_TENANT, externalContextRef="audit-ctx", command=command,
+        principal=SimpleNamespace(service_id="audit-core"),
+    )
+    [insert] = [p for sql, p in new.statements if "INSERT INTO docintel.document_capture_v2_uploads" in sql]
+    assert insert["read_skip"] == '["pan_card", "upi_screenshot"]'
+    # Same mapping, another skip list, file not arrived yet: the new list stands.
+    same = {**_existing("RECEIVING"),
+            "requirement_refs_by_document_type_key": {"booking_form": str(_REQ_FORM),
+                                                      "dealer_receipt": str(_REQ_RECEIPT)},
+            "read_skip_document_type_keys": []}
+    session = _Session(same)
+    _patch(monkeypatch, session)
+    await capture_documents.create_capture_upload_intents(
+        tenantId=_TENANT, externalContextRef="audit-ctx", command=command,
+        principal=SimpleNamespace(service_id="audit-core"),
+    )
+    [update] = [p for sql, p in session.statements if "UPDATE docintel.document_capture_v2_uploads" in sql]
+    assert update["read_skip"] == '["pan_card", "upi_screenshot"]'
+
+
+async def _async(value: Any) -> Any:
+    return value

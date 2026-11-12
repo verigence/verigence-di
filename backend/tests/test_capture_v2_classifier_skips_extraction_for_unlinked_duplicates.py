@@ -36,3 +36,16 @@ def test_only_an_unreadable_type_or_a_missing_profile_skips_reading() -> None:
     assert skip(requires_processing=True, has_published_profile=True) is None
     assert skip(requires_processing=False, has_published_profile=True) == "TYPE_NOT_READ"
     assert skip(requires_processing=True, has_published_profile=False) == "NO_PUBLISHED_PROFILE"
+
+
+@pytest.mark.no_docker
+def test_a_type_audit_core_asks_not_to_read_is_classified_and_not_read() -> None:
+    """12 Nov 2026: what the journey already holds, UPI screenshots, pages read once merged."""
+    skip = capture_v2_classifier.extraction_skip_reason
+    assert skip(requires_processing=True, has_published_profile=True, skip_requested=True) == "NOT_READ_ON_REQUEST"
+    assert skip(requires_processing=True, has_published_profile=True, skip_requested=False) is None
+    # A type that is not read at all keeps its own reason.
+    assert skip(requires_processing=False, has_published_profile=True, skip_requested=True) == "TYPE_NOT_READ"
+    source = inspect.getsource(capture_v2_classifier)
+    assert "u.read_skip_document_type_keys" in source
+    assert 'skip_requested=accepted in set(row.get("read_skip_document_type_keys") or [])' in source
