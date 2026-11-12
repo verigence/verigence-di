@@ -167,3 +167,23 @@ async def test_the_types_not_to_read_are_stored_with_the_intent_and_refreshed_wh
 
 async def _async(value: Any) -> Any:
     return value
+
+
+@pytest.mark.asyncio
+async def test_the_gemini_tier_is_stored_with_the_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """12 Nov 2026 (migration 0067): FLEX for uploads nobody waits on; STANDARD by default."""
+    assert _command().geminiTier == "STANDARD"
+    command = _command().model_copy(update={"geminiTier": "FLEX"})
+    new = _Session(None)  # type: ignore[arg-type]
+    _patch(monkeypatch, new)
+    monkeypatch.setattr(capture_documents, "create_document_receiving",
+                        lambda *a, **k: _async({"document_id": _DOC}))
+    monkeypatch.setattr(capture_documents, "build_audit_original_key", lambda **k: "key")
+    monkeypatch.setattr(capture_documents, "_context_uuid", lambda context, name: uuid.uuid4())
+    monkeypatch.setattr(capture_documents, "_context_string", lambda context, name: name)
+    await capture_documents.create_capture_upload_intents(
+        tenantId=_TENANT, externalContextRef="audit-ctx", command=command,
+        principal=SimpleNamespace(service_id="audit-core"),
+    )
+    [insert] = [p for sql, p in new.statements if "INSERT INTO docintel.document_capture_v2_uploads" in sql]
+    assert insert["gemini_tier"] == "FLEX"

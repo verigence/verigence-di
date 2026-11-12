@@ -28,6 +28,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.document_ai.adapter import DocumentAIAdapter, get_document_ai_adapter
+from verigence.di.document_ai.gemini_cost import GEMINI_TIER, first_attempt_tier
 from verigence.di.document_ai.v2_preclassified_adapter import V2PreclassifiedAdapter
 from verigence.di.integrations.audit_core import get_audit_core_link_client
 from verigence.di.repositories.audit_links import (
@@ -515,6 +516,37 @@ async def _execute_claimed_job_in_context(
             return "superseded"
 
     job_start = time.monotonic()
+    # Flex (half price, migration 0067) for an upload's first reading only; a retry
+    # (EOD_RETRY and the like) goes to the standard tier.
+    tier_token = GEMINI_TIER.set(
+        first_attempt_tier(job.get("capture_v2_gemini_tier"), job_type == "INITIAL")
+    )
+    try:
+        return await _run_claimed_job(
+            job=job, session_factory=session_factory, ai_adapter=ai_adapter, job_log=job_log,
+            tenant_id=tenant_id, job_id=job_id, document_id=document_id, job_type=job_type,
+            attempt_no=attempt_no, is_capture_v2=is_capture_v2, correlation_id=correlation_id,
+            job_start=job_start,
+        )
+    finally:
+        GEMINI_TIER.reset(tier_token)
+
+
+async def _run_claimed_job(
+    *,
+    job: dict[str, Any],
+    session_factory: Any,
+    ai_adapter: DocumentAIAdapter,
+    job_log: Any,
+    tenant_id: str,
+    job_id: uuid.UUID,
+    document_id: uuid.UUID,
+    job_type: str,
+    attempt_no: int,
+    is_capture_v2: bool,
+    correlation_id: str,
+    job_start: float,
+) -> str:
     async with session_factory() as session:
         try:
             async with session.begin():
