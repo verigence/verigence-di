@@ -107,7 +107,8 @@ async def _claim_next_job(
                 SELECT pj.tenant_id, pj.processing_job_id, pj.document_id,
                        pj.correlation_id, pj.job_type, pj.attempt_no,
                        u.classified_document_type_key AS capture_v2_document_type_key,
-                       u.classification_confidence AS capture_v2_classification_confidence
+                       u.classification_confidence AS capture_v2_classification_confidence,
+                       u.gemini_tier AS capture_v2_gemini_tier
                 FROM docintel.processing_jobs pj
                 LEFT JOIN docintel.document_capture_v2_uploads u
                   ON u.tenant_id = pj.tenant_id
@@ -156,6 +157,7 @@ async def _claim_next_job(
         "capture_v2_classification_confidence": row[
             "capture_v2_classification_confidence"
         ],
+        "capture_v2_gemini_tier": row["capture_v2_gemini_tier"],
     }
 
 

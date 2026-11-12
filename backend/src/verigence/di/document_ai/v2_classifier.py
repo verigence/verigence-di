@@ -26,7 +26,12 @@ import structlog
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
-from verigence.di.document_ai.gemini_cost import generation_config, usage_from_response
+from verigence.di.document_ai.gemini_cost import (
+    apply_service_tier,
+    generation_config,
+    tier_timeout,
+    usage_from_response,
+)
 from verigence.di.document_ai.invoice_taxonomy import (
     GENERIC_INVOICE_TYPE_KEY,
     INVOICE_CLASSIFICATION_HINTS,
@@ -277,8 +282,10 @@ async def classify_document_v2(
             max_output_tokens=min(settings.docai_gemini_max_output_tokens, 2048),
         ),
     }
+    service_tier = apply_service_tier(body)
     log = _logger.bind(
         gemini_model=_GEMINI_MODEL,
+        service_tier=service_tier,
         candidate_count=len(effective_candidates),
         payload_bytes=len(payload_bytes),
         payload_mime=effective_mime,
@@ -290,6 +297,9 @@ async def classify_document_v2(
             _GEMINI_API_URL,
             headers={"x-goog-api-key": settings.docai_gemini_api_key},
             json=body,
+            timeout=httpx.Timeout(
+                tier_timeout(30.0, float(settings.docai_gemini_flex_timeout_seconds)), connect=10.0
+            ),
         )
     except httpx.HTTPError as exc:
         log.warning(
