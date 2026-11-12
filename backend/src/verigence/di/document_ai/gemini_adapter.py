@@ -35,7 +35,13 @@ from verigence.di.document_ai.adapter import (
     ExtractionField,
     FieldResult,
 )
-from verigence.di.document_ai.gemini_cost import GeminiUsage, generation_config, usage_from_response
+from verigence.di.document_ai.gemini_cost import (
+    GeminiUsage,
+    apply_service_tier,
+    generation_config,
+    tier_timeout,
+    usage_from_response,
+)
 from verigence.di.document_ai.schemas import get_schema
 from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 from verigence.di.domain.enums import AICapability, FoundStatus
@@ -585,8 +591,10 @@ async def _call_gemini_instrumented(
         artifact_bytes, mime_type, prompt,
         thinking_level=thinking_level, max_output_tokens=max_output_tokens,
     )
+    apply_service_tier(payload)
+    timeout = tier_timeout(120.0, float(get_settings().docai_gemini_flex_timeout_seconds))
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             _GEMINI_API_URL,
             headers={"x-goog-api-key": api_key},

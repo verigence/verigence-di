@@ -15,10 +15,35 @@ Cost facts this module encodes (Gemini 3 Flash):
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 MAX_TOKENS_FINISH_REASON = "MAX_TOKENS"
+
+# The Gemini service tier of the call being made (12 Nov 2026, migration 0067). The worker
+# sets it around one job's call; every request built in that task reads it.
+STANDARD_TIER = "STANDARD"
+FLEX_TIER = "FLEX"
+GEMINI_TIER: ContextVar[str] = ContextVar("gemini_tier", default=STANDARD_TIER)
+
+
+def apply_service_tier(body: dict[str, Any]) -> str:
+    """Ask for the Flex tier (half price, answered in minutes) when the job asks for it."""
+    tier = GEMINI_TIER.get()
+    if tier == FLEX_TIER:
+        body["service_tier"] = "flex"
+    return tier
+
+
+def tier_timeout(standard_seconds: float, flex_seconds: float) -> float:
+    """A Flex request may wait in Google's queue: it gets the longer wait."""
+    return flex_seconds if GEMINI_TIER.get() == FLEX_TIER else standard_seconds
+
+
+def first_attempt_tier(upload_tier: str | None, first_attempt: bool) -> str:
+    """Flex on an upload's first try only: a retry goes to the standard tier."""
+    return FLEX_TIER if upload_tier == FLEX_TIER and first_attempt else STANDARD_TIER
 
 # Finish reasons meaning the provider refused the content itself: the same
 # document at temperature 0 is refused again, so these are not retried.
@@ -51,6 +76,7 @@ class GeminiUsage:
     block_reason: str | None = None
     response_id: str | None = None
     model_version: str | None = None
+    service_tier: str = field(default_factory=GEMINI_TIER.get)
 
     @property
     def billed_output_tokens(self) -> int:

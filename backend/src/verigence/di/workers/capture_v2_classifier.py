@@ -27,6 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.application.intake import _detect_mime
+from verigence.di.document_ai.gemini_cost import GEMINI_TIER, first_attempt_tier
 from verigence.di.document_ai.v2_classifier import V2ClassificationResult, classify_document_v2
 from verigence.di.domain.enums import UploadStatus
 from verigence.di.quality.validator import validate_upload
@@ -309,6 +310,7 @@ class CaptureV2ClassificationWorker:
                     document_id,
                     job_id,
                     correlation_id=correlation_id,
+                    attempt_no=attempt_no,
                 )
             except Exception as exc:  # noqa: BLE001
                 failure = technical_failure(exc, operation="capture_v2_classification")
@@ -340,6 +342,7 @@ class CaptureV2ClassificationWorker:
         job_id: uuid.UUID,
         *,
         correlation_id: str,
+        attempt_no: int = 1,
     ) -> None:
         log = logger.bind(
             tenant_id=tenant_id,
@@ -356,7 +359,7 @@ class CaptureV2ClassificationWorker:
                         SELECT u.logical_object_key, u.candidate_document_type_keys,
                                u.requirement_refs_by_document_type_key,
                                u.classification_mode, u.quality_gate,
-                               u.read_skip_document_type_keys,
+                               u.read_skip_document_type_keys, u.gemini_tier,
                                u.declared_mime_type, u.state,
                                d.original_filename, d.correlation_id
                         FROM docintel.document_capture_v2_uploads u
@@ -508,12 +511,17 @@ class CaptureV2ClassificationWorker:
             log.info("capture_v2_classification_trusted", document_type_key=trusted)
         else:
             choices, definitions = classifier_candidates(list(candidates))
-            result = await classify_document_v2(
-                document_bytes=document_bytes,
-                mime_type=validation.detected_mime or detected_mime,
-                candidates=choices,
-                definitions=definitions,
-            )
+            # Flex (half price) on the upload's first try only (migration 0067).
+            tier_token = GEMINI_TIER.set(first_attempt_tier(row.get("gemini_tier"), attempt_no == 1))
+            try:
+                result = await classify_document_v2(
+                    document_bytes=document_bytes,
+                    mime_type=validation.detected_mime or detected_mime,
+                    candidates=choices,
+                    definitions=definitions,
+                )
+            finally:
+                GEMINI_TIER.reset(tier_token)
         accepted = (
             result.document_type_key
             if result.document_type_key is not None

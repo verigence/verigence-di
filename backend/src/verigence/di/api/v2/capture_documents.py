@@ -70,6 +70,9 @@ class V2UploadIntentCommand(BaseModel):
     # already holds, a UPI screenshot, a page of a document read once merged. Audit Core
     # decides; a page classified as one of them is not queued for extraction.
     skipReadingDocumentTypeKeys: list[str] = Field(default_factory=list, max_length=64)
+    # FLEX (migration 0067): the first classification and reading go to Gemini's Flex tier,
+    # half price, answered in minutes. For uploads nobody is waiting on (the Drive intake).
+    geminiTier: Literal["STANDARD", "FLEX"] = "STANDARD"
     files: list[V2UploadIntentItem] = Field(min_length=1, max_length=20)
 
 
@@ -419,7 +422,7 @@ async def create_capture_upload_intents(
                                     candidate_document_type_keys,
                                     requirement_refs_by_document_type_key,
                                     classification_mode, quality_gate,
-                                    read_skip_document_type_keys,
+                                    read_skip_document_type_keys, gemini_tier,
                                     state, created_at_utc, updated_at_utc
                                 ) VALUES (
                                     :tenant_id, :document_id, :storage_context_id,
@@ -428,7 +431,7 @@ async def create_capture_upload_intents(
                                     CAST(:candidate_keys AS jsonb),
                                     CAST(:requirement_refs AS jsonb),
                                     :classification_mode, :quality_gate,
-                                    CAST(:read_skip AS jsonb),
+                                    CAST(:read_skip AS jsonb), :gemini_tier,
                                     'RECEIVING', now(), now()
                                 )
                                 """
@@ -450,6 +453,7 @@ async def create_capture_upload_intents(
                                 "classification_mode": command.classificationMode,
                                 "quality_gate": command.qualityGate,
                                 "read_skip": read_skip_json,
+                                "gemini_tier": command.geminiTier,
                             },
                         )
                     else:
@@ -482,6 +486,7 @@ async def create_capture_upload_intents(
                                         classification_mode=:classification_mode,
                                         quality_gate=:quality_gate,
                                         read_skip_document_type_keys=CAST(:read_skip AS jsonb),
+                                        gemini_tier=:gemini_tier,
                                         updated_at_utc=now()
                                     WHERE tenant_id=:tenant_id AND document_id=:document_id
                                       AND state='RECEIVING'
@@ -493,6 +498,7 @@ async def create_capture_upload_intents(
                                     "classification_mode": command.classificationMode,
                                     "quality_gate": command.qualityGate,
                                     "read_skip": read_skip_json,
+                                    "gemini_tier": command.geminiTier,
                                     "tenant_id": tenantId,
                                     "document_id": existing["document_id"],
                                 },

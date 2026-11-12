@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # Hard cap on a single answer (thinking included) so a runaway response
     # cannot bill unbounded output; far above any schema's normal answer.
     docai_gemini_max_output_tokens: int = 16384
+    # Gemini's Flex tier (half price, minutes not seconds; migration 0067): how long one Flex
+    # call may wait. Below the 10-minute job lease, so a slow Flex answer fails the attempt
+    # (retried on the standard tier) instead of the worker losing the job.
+    docai_gemini_flex_timeout_seconds: int = 360
     # An image wider or taller than this is downscaled to it before
     # extraction: the model bills a 768px tile at a time, so a phone photo
     # is ~24 tiles and 1536px is 4. A PDF page is never touched (the model
