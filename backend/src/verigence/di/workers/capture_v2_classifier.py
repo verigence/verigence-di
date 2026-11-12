@@ -114,7 +114,7 @@ def _asyncpg_url(url: str) -> str:
 
 
 def extraction_skip_reason(
-    *, requires_processing: bool, has_published_profile: bool
+    *, requires_processing: bool, has_published_profile: bool, skip_requested: bool = False
 ) -> str | None:
     """Why a classified page is not queued for reading, or None when it is.
     Decision 2026-10-01: every page with a readable type and a published
@@ -123,11 +123,18 @@ def extraction_skip_reason(
     to be classified and left unread for ever). Audit Core decides at copy
     time where the values belong. The listing reports a page that is not
     queued (extractionQueued=false) so Audit Core settles it as supporting
-    evidence instead of waiting."""
+    evidence instead of waiting.
+
+    12 Nov 2026 (product owner): Audit Core may also ask, per upload, for types to
+    be classified and not read (``skipReadingDocumentTypeKeys``, migration 0066):
+    a document the journey already holds, a UPI screenshot, a page of a document
+    that is read once merged. That is Audit Core's decision, not a checklist slot."""
     if not requires_processing:
         return "TYPE_NOT_READ"
     if not has_published_profile:
         return "NO_PUBLISHED_PROFILE"
+    if skip_requested:
+        return "NOT_READ_ON_REQUEST"
     return None
 
 
@@ -349,6 +356,7 @@ class CaptureV2ClassificationWorker:
                         SELECT u.logical_object_key, u.candidate_document_type_keys,
                                u.requirement_refs_by_document_type_key,
                                u.classification_mode, u.quality_gate,
+                               u.read_skip_document_type_keys,
                                u.declared_mime_type, u.state,
                                d.original_filename, d.correlation_id
                         FROM docintel.document_capture_v2_uploads u
@@ -663,6 +671,7 @@ class CaptureV2ClassificationWorker:
             skipped_reason = extraction_skip_reason(
                 requires_processing=bool(type_row["requires_processing"]),
                 has_published_profile=bool(type_row["has_published_profile"]),
+                skip_requested=accepted in set(row.get("read_skip_document_type_keys") or []),
             )
             if skipped_reason is None:
                 # One attempt budget per document (2026-10-21 review): the
