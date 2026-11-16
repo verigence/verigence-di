@@ -29,6 +29,7 @@ from pypdf import PdfReader, PdfWriter
 from verigence.di.document_ai.gemini_cost import (
     apply_service_tier,
     generation_config,
+    note_call,
     tier_timeout,
     usage_from_response,
 )
@@ -341,6 +342,8 @@ async def classify_document_v2(
             retryable=True,
         ) from exc
     usage = usage_from_response(raw if isinstance(raw, dict) else {})
+    # Priced and kept for the job, whatever the answer turns out to be (2026-11-16).
+    note_call(_GEMINI_MODEL, usage)
     log.info(
         "gemini_classification_usage",
         http_status=response.status_code,

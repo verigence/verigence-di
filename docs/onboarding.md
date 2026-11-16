@@ -27,11 +27,9 @@ Verigence Document Intelligence (DI) is a standalone backend service that:
 
 ```
 verigence-di/
-├── Dockerfile               # API container
-├── Dockerfile.worker        # Worker container
-├── railway.toml             # Railway config for di-api
-├── railway.worker.toml      # Railway config for di-worker
 ├── backend/
+│   ├── Dockerfile           # API container (the only image definition; built by the deploy workflow)
+│   ├── Dockerfile.worker    # Worker container
 │   ├── pyproject.toml       # Python dependencies
 │   ├── src/verigence/di/    # All application source code
 │   │   ├── main.py          # FastAPI app factory

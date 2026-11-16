@@ -49,6 +49,7 @@ from verigence.di.document_ai.adapter import (
     ExtractionField,
     FieldResult,
 )
+from verigence.di.document_ai.gemini_cost import AI_USAGE_SINK, summarise_calls
 from verigence.di.domain.enums import FoundStatus, HumanVerificationStatus
 from verigence.di.domain.scoring import ScoredField, calculate_confidence_score
 from verigence.di.repositories.search_index import upsert_search_index
@@ -483,6 +484,9 @@ async def _execute_steps(
         correlation_id, "VISION_EXTRACTION", ai_adapter.adapter_key, outcome="STARTED",
     )
 
+    # The provider calls of this read, so a failed read keeps what it cost too.
+    extract_calls: list[dict[str, Any]] = []
+    usage_sink = AI_USAGE_SINK.set(extract_calls)
     try:
         extract_result = await ai_adapter.extract(
             artifact_bytes=artifact_bytes,
@@ -494,8 +498,12 @@ async def _execute_steps(
         )
     except Exception as exc:
         failure_error = _provider_processing_error(exc, operation="extraction_provider")
+        failed_usage = summarise_calls(extract_calls)
+        if failed_usage:
+            failed_usage["document_type_key"] = accepted_document_type_key
         await _update_invocation(session, tenant_id, extract_invocation_id,
-                                 "FAILED", error_detail=failure_error.detail)
+                                 "FAILED", usage_metrics=failed_usage or None,
+                                 error_detail=failure_error.detail)
         log.warning(
             "extraction_provider_failed",
             error_code=failure_error.code,
@@ -505,6 +513,8 @@ async def _execute_steps(
             **safe_exception_context(exc),
         )
         raise failure_error from exc
+    finally:
+        AI_USAGE_SINK.reset(usage_sink)
 
     await _update_invocation(
         session, tenant_id, extract_invocation_id, "SUCCESS",

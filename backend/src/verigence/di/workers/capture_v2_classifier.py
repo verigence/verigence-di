@@ -27,7 +27,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from verigence.di.application.intake import _detect_mime
-from verigence.di.document_ai.gemini_cost import GEMINI_TIER, first_attempt_tier
+from verigence.di.document_ai.gemini_cost import (
+    AI_USAGE_SINK,
+    GEMINI_TIER,
+    first_attempt_tier,
+    summarise_calls,
+)
 from verigence.di.document_ai.v2_classifier import V2ClassificationResult, classify_document_v2
 from verigence.di.domain.enums import UploadStatus
 from verigence.di.quality.validator import validate_upload
@@ -54,6 +59,54 @@ from verigence.di.workers.heartbeat import WorkerStats
 from verigence.di.workers.idle_wait import NOTIFY_BACKSTOP_SECONDS, idle_wait
 
 logger = structlog.get_logger(__name__)
+
+
+def _numeric(value: Any) -> Decimal | None:
+    """A float as the NUMERIC parameter the driver expects, or None."""
+    return None if value is None else Decimal(str(value))
+
+
+# Adds one attempt's provider calls to the job's running usage and cost (2026-11-16).
+RECORD_USAGE_SQL = """
+    UPDATE docintel.document_capture_v2_classification_jobs j
+    SET usage_metrics = jsonb_build_object(
+          'model', CAST(:model AS text),
+          'service_tier', CAST(:tier AS text),
+          'provider_calls', COALESCE((j.usage_metrics->>'provider_calls')::int, 0) + CAST(:calls AS int),
+          'billed_prompt_tokens',
+            COALESCE((j.usage_metrics->>'billed_prompt_tokens')::bigint, 0) + CAST(:prompt AS bigint),
+          'response_tokens',
+            COALESCE((j.usage_metrics->>'response_tokens')::bigint, 0) + CAST(:response AS bigint),
+          'thoughts_tokens',
+            COALESCE((j.usage_metrics->>'thoughts_tokens')::bigint, 0) + CAST(:thoughts AS bigint),
+          'cached_tokens', COALESCE((j.usage_metrics->>'cached_tokens')::bigint, 0) + CAST(:cached AS bigint),
+          'total_tokens', COALESCE((j.usage_metrics->>'total_tokens')::bigint, 0) + CAST(:total AS bigint),
+          'billed_output_tokens',
+            COALESCE((j.usage_metrics->>'billed_output_tokens')::bigint, 0) + CAST(:output AS bigint),
+          'price_input_per_mtok', CAST(:price_in AS numeric),
+          'price_output_per_mtok', CAST(:price_out AS numeric),
+          -- No price for the model: the cost stays unknown, never a part sum.
+          'cost_usd', CASE
+            WHEN CAST(:cost AS numeric) IS NULL THEN NULL
+            WHEN j.usage_metrics IS NOT NULL AND j.usage_metrics->>'cost_usd' IS NULL THEN NULL
+            ELSE COALESCE((j.usage_metrics->>'cost_usd')::numeric, 0) + CAST(:cost AS numeric)
+          END)
+    WHERE j.tenant_id = :tenant_id AND j.classification_job_id = :job_id
+"""
+
+
+def usage_params(tenant_id: str, job_id: uuid.UUID, usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tenant_id": tenant_id, "job_id": job_id,
+        "model": usage["model"], "tier": usage["service_tier"],
+        "calls": usage["provider_calls"], "prompt": usage["billed_prompt_tokens"],
+        "response": usage["response_tokens"], "thoughts": usage["thoughts_tokens"],
+        "cached": usage["cached_tokens"], "total": usage["total_tokens"],
+        "output": usage["billed_output_tokens"],
+        "price_in": _numeric(usage["price_input_per_mtok"]),
+        "price_out": _numeric(usage["price_output_per_mtok"]),
+        "cost": _numeric(usage["cost_usd"]),
+    }
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 
 # How often a failed classification is tried again (product owner's rule
@@ -304,6 +357,10 @@ class CaptureV2ClassificationWorker:
             log = logger.bind(**context)
             log.info("capture_v2_classification_started")
             started = time.monotonic()
+            # The provider calls of this attempt (none when the caller's single
+            # candidate is trusted); stored on the job whatever the outcome.
+            calls: list[dict[str, Any]] = []
+            usage_sink = AI_USAGE_SINK.set(calls)
             try:
                 await self._classify(
                     tenant_id,
@@ -313,6 +370,8 @@ class CaptureV2ClassificationWorker:
                     attempt_no=attempt_no,
                 )
             except Exception as exc:  # noqa: BLE001
+                AI_USAGE_SINK.reset(usage_sink)
+                await self._record_usage(tenant_id, job_id, calls)
                 failure = technical_failure(exc, operation="capture_v2_classification")
                 duration_ms = round((time.monotonic() - started) * 1000, 1)
                 log.warning(
@@ -333,7 +392,26 @@ class CaptureV2ClassificationWorker:
                     duration_ms=duration_ms,
                 )
                 return "failed"
+            AI_USAGE_SINK.reset(usage_sink)
+            await self._record_usage(tenant_id, job_id, calls)
             return "completed"
+
+    async def _record_usage(self, tenant_id: str, job_id: uuid.UUID, calls: list[dict[str, Any]]) -> None:
+        """Add this attempt's provider calls to the job's running usage and cost
+        (2026-11-16). A job retried three times holds all three calls. Its own
+        short transaction, and never the reason a classification fails."""
+        usage = summarise_calls(calls)
+        if not usage:
+            return
+        try:
+            async with tenant_session(tenant_id) as session:
+                await session.execute(text(RECORD_USAGE_SQL), usage_params(tenant_id, job_id, usage))
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 - cost keeping never fails a read
+            logger.warning(
+                "capture_v2_classification_usage_not_recorded",
+                tenant_id=tenant_id, classification_job_id=str(job_id), error_type=type(exc).__name__,
+            )
 
     async def _classify(
         self,

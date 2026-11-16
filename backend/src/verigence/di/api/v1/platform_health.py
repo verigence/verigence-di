@@ -15,11 +15,17 @@ counts, codes and timings only -- never document, field or customer data:
 - schedulerProblems: end-of-day runs that errored or never finished;
 - database: DI's own database -- connections, held-open transactions, deadlocks,
   rollbacks, the slowest queries when pg_stat_statements is loaded.
+
+GET /v1/platform/ai-usage (product owner 2026-11-16: "capture the cost") answers what
+the AI provider calls cost, per day, Project, kind of call, document type, model and
+service tier: calls, tokens and US$ at list price. Same callers, same rule: counts and
+amounts only.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 from fastapi import APIRouter, Depends, Query
@@ -30,6 +36,7 @@ from verigence.di.auth.service_integration import (
     ServiceIntegrationPrincipal,
     require_service_integration,
 )
+from verigence.di.document_ai.gemini_cost import PRICES_USD_PER_MTOK, cost_usd
 from verigence.di.errors import ErrorCode, http_exception
 from verigence.di.repositories.database import AsyncSessionFactory
 from verigence.di.settings import get_settings
@@ -59,7 +66,7 @@ def require_health_reader(
 
 
 def _iso(value: Any) -> Any:
-    return value.isoformat() if isinstance(value, datetime) else value
+    return value.isoformat() if isinstance(value, (datetime, date)) else value
 
 
 def _num(value: Any) -> float | None:
@@ -232,3 +239,151 @@ async def get_platform_health(
 ) -> dict[str, Any]:
     async with AsyncSessionFactory() as session:
         return await platform_health(session, hours)
+
+
+# --- GET /v1/platform/ai-usage -------------------------------------------------
+
+_EXTRACTION_USAGE_SQL = """
+    WITH calls AS (
+        SELECT (i.started_at_utc AT TIME ZONE :tz)::date AS day, i.tenant_id, i.outcome,
+               COALESCE(i.usage_metrics->>'document_type_key', 'unknown') AS document_type_key,
+               COALESCE(i.usage_metrics->>'model', 'unknown') AS model,
+               -- A read made before the tier was kept on the call takes its upload's tier.
+               COALESCE(i.usage_metrics->>'service_tier', u.gemini_tier, 'STANDARD') AS tier,
+               (i.usage_metrics ? 'billed_prompt_tokens') AS has_tokens,
+               COALESCE((i.usage_metrics->>'billed_prompt_tokens')::bigint, 0) AS prompt_tokens,
+               GREATEST(
+                   COALESCE((i.usage_metrics->>'response_tokens')::bigint, 0)
+                     + COALESCE((i.usage_metrics->>'thoughts_tokens')::bigint, 0),
+                   COALESCE((i.usage_metrics->>'total_tokens')::bigint, 0)
+                     - COALESCE((i.usage_metrics->>'billed_prompt_tokens')::bigint, 0),
+                   0) AS output_tokens,
+               (i.usage_metrics->>'cost_usd')::numeric AS cost_usd
+        FROM docintel.processor_invocations i
+        LEFT JOIN docintel.processing_runs pr
+          ON pr.tenant_id = i.tenant_id AND pr.processing_run_id = i.processing_run_id
+        LEFT JOIN docintel.document_capture_v2_uploads u
+          ON u.tenant_id = pr.tenant_id AND u.document_id = pr.document_id
+        WHERE i.capability = 'VISION_EXTRACTION' AND i.started_at_utc >= :since
+    )
+    SELECT day, tenant_id, document_type_key, model, tier,
+           count(*) AS calls,
+           count(*) FILTER (WHERE outcome = 'FAILED') AS failed_calls,
+           count(*) FILTER (WHERE NOT has_tokens AND cost_usd IS NULL) AS calls_without_usage,
+           sum(prompt_tokens) AS prompt_tokens, sum(output_tokens) AS output_tokens,
+           COALESCE(sum(cost_usd), 0) AS recorded_cost_usd,
+           COALESCE(sum(prompt_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_prompt_tokens,
+           COALESCE(sum(output_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_output_tokens
+    FROM calls
+    GROUP BY 1, 2, 3, 4, 5
+    ORDER BY 1, 2, 3
+"""
+
+_CLASSIFICATION_USAGE_SQL = """
+    SELECT (j.created_at_utc AT TIME ZONE :tz)::date AS day, j.tenant_id,
+           COALESCE(j.usage_metrics->>'model', 'unknown') AS model,
+           COALESCE(j.usage_metrics->>'service_tier', 'unknown') AS tier,
+           (j.usage_metrics IS NOT NULL) AS has_usage,
+           -- Usage is kept from the first job that has it; an earlier job's call was never recorded.
+           (CAST(:recorded_since AS timestamptz) IS NULL
+            OR j.created_at_utc < CAST(:recorded_since AS timestamptz)) AS before_recording,
+           count(*) AS jobs,
+           count(*) FILTER (WHERE j.job_status = 'FAILED') AS failed_jobs,
+           COALESCE(sum((j.usage_metrics->>'provider_calls')::int), 0) AS calls,
+           COALESCE(sum((j.usage_metrics->>'billed_prompt_tokens')::bigint), 0) AS prompt_tokens,
+           COALESCE(sum((j.usage_metrics->>'billed_output_tokens')::bigint), 0) AS output_tokens,
+           COALESCE(sum((j.usage_metrics->>'cost_usd')::numeric), 0) AS recorded_cost_usd,
+           count(*) FILTER (WHERE j.usage_metrics IS NOT NULL AND j.usage_metrics->>'cost_usd' IS NULL)
+             AS jobs_without_price
+    FROM docintel.document_capture_v2_classification_jobs j
+    WHERE j.created_at_utc >= :since
+    GROUP BY 1, 2, 3, 4, 5, 6
+    ORDER BY 1, 2
+"""
+
+
+def usage_window(days: int, tz: ZoneInfo, now: datetime) -> tuple[date, datetime]:
+    """The first day of a window of ``days`` whole days ending today in ``tz``,
+    and the UTC instant that day starts."""
+    first_day = now.astimezone(tz).date() - timedelta(days=days - 1)
+    return first_day, datetime.combine(first_day, time.min, tzinfo=tz).astimezone(UTC)
+
+
+def _money(value: Any) -> float:
+    return round(float(value or 0), 6)
+
+
+def extraction_usage_row(r: dict[str, Any]) -> dict[str, Any]:
+    """One day / Project / document type of reads. A read that kept its tokens but
+    no cost (every read before 2026-11-16) is priced here from those tokens at the
+    list price of its model and tier; a model with no price leaves it uncosted."""
+    recorded = _money(r["recorded_cost_usd"])
+    from_tokens: float | None = 0.0
+    if int(r["unpriced_prompt_tokens"]) or int(r["unpriced_output_tokens"]):
+        output = int(r["unpriced_output_tokens"])
+        from_tokens = cost_usd(
+            str(r["model"]), str(r["tier"]), prompt_tokens=int(r["unpriced_prompt_tokens"]),
+            response_tokens=output, total_tokens=0)
+    return {
+        "date": _iso(r["day"]), "tenantId": r["tenant_id"], "capability": "EXTRACTION",
+        "documentTypeKey": r["document_type_key"], "model": r["model"], "tier": r["tier"],
+        "calls": int(r["calls"]), "failedCalls": int(r["failed_calls"]),
+        "callsWithoutUsage": int(r["calls_without_usage"]),
+        "promptTokens": int(r["prompt_tokens"]), "outputTokens": int(r["output_tokens"]),
+        "costUsd": None if from_tokens is None else round(recorded + from_tokens, 6),
+        "costFromTokensUsd": from_tokens,
+    }
+
+
+def classification_usage_row(r: dict[str, Any]) -> dict[str, Any]:
+    """One day / Project of classification jobs. A job with no usage made no provider
+    call (its single candidate was trusted) -- or, before usage began to be kept,
+    made one that was never recorded: those are counted apart, never costed."""
+    has_usage = bool(r["has_usage"])
+    before_recording = not has_usage and bool(r["before_recording"])
+    unpriced = int(r["jobs_without_price"])
+    return {
+        "date": _iso(r["day"]), "tenantId": r["tenant_id"], "capability": "CLASSIFICATION",
+        "documentTypeKey": None, "model": r["model"] if has_usage else None, "tier": r["tier"] if has_usage else None,
+        "calls": int(r["calls"]) if has_usage else (int(r["jobs"]) if before_recording else 0),
+        "failedCalls": int(r["failed_jobs"]),
+        "callsWithoutUsage": int(r["jobs"]) if before_recording else 0,
+        "promptTokens": int(r["prompt_tokens"]), "outputTokens": int(r["output_tokens"]),
+        "costUsd": None if (before_recording or unpriced) else _money(r["recorded_cost_usd"]),
+        "costFromTokensUsd": 0.0,
+    }
+
+
+async def ai_usage(session: AsyncSession, days: int, tz_name: str, now: datetime | None = None) -> dict[str, Any]:
+    tz = ZoneInfo(tz_name)
+    moment = now or datetime.now(UTC)
+    first_day, since = usage_window(days, tz, moment)
+    recorded_since = (await session.execute(text(
+        "SELECT min(created_at_utc) FROM docintel.document_capture_v2_classification_jobs "
+        "WHERE usage_metrics IS NOT NULL"))).scalar_one_or_none()
+    params = {"tz": tz_name, "since": since}
+    rows = [extraction_usage_row(r) for r in await _rows(session, _EXTRACTION_USAGE_SQL, params)]
+    rows += [classification_usage_row(r) for r in await _rows(
+        session, _CLASSIFICATION_USAGE_SQL, {**params, "recorded_since": recorded_since})]
+    return {
+        "generatedAtUtc": moment.isoformat(), "days": days, "timezone": tz_name,
+        "firstDay": first_day.isoformat(), "currency": "USD",
+        "prices": [{"model": model, "tier": tier, "inputPerMTok": float(price[0]), "outputPerMTok": float(price[1])}
+                   for model, tiers in sorted(PRICES_USD_PER_MTOK.items()) for tier, price in sorted(tiers.items())],
+        "classificationRecordedSinceUtc": _iso(recorded_since),
+        "rows": rows,
+    }
+
+
+@router.get("/v1/platform/ai-usage")
+async def get_ai_usage(
+    _service: Annotated[ServiceIntegrationPrincipal, Depends(require_health_reader)],
+    days: Annotated[int, Query(ge=1, le=92)] = 30,
+    tz: Annotated[str, Query(max_length=64)] = "Asia/Kolkata",
+) -> dict[str, Any]:
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise http_exception(ErrorCode.VALIDATION_ERROR, detail="Unknown time zone.") from exc
+    async with AsyncSessionFactory() as session:
+        return await ai_usage(session, days, tz)
