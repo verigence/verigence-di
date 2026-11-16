@@ -63,10 +63,11 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
     # 0059: a Form 21 and a delivery receipt have their own types now; they
     # fall here only when those types are not among the candidates.
     "supporting_document": (
-        "Any page that is none of the other candidates, e.g. an email or approval note printout, "
-        "a Transaction Regularization Form, a covering letter or an insurer's premium receipt. A Form 21 (Sale Certificate, \"See Rule 47\") is form_21 and a New "
-        "Vehicle Delivery Receipt (vehicle handed over, no amount) is delivery_receipt when those "
-        "are candidates; otherwise they are supporting_document."
+        "Any page that is none of the other candidates, e.g. an email or approval note printout "
+        "(a financier's loan email is delivery_order_cover), a Transaction "
+        "Regularization Form, a covering letter or an insurer's premium receipt. A Form 21 (Sale "
+        "Certificate, \"See Rule 47\") is form_21 and a New Vehicle Delivery Receipt (vehicle handed "
+        "over, no amount) is delivery_receipt when those are candidates; otherwise they are supporting_document."
     ),
     "booking_form": (
         "The dealer's vehicle booking (order) form filled in at booking: booking number and date, "
@@ -91,9 +92,11 @@ GLOBAL_DOCUMENT_TYPE_DEFINITIONS: dict[str, str] = {
         "EMI, and the disbursement terms and conditions."
     ),
     "delivery_order_cover": (
-        "The dealer's delivery order (DO) or delivery cover sheet for the vehicle: DO number, "
-        "delivery date, customer, booking reference, model, variant and colour, chassis and "
-        "engine numbers, who delivered it, and the documents it lists as attached."
+        "A delivery order (DO) for the vehicle: the dealer's DO or delivery cover sheet (DO number, "
+        "delivery date, customer, model, chassis, who delivered it, documents attached), or a "
+        "financier's DO, disbursement advice or email to the dealer to deliver against the loan "
+        "(loan or disbursed amount, date, UTR). Not the sanction letter with tenure, rate and EMI "
+        "(bank_approval_letter)."
     ),
     "scrappage_certificate_of_deposit": (
         "A Certificate of Deposit (or Transfer Certificate of Deposit) from a registered vehicle "

@@ -39,6 +39,7 @@ _MIGRATIONS = {
     "0062": "0062_transaction_regularization_form_is_supporting.py",
     "0064": "0064_gate_pass_is_not_a_delivery_receipt.py",
     "0065": "0065_money_receipt_is_the_dealerships.py",
+    "0069": "0069_do_loan_amount.py",
 }
 
 
@@ -56,7 +57,8 @@ def test_migration_definition_snapshot_equals_the_constant() -> None:
     # What the rows hold after head: 0058's definitions, then 0059's and 0060's over them.
     snapshot = {**_migration("0058")._DEFINITIONS, **_migration("0059")._DEFINITIONS,
                 **_migration("0060")._DEFINITIONS, **_migration("0062")._DEFINITIONS,
-                **_migration("0064")._DEFINITIONS, **_migration("0065")._DEFINITIONS}
+                **_migration("0064")._DEFINITIONS, **_migration("0065")._DEFINITIONS,
+                **_migration("0069")._DEFINITIONS}
     assert list(snapshot) == list(GLOBAL_DOCUMENT_TYPE_DEFINITIONS)
     assert snapshot == GLOBAL_DOCUMENT_TYPE_DEFINITIONS
 
