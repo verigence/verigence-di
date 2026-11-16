@@ -9,7 +9,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 DELIVERY_ORDER_SCHEMA = SchemaDefinition(
     document_type_key="delivery_order_cover",
     display_name="Delivery Order Cover",
-    schema_version="1.1",
+    schema_version="1.2",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=False, description="Dealership name if explicitly visible"),
         FieldSpec(key="delivery_order_number", field_type="string", required=False, description="Delivery order/DO number exactly as visible"),
@@ -24,6 +24,12 @@ DELIVERY_ORDER_SCHEMA = SchemaDefinition(
         FieldSpec(key="vehicle_registration_number", field_type="string", required=False, description="Vehicle registration number if explicitly visible"),
         FieldSpec(key="delivered_by", field_type="string", required=False, description="Sales/delivery executive name if explicitly visible"),
         FieldSpec(key="embedded_document_types", field_type="array", required=False, description="Other document types explicitly listed as included/attached; do not infer from an unseen bundle"),
+        # 1.2 (product owner 2026-11-16): the loan, when the DO -- the dealer's, or the financier's DO,
+        # disbursement advice or email -- prints it; Audit Core picks the loan figure by a fixed order.
+        FieldSpec(key="financier_name", field_type="string", required=False, description="Financier / bank / NBFC named as funding the vehicle, exactly as printed"),
+        FieldSpec(key="loan_amount", field_type="number", required=False, description="Loan, finance or DO amount the financier pays for this vehicle, exactly as printed; never the vehicle price, down payment or margin money"),
+        FieldSpec(key="disbursement_date", field_type="date", required=False, description="Date the loan was disbursed / paid to the dealer, only when printed", normalization="date_dd_mm_yyyy"),
+        FieldSpec(key="disbursement_reference", field_type="string", required=False, description="UTR / transaction / cheque reference of the disbursement, only when printed"),
     ],
     system_prompt=(
         "You are a document data extraction assistant specialising in Indian automotive vehicle delivery documents.\n"
@@ -33,6 +39,7 @@ DELIVERY_ORDER_SCHEMA = SchemaDefinition(
     prompt_notes=[
         "Preserve chassis/VIN and engine numbers exactly as visible.",
         "embedded_document_types may contain only document types explicitly mentioned or visibly listed on the supplied page/document.",
+        "loan_amount is the amount the financier funds or disburses, only when printed as such (Loan Amount, DO Amount, Amount Financed, Disbursed Amount); never a price, down payment or margin.",
         "If a value is absent, obscured, or uncertain, return null with low confidence.",
     ],
 )
