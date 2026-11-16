@@ -134,6 +134,7 @@ async def test_package1_profiles_remain_published_after_later_migrations(
         "delivery_date",
         "car_number_as_printed",
         "vehicle_registration_number",
+        "chassis_number",  # 0068, closing list item 5 (2026-11-16)
     }
 
     aadhaar_fields = await _published_field_keys(db_session, "aadhaar")
