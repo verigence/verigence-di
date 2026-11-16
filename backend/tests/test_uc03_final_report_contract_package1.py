@@ -17,8 +17,11 @@ def test_gate_pass_schema_is_minimal_and_fail_closed() -> None:
         "delivery_date",
         "car_number_as_printed",
         "vehicle_registration_number",
+        # The vehicle that left the gate (closing list item 5, 2026-11-16).
+        "chassis_number",
     }
     assert "only when" in fields["vehicle_registration_number"].description.lower()
+    assert "never correct or complete" in fields["chassis_number"].description
 
 
 @pytest.mark.no_docker
@@ -131,6 +134,7 @@ async def test_package1_profiles_remain_published_after_later_migrations(
         "delivery_date",
         "car_number_as_printed",
         "vehicle_registration_number",
+        "chassis_number",  # 0068, closing list item 5 (2026-11-16)
     }
 
     aadhaar_fields = await _published_field_keys(db_session, "aadhaar")

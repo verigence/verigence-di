@@ -6,7 +6,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 GATE_PASS_SCHEMA = SchemaDefinition(
     document_type_key="gate_pass",
     display_name="Gate Pass",
-    schema_version="1.0",
+    schema_version="1.1",
     fields=[
         FieldSpec(
             "delivery_date",
@@ -30,6 +30,16 @@ GATE_PASS_SCHEMA = SchemaDefinition(
                 "as registration number or the printed format is unambiguously a registration number."
             ),
         ),
+        FieldSpec(
+            "chassis_number",
+            "string",
+            False,
+            (
+                "Chassis number / VIN of the vehicle exactly as printed or written (Chassis No., VIN, Frame "
+                "No.); the full 17 characters when printed, otherwise the part printed; never correct or "
+                "complete characters."
+            ),
+        ),
     ],
     system_prompt=(
         "You extract delivery evidence from an automobile dealership Gate Pass. Preserve only "
@@ -41,6 +51,10 @@ GATE_PASS_SCHEMA = SchemaDefinition(
         (
             "Populate vehicle_registration_number only when its meaning is unambiguous; otherwise "
             "leave it null even when car_number_as_printed is populated."
+        ),
+        (
+            "Return chassis_number only when the gate pass labels a chassis number / VIN / frame number; "
+            "when Car No. holds a 17-character number starting with MA1 it is the chassis: return it there too."
         ),
     ],
 )
