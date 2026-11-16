@@ -17,8 +17,11 @@ def test_gate_pass_schema_is_minimal_and_fail_closed() -> None:
         "delivery_date",
         "car_number_as_printed",
         "vehicle_registration_number",
+        # The vehicle that left the gate (closing list item 5, 2026-11-16).
+        "chassis_number",
     }
     assert "only when" in fields["vehicle_registration_number"].description.lower()
+    assert "never correct or complete" in fields["chassis_number"].description
 
 
 @pytest.mark.no_docker

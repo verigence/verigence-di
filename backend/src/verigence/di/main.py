@@ -503,7 +503,9 @@ def create_app() -> FastAPI:
     from verigence.di.api.v1.pc_booking_documents import (  # noqa: PLC0415
         router as pc_booking_documents_router,
     )
-    from verigence.di.api.v1.platform_health import router as platform_health_router  # noqa: PLC0415
+    from verigence.di.api.v1.platform_health import (
+        router as platform_health_router,  # noqa: PLC0415
+    )
     from verigence.di.api.v1.project_masters import (
         router as project_masters_router,  # noqa: PLC0415
     )

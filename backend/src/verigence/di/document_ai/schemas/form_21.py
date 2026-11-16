@@ -18,7 +18,7 @@ from verigence.di.document_ai.schemas.base import FieldSpec, SchemaDefinition
 FORM_21_SCHEMA = SchemaDefinition(
     document_type_key="form_21",
     display_name="Form 21 (Sale Certificate)",
-    schema_version="1.0",
+    schema_version="1.1",
     fields=[
         FieldSpec("certificate_number", "string", False,
                   "The certificate's own serial number exactly as printed, only when it prints one; never the invoice number."),
@@ -35,7 +35,9 @@ FORM_21_SCHEMA = SchemaDefinition(
         FieldSpec("dealer_name", "string", False,
                   "Dealer issuing the certificate (letterhead or signatory), exactly as printed."),
         FieldSpec("vin_number", "string", True,
-                  "Chassis number / VIN (Chassis No.) exactly as printed; never correct or complete characters."),
+                  "Chassis number / VIN (Chassis No.): the full 17-character VIN exactly as printed; when the form "
+                  "prints a short chassis number with the full VIN beside it (\"R6G70511 (MA1TJ4YD6R6G70511)\"), "
+                  "the full VIN only; never correct or complete characters."),
         FieldSpec("engine_number", "string", False,
                   "Engine number (or motor number) exactly as printed; never correct or complete characters."),
         FieldSpec("vehicle_make", "string", False, "Maker's name exactly as printed."),
