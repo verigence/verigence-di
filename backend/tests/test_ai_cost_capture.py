@@ -102,6 +102,10 @@ def test_a_read_from_before_costs_were_kept_is_priced_from_its_tokens():
     assert flex["costUsd"] == pytest.approx(row["costUsd"] / 2)
     unknown = ph.extraction_usage_row(_extraction(model="unknown", unpriced_prompt_tokens=1, unpriced_output_tokens=1))
     assert unknown["costUsd"] is None
+    # Input the provider served from its cache was billed at a tenth of the price.
+    cached = ph.extraction_usage_row(_extraction(
+        unpriced_prompt_tokens=40_000, unpriced_output_tokens=15_000, unpriced_cached_tokens=10_000))
+    assert cached["costUsd"] == pytest.approx((30_000 * 0.50 + 10_000 * 0.05 + 15_000 * 3.00) / 1_000_000)
 
 
 def _classification(**over):
@@ -191,7 +195,8 @@ async def test_usage_is_added_to_the_job_attempt_by_attempt_and_reported_by_day(
         "cost_usd": 0.0065})
     await _read(session, tenant, started=now - timedelta(minutes=20), outcome="SUCCESS", usage={
         "model": MODEL, "document_type_key": "booking_form",
-        "billed_prompt_tokens": 4000, "response_tokens": 1500, "thoughts_tokens": 0, "total_tokens": 5600})
+        "billed_prompt_tokens": 4000, "response_tokens": 1500, "thoughts_tokens": 0, "total_tokens": 5600,
+        "cached_tokens": 1000})
     await _read(session, tenant, started=now - timedelta(minutes=10), outcome="FAILED", usage=None)
 
     usage = await ph.ai_usage(session, 7, "UTC", now)
@@ -201,9 +206,11 @@ async def test_usage_is_added_to_the_job_attempt_by_attempt_and_reported_by_day(
     assert sum(r["failedCalls"] for r in reads) == 1
     assert sum(r["callsWithoutUsage"] for r in reads) == 1
     priced = [r for r in reads if r["documentTypeKey"] == "booking_form"]
-    # recorded 0.0065 + the earlier read priced from its tokens (1,600 output: the total shows 100 more)
-    assert sum(r["costUsd"] for r in priced) == pytest.approx(0.0065 + (4000 * 0.50 + 1600 * 3.00) / 1_000_000)
-    assert sum(r["costFromTokensUsd"] for r in priced) == pytest.approx((4000 * 0.50 + 1600 * 3.00) / 1_000_000)
+    # recorded 0.0065 + the earlier read priced from its tokens (1,600 output: the total shows 100
+    # more; 1,000 of its 4,000 input tokens came from the provider's cache)
+    from_tokens = (3000 * 0.50 + 1000 * 0.05 + 1600 * 3.00) / 1_000_000
+    assert sum(r["costUsd"] for r in priced) == pytest.approx(0.0065 + from_tokens)
+    assert sum(r["costFromTokensUsd"] for r in priced) == pytest.approx(from_tokens)
 
     jobs = [r for r in mine if r["capability"] == "CLASSIFICATION"]
     recorded = [r for r in jobs if r["model"] == MODEL]

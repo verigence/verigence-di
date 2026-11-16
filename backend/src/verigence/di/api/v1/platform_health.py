@@ -258,6 +258,7 @@ _EXTRACTION_USAGE_SQL = """
                    COALESCE((i.usage_metrics->>'total_tokens')::bigint, 0)
                      - COALESCE((i.usage_metrics->>'billed_prompt_tokens')::bigint, 0),
                    0) AS output_tokens,
+               COALESCE((i.usage_metrics->>'cached_tokens')::bigint, 0) AS cached_tokens,
                (i.usage_metrics->>'cost_usd')::numeric AS cost_usd
         FROM docintel.processor_invocations i
         LEFT JOIN docintel.processing_runs pr
@@ -273,7 +274,9 @@ _EXTRACTION_USAGE_SQL = """
            sum(prompt_tokens) AS prompt_tokens, sum(output_tokens) AS output_tokens,
            COALESCE(sum(cost_usd), 0) AS recorded_cost_usd,
            COALESCE(sum(prompt_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_prompt_tokens,
-           COALESCE(sum(output_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_output_tokens
+           COALESCE(sum(output_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_output_tokens,
+           -- Input the provider served from its cache is billed at a tenth of the price.
+           COALESCE(sum(cached_tokens) FILTER (WHERE cost_usd IS NULL AND has_tokens), 0) AS unpriced_cached_tokens
     FROM calls
     GROUP BY 1, 2, 3, 4, 5
     ORDER BY 1, 2, 3
@@ -323,7 +326,7 @@ def extraction_usage_row(r: dict[str, Any]) -> dict[str, Any]:
         output = int(r["unpriced_output_tokens"])
         from_tokens = cost_usd(
             str(r["model"]), str(r["tier"]), prompt_tokens=int(r["unpriced_prompt_tokens"]),
-            response_tokens=output, total_tokens=0)
+            response_tokens=output, total_tokens=0, cached_tokens=int(r.get("unpriced_cached_tokens") or 0))
     return {
         "date": _iso(r["day"]), "tenantId": r["tenant_id"], "capability": "EXTRACTION",
         "documentTypeKey": r["document_type_key"], "model": r["model"], "tier": r["tier"],
