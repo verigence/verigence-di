@@ -221,6 +221,23 @@ jobs:
           restartPolicyType = "ALWAYS"
           TOML
 
+      - name: Disconnect the GitHub source of the DI services
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 2026-11-16: deploys come only from this workflow (railway up backend).
+          # With the GitHub repo also connected, a Railway-side redeploy (a setting
+          # or variable changed on the service) built the repository root instead
+          # of backend/: an image without alembic.ini, so di-api's pre-deploy
+          # "alembic upgrade head" failed with "No 'script_location' key found in
+          # configuration" (twice on 16 Nov), and both workers were replaced by
+          # images this workflow never built. Audit Core disconnected its services
+          # for the same reason on 2026-10-27. Disconnecting is idempotent.
+          for service in "$DI_API_SERVICE" "$DI_WORKER_SERVICE" "$DI_V2_WORKER_SERVICE"; do
+            railway service source disconnect --service "$service" >/dev/null 2>&1 \
+              || echo "::warning title=source disconnect::could not disconnect the GitHub source of $service (already disconnected, or the CLI lacks the command)"
+          done
+
       - name: Record current DI deployments
         shell: bash
         run: |

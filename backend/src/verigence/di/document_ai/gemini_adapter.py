@@ -38,7 +38,10 @@ from verigence.di.document_ai.adapter import (
 from verigence.di.document_ai.gemini_cost import (
     GeminiUsage,
     apply_service_tier,
+    call_metrics,
     generation_config,
+    note_call,
+    summarise_calls,
     tier_timeout,
     usage_from_response,
 )
@@ -420,6 +423,11 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             "finish_reason": last_usage.finish_reason if last_usage else None,
             "duration_ms": duration_ms,
         }
+        # Tier, prices in force and cost of this read (2026-11-16).
+        billed = summarise_calls([call_metrics(_GEMINI_MODEL, u) for u in usages])
+        for key in ("service_tier", "billed_output_tokens", "price_input_per_mtok",
+                    "price_output_per_mtok", "cost_usd"):
+            usage[key] = billed.get(key)
 
         return AIInvocationResult(
             capability=AICapability.VISION_EXTRACTION,
@@ -612,6 +620,9 @@ async def _call_gemini_instrumented(
     if not isinstance(data, dict):
         raise GeminiResponseInvalidError("Gemini response body is not a JSON object")
     usage = usage_from_response(data)
+    # Every answered call is priced and kept, a refused or unusable answer too:
+    # it is billed all the same (2026-11-16).
+    note_call(_GEMINI_MODEL, usage)
     if on_usage is not None:
         on_usage(usage)
     if usage.blocked:
