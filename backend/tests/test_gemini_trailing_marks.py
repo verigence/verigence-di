@@ -86,3 +86,13 @@ def test_items_out_of_page_order_or_without_pages_are_still_refused() -> None:
     for raw in (out_of_order, no_pages):
         with pytest.raises(GeminiResponseInvalidError):
             _parse_response(raw, get_schema("accessory_invoice_dms"), _INVOICE_FIELDS)
+
+
+def test_every_document_is_told_a_trailing_slash_dash_is_no_digit() -> None:
+    """Product owner 2026-11-17: '30,000/-' read as 30001 (booking forms, cost sheets,
+    sanction letters, statements, receipts)."""
+    from verigence.di.document_ai.gemini_adapter import _build_prompt
+
+    for document_type in ("booking_form", "cost_sheet", "bank_approval_letter", "dealer_receipt", "customer_ledger"):
+        prompt = _build_prompt(get_schema(document_type), _FIELDS)
+        assert "30,000/- is 30000, never 30001" in prompt
