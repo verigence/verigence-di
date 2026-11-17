@@ -493,6 +493,13 @@ def _build_prompt(schema: SchemaDefinition, db_fields: list[ExtractionField]) ->
         "Leave out any field that is not on the document; never return null placeholders.",
         "Never guess — leave a field out if its value is uncertain.",
         (
+            # Product owner 2026-11-17: '30,000/-' was read as 30001 on booking forms, cost
+            # sheets, sanction letters, statements and receipts alike.
+            "An amount written with a trailing '/-' or '/' (the Indian rupee convention, "
+            "for example 30,000/- or Rs 1,500/) ends at the last digit before it: the '/' "
+            "or '/-' is never a digit, so 30,000/- is 30000, never 30001 or 300001."
+        ),
+        (
             "For each FOUND value, return pageNo and box_2d only when you can localize "
             "the exact printed or handwritten value on the source document; otherwise "
             "leave pageNo and box_2d out."
