@@ -49,6 +49,9 @@ class SchemaDefinition:
     fields            — ordered list of FieldSpec
     system_prompt     — Gemini system prompt for this document type
     prompt_notes      — extra instructions appended to the user message
+    media_resolution  — the detail the provider reads this type's pages at
+                        (a Gemini MediaResolution name); None is its default,
+                        which for a PDF page is half the detail of a photo
     """
     document_type_key: str
     display_name: str
@@ -56,3 +59,4 @@ class SchemaDefinition:
     fields: list[FieldSpec]
     system_prompt: str
     prompt_notes: list[str] = field(default_factory=list)
+    media_resolution: str | None = None

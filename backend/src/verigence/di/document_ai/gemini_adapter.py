@@ -191,6 +191,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
             schema_field_count=len(fields),
             required_field_count=required_count,
             evidence_localization_requested=True,
+            media_resolution=schema.media_resolution or "default",
         )
 
         raw_response: str | None = None
@@ -223,6 +224,7 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                         prompt=prompt,
                         thinking_level=thinking_level,
                         max_output_tokens=settings.docai_gemini_max_output_tokens,
+                        media_resolution=schema.media_resolution,
                         on_usage=usages.append,
                     )
                 )
@@ -554,8 +556,10 @@ def _build_payload(
     *,
     thinking_level: str | None = None,
     max_output_tokens: int | None = None,
+    media_resolution: str | None = None,
 ) -> dict[str, Any]:
-    """``thinking_level`` None uses the extraction setting; "" the model default."""
+    """``thinking_level`` None uses the extraction setting; "" the model default.
+    ``media_resolution`` None leaves the provider's default page detail."""
     settings = get_settings()
     effective_mime = mime_type if mime_type else "application/octet-stream"
     image_b64 = base64.b64encode(artifact_bytes).decode("ascii")
@@ -577,6 +581,7 @@ def _build_payload(
                 settings.docai_gemini_max_output_tokens
                 if max_output_tokens is None else max_output_tokens
             ),
+            media_resolution=media_resolution,
         ),
     }
 
@@ -589,6 +594,7 @@ async def _call_gemini_instrumented(
     *,
     thinking_level: str | None = None,
     max_output_tokens: int | None = None,
+    media_resolution: str | None = None,
     on_usage: Callable[[GeminiUsage], None] | None = None,
 ) -> tuple[str, int, int, int]:
     """Send document bytes + prompt to Gemini with token instrumentation.
@@ -598,6 +604,7 @@ async def _call_gemini_instrumented(
     payload = _build_payload(
         artifact_bytes, mime_type, prompt,
         thinking_level=thinking_level, max_output_tokens=max_output_tokens,
+        media_resolution=media_resolution,
     )
     apply_service_tier(payload)
     timeout = tier_timeout(120.0, float(get_settings().docai_gemini_flex_timeout_seconds))

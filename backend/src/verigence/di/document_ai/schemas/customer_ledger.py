@@ -18,6 +18,13 @@ CUSTOMER_LEDGER_SCHEMA = SchemaDefinition(
     document_type_key="customer_ledger",
     display_name="Customer Ledger",
     schema_version="1.1",
+    # A statement page is read at full detail (2026-11-17). 1,510 of the 1,542
+    # statements on file are PDFs, which the provider reads at half a photo's
+    # detail by default. Live test on 158 statements, each scored by its own
+    # printed totals (Audit Core #844): of 100 whose rows did not add up, 21
+    # added up at full detail against 5 on a plain re-read; of 40 that added up,
+    # 34 still did against 36. About 10% more per read (one page: +560 tokens).
+    media_resolution="MEDIA_RESOLUTION_HIGH",
     fields=[
         FieldSpec(key="dealer_name", field_type="string", required=False, description="Dealership/company name whose books the ledger belongs to, exactly as printed"),
         FieldSpec(key="customer_name", field_type="string", required=True, description="Customer/party/account name the ledger is maintained for, exactly as printed"),
