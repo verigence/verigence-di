@@ -161,8 +161,11 @@ BLOCKED_FINISH_REASONS = frozenset(
 )
 
 
-def generation_config(*, thinking_level: str, max_output_tokens: int) -> dict[str, Any]:
-    """``generationConfig`` for a JSON answer at temperature 0."""
+def generation_config(
+    *, thinking_level: str, max_output_tokens: int, media_resolution: str | None = None,
+) -> dict[str, Any]:
+    """``generationConfig`` for a JSON answer at temperature 0. ``media_resolution``
+    None leaves the provider's default page detail."""
     config: dict[str, Any] = {
         "temperature": 0,
         "responseMimeType": "application/json",
@@ -171,6 +174,8 @@ def generation_config(*, thinking_level: str, max_output_tokens: int) -> dict[st
         config["maxOutputTokens"] = max_output_tokens
     if thinking_level:
         config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+    if media_resolution:
+        config["mediaResolution"] = media_resolution
     return config
 
 

@@ -16,7 +16,7 @@ from verigence.di.document_ai.gemini_cost import (
     generation_config,
     usage_from_response,
 )
-from verigence.di.document_ai.schemas import get_schema
+from verigence.di.document_ai.schemas import SCHEMA_REGISTRY, get_schema
 from verigence.di.settings import get_settings
 from verigence.di.workers.capture_v2_classifier import trusted_single_candidate
 
@@ -58,6 +58,56 @@ def test_extraction_payload_uses_the_extraction_thinking_level() -> None:
     assert payload["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
     authoring = gemini_adapter._build_payload(b"x", "application/pdf", "prompt", thinking_level="")
     assert "thinkingConfig" not in authoring["generationConfig"]
+
+
+def test_page_detail_is_the_providers_default_unless_a_type_asks_for_more() -> None:
+    assert "mediaResolution" not in generation_config(thinking_level="low", max_output_tokens=16384)
+    assert "mediaResolution" not in gemini_adapter._build_payload(b"x", "application/pdf", "prompt")["generationConfig"]
+    payload = gemini_adapter._build_payload(
+        b"x", "application/pdf", "prompt", media_resolution="MEDIA_RESOLUTION_HIGH")
+    assert payload["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_HIGH"
+    # the account statement is the one type read at full detail (live test 2026-11-17)
+    assert get_schema("customer_ledger").media_resolution == "MEDIA_RESOLUTION_HIGH"
+    others = {key for key, schema in SCHEMA_REGISTRY.items() if schema.media_resolution}
+    assert others == {"customer_ledger"}
+
+
+@pytest.mark.asyncio
+async def test_a_statement_is_sent_at_full_page_detail_and_an_invoice_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict[str, Any]] = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, Any]:
+            return {"candidates": [{"content": {"parts": [{"text": "{}"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2, "totalTokenCount": 12}}
+
+    class _Client:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs: Any) -> _Response:
+            sent.append(kwargs["json"])
+            return _Response()
+
+    monkeypatch.setattr(gemini_adapter.httpx, "AsyncClient", _Client)
+    adapter = gemini_adapter.GeminiDocumentAIAdapter(api_key="k")
+    fields = [ExtractionField(field_key="customer_name")]
+    await adapter.extract(b"%PDF", "application/pdf", fields, document_type_key="customer_ledger")
+    await adapter.extract(b"%PDF", "application/pdf", fields, document_type_key="customer_invoice_dms")
+    assert sent[0]["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_HIGH"
+    assert "mediaResolution" not in sent[1]["generationConfig"]
+    assert sent[0]["generationConfig"]["thinkingConfig"] == sent[1]["generationConfig"]["thinkingConfig"]
 
 
 def test_prompt_asks_for_found_fields_only() -> None:
