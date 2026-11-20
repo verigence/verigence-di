@@ -26,6 +26,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from verigence.di import night_rest
 from verigence.di.application.intake import _detect_mime
 from verigence.di.document_ai.gemini_cost import (
     AI_USAGE_SINK,
@@ -108,6 +109,7 @@ def usage_params(tenant_id: str, job_id: uuid.UUID, usage: dict[str, Any]) -> di
         "cost": _numeric(usage["cost_usd"]),
     }
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
+_NOTIFY_REOPEN_SECONDS = 60.0  # a lost LISTEN connection is opened again at most this often
 
 # How often a failed classification is tried again (product owner's rule
 # 2026-10-21, see retry_policy.py): a Gemini failure (quota, outage, timeout,
@@ -198,6 +200,7 @@ class CaptureV2ClassificationWorker:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._notify_conn: Any | None = None
+        self._notify_retry_at = 0.0
         self._runtime_correlation_id = correlation_id_or_new()
         self.stats = WorkerStats()
 
@@ -249,6 +252,30 @@ class CaptureV2ClassificationWorker:
             )
             return False
 
+    async def _keep_listening(self, notify_url: str, notify_active: bool) -> bool:
+        """The same rule as the processing lanes
+        (workers.processor._NotifyWorker._keep_listening): resting at night the
+        lane closes its LISTEN connection and waits without the database; a
+        connection found closed is opened again, at most once a minute."""
+        if night_rest.resting():
+            if self._notify_conn is not None:
+                with contextlib.suppress(Exception):
+                    await self._notify_conn.close()
+                self._notify_conn = None
+            await night_rest.wait_until_awake(self._stop)
+            self._notify_retry_at = 0.0
+            if self._stop.is_set():
+                return False
+        elif self._notify_conn is not None and not self._notify_conn.is_closed():
+            return notify_active
+        elif notify_active and self._notify_conn is None:
+            return notify_active  # a listener this class did not open (tests)
+        if time.monotonic() < self._notify_retry_at:
+            return False
+        self._notify_retry_at = time.monotonic() + _NOTIFY_REOPEN_SECONDS
+        self._notify_conn = None
+        return await self._open_notify(notify_url)
+
     async def _run(self) -> None:
         settings = get_settings()
         database_url = str(settings.database_url)
@@ -259,6 +286,9 @@ class CaptureV2ClassificationWorker:
         worker_id = _worker_id()
         try:
             while not self._stop.is_set():
+                notify_active = await self._keep_listening(str(notify_url), notify_active)
+                if self._stop.is_set():
+                    break
                 self.stats.cycles += 1
                 did_work = False
                 try:

@@ -114,6 +114,29 @@ jobs:
             echo "DI_V2_SERVICE=EXISTS|$DI_V2_WORKER_SERVICE"
           fi
 
+          # The night's sleep (verigence.di.night_rest): a resting worker reads the
+          # API's in-memory request counter at this address instead of polling the
+          # database. Without a public domain it is left unset and the workers
+          # never rest. The V2 worker takes it with the DI_ variables copied below.
+          railway variable list --service "$DI_API_SERVICE" --json >/tmp/di-api-vars-night.json
+          night_signal_url="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('/tmp/di-api-vars-night.json').read_text())
+          domain=(data.get('RAILWAY_PUBLIC_DOMAIN') or data.get('RAILWAY_STATIC_URL') or '').strip().rstrip('/')
+          if domain and not domain.startswith(('http://','https://')):
+              domain='https://'+domain
+          print(domain+'/health/night-signal' if domain else '')
+          PY
+          )"
+          night_signal_assignment=()
+          if [[ -n "$night_signal_url" ]]; then
+            night_signal_assignment=("DI_NIGHT_SIGNAL_URL=${night_signal_url}")
+            echo 'DI_NIGHT_SIGNAL_URL=SET'
+          else
+            echo 'DI_NIGHT_SIGNAL_URL=UNSET|no_public_domain'
+          fi
+
           # Keep the existing worker as the single legacy/V1 + EOD lane. Set the
           # custom Dockerfile explicitly because Railway Config-as-Code is deprecated
           # and newly-created services do not opt into railway.toml configuration.
@@ -122,6 +145,7 @@ jobs:
             --environment "$RAILWAY_ENVIRONMENT" \
             --skip-deploys \
             DI_WORKER_MODE=legacy \
+            "${night_signal_assignment[@]}" \
             RAILWAY_DOCKERFILE_PATH=Dockerfile.worker >/dev/null
 
           # Copy DI runtime configuration without printing secret values. Worker-specific

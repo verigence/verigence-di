@@ -133,6 +133,25 @@ async def provision_actor(
     normalized_type = actor_type.strip().upper()
     if normalized_type not in _ALLOWED_ACTOR_TYPES:
         raise ValueError(f"Unsupported DI actor type: {actor_type}")
+    # Read first; write only when the actor is new or was switched off
+    # (2026-11-20). The upsert below rewrote the row on every request, and a
+    # rewrite (or even its lock, when ON CONFLICT's WHERE is false) holds the
+    # row until the caller's transaction ends. Audit Core sends every upload
+    # as one service actor, so uploads queued behind each other on this one
+    # row: 7,696 calls waited 4.6 s on average, 56% of all database time
+    # (16-20 Nov). A plain read takes no lock.
+    known = (
+        await session.execute(
+            text("""
+                SELECT actor_type, status FROM docintel.actors
+                WHERE tenant_id = :tenant_id AND actor_id = :actor_id
+            """),
+            {"tenant_id": tenant_id, "actor_id": actor_id},
+        )
+    ).one_or_none()
+    if known is not None and (known[0] != normalized_type or known[1] == "ACTIVE"):
+        # Already as wanted; or of another type, which the upsert never changed either.
+        return
     now = datetime.now(UTC)
     await session.execute(
         text("""

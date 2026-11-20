@@ -47,6 +47,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from verigence.di.night_rest import resting as worker_resting
 from verigence.di.repositories.backout import insert_backout_job, sweep_expired_backout_jobs
 from verigence.di.repositories.processing_jobs import fail_job
 from verigence.di.runtime_errors import (
@@ -110,6 +111,12 @@ class EODRetryScheduler:
 async def _run_scheduler_tick(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Periodic check (every 60 s) -- see module docstring for the three
     independent things this does."""
+    # The night's sleep (verigence.di.night_rest): a resting worker asks the
+    # database nothing. Nothing is running that could go stale, and a document
+    # waiting for its once-daily retry wakes the worker in time
+    # (seconds_until_eod_retry).
+    if worker_resting():
+        return
     now_utc = datetime.now(UTC)
     tick_correlation_id = f"scheduler.{uuid.uuid4()}"
     with structlog.contextvars.bound_contextvars(correlation_id=tick_correlation_id):
@@ -208,6 +215,63 @@ def _is_eod_window(now_utc: datetime, tz_name: str, eod_time: dtime) -> bool:
     eod_seconds = eod_time.hour * 3600 + eod_time.minute * 60 + eod_time.second
 
     return abs(local_seconds - eod_seconds) <= _EOD_WINDOW_SECONDS
+
+
+_EOD_ELIGIBLE_SQL = """
+    d.upload_status = 'FIT'
+    AND d.processing_status = 'RETRY_PENDING'
+    AND NOT EXISTS (
+        SELECT 1 FROM docintel.processing_jobs pj
+        WHERE pj.tenant_id = d.tenant_id
+          AND pj.document_id = d.document_id
+          AND pj.job_type = 'EOD_RETRY'
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM docintel.document_capture_v2_uploads v2
+        WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
+    )
+"""
+
+
+def _seconds_until_local_time(now_utc: datetime, tz_name: str, at: dtime) -> float | None:
+    """Seconds from now to the next time the Tenant's clock reads ``at``."""
+    try:
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 - an unknown zone has no next time
+        return None
+    local_now = now_utc.astimezone(tz)
+    target = local_now.replace(hour=at.hour, minute=at.minute, second=at.second, microsecond=0)
+    if target <= local_now:
+        target += timedelta(days=1)
+    return (target - local_now).total_seconds()
+
+
+async def seconds_until_eod_retry(session: AsyncSession, now_utc: datetime) -> float | None:
+    """Seconds until the next once-daily retry that has a document to retry;
+    None when no Tenant has one waiting. A minute early, so the worker is up
+    when the time comes."""
+    rows = (
+        await session.execute(
+            text(f"""
+                SELECT ts.timezone_name, ts.eod_retry_local_time
+                FROM docintel.tenant_settings ts
+                WHERE ts.status = 'ACTIVE'
+                  AND ts.eod_retry_enabled = true
+                  AND EXISTS (
+                      SELECT 1 FROM docintel.documents d
+                      WHERE d.tenant_id = ts.tenant_id AND {_EOD_ELIGIBLE_SQL}
+                  )
+            """),  # noqa: S608 - a constant fragment, no input
+        )
+    ).all()
+    waits = [
+        wait
+        for tz_name, eod_time in rows
+        if (wait := _seconds_until_local_time(now_utc, tz_name, eod_time)) is not None
+    ]
+    return max(0.0, min(waits) - 60.0) if waits else None
 
 
 async def _insert_eod_retry_jobs(

@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # persistent direct connection (Neon: ep-xxx.region.neon.tech, no -pooler.).
     # Empty string disables pg_notify and falls back to poll-only mode.
     worker_notify_db_url: str = ""
+    # The night's sleep (verigence.di.night_rest): where a resting worker reads
+    # the API's in-memory request counter, e.g.
+    # https://<di-api host>/health/night-signal. Set by the deploy workflow.
+    # Empty: the worker never rests and polls as it always did.
+    night_signal_url: str = ""
 
     # Backout queue TTL — failed jobs are written to backout_jobs and expire after this many hours (D24).
     # 72h (3 days) rather than the original 12h. It was set so that the backout

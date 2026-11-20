@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -192,8 +193,13 @@ async def _safe(action: str, coro: Any) -> None:
 
 async def run_platform_heartbeat(
     database_url: str, default_service: str, stop_event: asyncio.Event, *, sample_seconds: float = SAMPLE_SECONDS,
+    asleep: Callable[[], bool] | None = None,
 ) -> None:
-    """Run until ``stop_event`` is set, then stamp a clean stop. Owns a one-connection engine."""
+    """Run until ``stop_event`` is set, then stamp a clean stop. Owns a one-connection engine.
+
+    While ``asleep()`` is true nothing is sampled or written: a beat a minute
+    kept the database running all night (verigence.di.night_rest). Audit Core
+    reads a service last heard from just before the window opened as running."""
     engine = create_async_engine(database_url, echo=False, pool_size=1, max_overflow=0, pool_pre_ping=True)
     heartbeat = PlatformHeartbeat(engine, default_service)
     try:
@@ -206,6 +212,8 @@ async def run_platform_heartbeat(
                 break
             except TimeoutError:
                 pass
+            if asleep is not None and asleep():
+                continue
             n += 1
             try:
                 heartbeat.sample()

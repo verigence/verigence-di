@@ -122,6 +122,7 @@ async def run_heartbeat(
     stats: Callable[[], Iterable[WorkerStats]],
     fields: dict[str, Any],
     interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
+    asleep: Callable[[], bool] | None = None,
 ) -> None:
     processed_before = 0
     idle_beats = 0
@@ -130,6 +131,11 @@ async def run_heartbeat(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         if stop_event.is_set():
             return
+        if asleep is not None and asleep():
+            # The night's rest (verigence.di.night_rest): the queues are not read,
+            # and a worker resting with a retry due later is not a stalled one.
+            idle_beats = 0
+            continue
         try:
             pending, processed_now = await emit_heartbeat(
                 session_factory=session_factory, stats=stats, fields=fields,

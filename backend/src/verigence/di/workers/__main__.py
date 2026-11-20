@@ -119,13 +119,38 @@ async def _main() -> None:
         return [worker.stats for worker in workers]
 
     heartbeat_engine = create_async_engine(str(settings.database_url), echo=False, pool_size=1)
+    heartbeat_sessions = async_sessionmaker(
+        heartbeat_engine, class_=AsyncSession, expire_on_commit=False,
+    )
+
+    # The night's sleep (verigence.di.night_rest): with nothing in hand inside the
+    # window this process asks the database nothing -- no polling, no heartbeat,
+    # no scheduler tick -- until the API's request counter moves, a retry falls
+    # due or the window ends. Installed before the heartbeats start; the lanes
+    # read it at the top of every turn.
+    from functools import partial  # noqa: PLC0415
+
+    from verigence.di import night_rest  # noqa: PLC0415
+    from verigence.di.workers.night_work import work_due_in  # noqa: PLC0415
+
+    rest = night_rest.NightRest(
+        signal_url=settings.night_signal_url,
+        work_due_in=partial(work_due_in, heartbeat_sessions, include_legacy=include_legacy),
+        name=f"di-worker-{mode.value}",
+    )
+    night_rest.install(rest)
+    night_task = asyncio.create_task(rest.run(stop_event), name="di-night-rest")
+    print(
+        "DI_NIGHT_REST=" + ("ON" if settings.night_signal_url.strip() else "OFF|no_signal_url"),
+        flush=True,
+    )
+
     heartbeat_task = asyncio.create_task(
         run_heartbeat(
             stop_event=stop_event,
-            session_factory=async_sessionmaker(
-                heartbeat_engine, class_=AsyncSession, expire_on_commit=False,
-            ),
+            session_factory=heartbeat_sessions,
             stats=_worker_stats,
+            asleep=night_rest.resting,
             fields={
                 "worker_mode": mode.value,
                 "replica_id": replica_id,
@@ -140,7 +165,9 @@ async def _main() -> None:
     from verigence.di.platform_heartbeat import run_platform_heartbeat  # noqa: PLC0415
 
     platform_heartbeat_task = asyncio.create_task(
-        run_platform_heartbeat(str(settings.database_url), f"di-worker-{mode.value}", stop_event),
+        run_platform_heartbeat(
+            str(settings.database_url), f"di-worker-{mode.value}", stop_event, asleep=night_rest.resting,
+        ),
         name="di-platform-heartbeat",
     )
 
@@ -180,6 +207,8 @@ async def _main() -> None:
             await asyncio.wait_for(heartbeat_task, timeout=5)
         with suppress(Exception):
             await asyncio.wait_for(platform_heartbeat_task, timeout=5)
+        with suppress(Exception):
+            await asyncio.wait_for(night_task, timeout=5)
         with suppress(Exception):
             await heartbeat_engine.dispose()
         await asyncio.gather(
