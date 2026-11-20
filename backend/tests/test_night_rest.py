@@ -423,16 +423,6 @@ async def test_the_scheduler_tick_does_nothing_while_the_worker_rests(monkeypatc
     assert len(ran) == 1
 
 
-@pytest.mark.no_docker
-def test_the_next_once_daily_retry_is_found_on_the_tenants_own_clock() -> None:
-    from verigence.di.scheduler import beat
-
-    now = datetime(2026, 11, 19, 21, 0, tzinfo=UTC)  # 02:30 IST
-    assert beat._seconds_until_local_time(now, "UTC", clock_time(23, 0)) == 7200  # noqa: SLF001
-    assert beat._seconds_until_local_time(now, "Asia/Kolkata", clock_time(23, 0)) == 20.5 * 3600  # noqa: SLF001
-    assert beat._seconds_until_local_time(now, "Not/AZone", clock_time(23, 0)) is None  # noqa: SLF001
-
-
 # ── what a worker has in hand ───────────────────────────────────────────────
 
 
@@ -441,17 +431,15 @@ def test_a_worker_rests_only_with_nothing_waiting_or_running() -> None:
     from verigence.di.workers.night_work import due_in
 
     now = datetime(2026, 11, 19, 21, 0, tzinfo=UTC)
-    nothing = {"running": False, "link_pending": False, "next_due_at_utc": None, "eod_retry_in": None}
+    nothing = {"running": False, "link_pending": False, "next_due_at_utc": None}
     assert due_in(**nothing, include_legacy=False, now=now) is None
     assert due_in(**{**nothing, "running": True}, include_legacy=False, now=now) == 0
     # a job due now, or overdue, is work in hand; one due later is a wait
     assert due_in(**{**nothing, "next_due_at_utc": now - timedelta(seconds=5)}, include_legacy=False, now=now) == 0
     assert due_in(**{**nothing, "next_due_at_utc": now + timedelta(minutes=10)}, include_legacy=False, now=now) == 600
-    # the link to Audit Core and the once-daily retry are the legacy lane's alone
-    legacy_only = {**nothing, "link_pending": True, "eod_retry_in": 300.0}
-    assert due_in(**legacy_only, include_legacy=False, now=now) is None
-    assert due_in(**legacy_only, include_legacy=True, now=now) == 0
-    assert due_in(**{**nothing, "eod_retry_in": 300.0}, include_legacy=True, now=now) == 300
+    # the link to Audit Core is the legacy lane's alone
+    assert due_in(**{**nothing, "link_pending": True}, include_legacy=False, now=now) is None
+    assert due_in(**{**nothing, "link_pending": True}, include_legacy=True, now=now) == 0
 
 
 # ── against the database ────────────────────────────────────────────────────

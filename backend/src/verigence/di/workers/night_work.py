@@ -33,19 +33,15 @@ def due_in(
     running: bool,
     link_pending: bool,
     next_due_at_utc: datetime | None,
-    eod_retry_in: float | None,
     include_legacy: bool,
     now: datetime,
 ) -> float | None:
     """What one read of the queues means for a worker about to rest."""
     if running or (include_legacy and link_pending):
         return 0.0
-    waits: list[float] = []
-    if next_due_at_utc is not None:
-        waits.append(max(0.0, (next_due_at_utc - now).total_seconds()))
-    if include_legacy and eod_retry_in is not None:
-        waits.append(max(0.0, eod_retry_in))
-    return min(waits) if waits else None
+    if next_due_at_utc is None:
+        return None
+    return max(0.0, (next_due_at_utc - now).total_seconds())
 
 
 async def work_due_in(
@@ -57,18 +53,10 @@ async def work_due_in(
     now = now or datetime.now(UTC)
     async with session_factory() as session:
         row = (await session.execute(text(_QUEUES_SQL))).mappings().one()
-        eod_retry_in: float | None = None
-        if include_legacy:
-            # The legacy lane's once-daily retry (scheduler/beat.py) is due by the
-            # clock; a worker with such a document waiting is up for it.
-            from verigence.di.scheduler.beat import seconds_until_eod_retry  # noqa: PLC0415
-
-            eod_retry_in = await seconds_until_eod_retry(session, now)
     return due_in(
         running=bool(row["running"]),
         link_pending=bool(row["link_pending"]),
         next_due_at_utc=row["next_due_at_utc"],
-        eod_retry_in=eod_retry_in,
         include_legacy=include_legacy,
         now=now,
     )

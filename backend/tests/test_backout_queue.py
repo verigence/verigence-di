@@ -8,7 +8,8 @@ Coverage:
 - sweep_expired_backout_jobs() deletes expired rows and returns count
 - sweep_expired_backout_jobs() does not delete non-expired rows
 - _handle_failure() in processor.py:
-  - retryable=True, attempt_no=1  → RETRY_PENDING path (retry_job called, no backout)
+  - legacy document, retryable, attempt_no=1 → D24 backout path at once (the
+    once-daily retry it used to wait for is gone, 20 Nov 2026)
   - retryable=True, attempt_no=2  → D24 backout path (fail_job + insert_backout_job)
   - retryable=False, any attempt  → D24 backout path immediately
 - settings backout_ttl_hours default is 72 (3 days, since 2026-09-14, set
@@ -245,13 +246,16 @@ class TestHandleFailure:
     # ── New retry-path tests (Phase 3 #10) ────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_retryable_attempt1_calls_retry_job_not_backout(self) -> None:
-        """retryable=True, attempt_no=1 → retry_job called; no backout row inserted."""
+    async def test_a_legacy_documents_first_retryable_failure_is_final_at_once(self) -> None:
+        """Legacy (non-Capture-V2) document, retryable=True, attempt_no=1 → failed and
+        written to the backout queue; never left RETRY_PENDING. The once-daily
+        retry that used to pick such a document up is gone (product owner,
+        20 Nov 2026): left waiting, it would never be read and never be reported."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
         job_log = MagicMock()
-        job_log.info = MagicMock()
+        job_log.warning = MagicMock()
 
         with (
             patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
@@ -273,13 +277,12 @@ class TestHandleFailure:
                 job_log=job_log,
             )
 
-        mock_retry.assert_called_once()
-        mock_fail.assert_not_called()
-        mock_backout.assert_not_called()
-        # A retry follows, but the attempt still failed: WARNING, not INFO.
-        job_log.warning.assert_called_once()
-        assert job_log.warning.call_args[0][0] == "job_retry_pending"
-        job_log.info.assert_not_called()
+        mock_retry.assert_not_called()
+        mock_fail.assert_called_once()
+        mock_backout.assert_called_once()
+        assert mock_backout.call_args.kwargs["error_class"] == "RETRYABLE"
+        logged = [call.args[0] for call in (*job_log.warning.call_args_list, *job_log.error.call_args_list)]
+        assert logged == ["job_failed_backout"]  # reported failed, not "retry pending"
 
     @pytest.mark.asyncio
     async def test_retryable_attempt2_calls_backout_not_retry(self) -> None:
@@ -423,7 +426,7 @@ class TestHandleFailure:
     @pytest.mark.asyncio
     async def test_capture_v2_retryable_attempt1_also_schedules_fast_retry(self) -> None:
         """A Capture V2 document's first retryable failure gets a near-term
-        second attempt, not just the once-daily EOD Retry Scheduler."""
+        second attempt."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -577,9 +580,9 @@ class TestHandleFailure:
         outcome["fail"].assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_legacy_retryable_attempt1_does_not_schedule_fast_retry(self) -> None:
-        """A non-V2 (legacy) document's first retryable failure is unaffected --
-        it still waits on the once-daily EOD Retry Scheduler as before."""
+    async def test_legacy_retryable_attempt1_schedules_no_retry_of_any_kind(self) -> None:
+        """A non-V2 (legacy) document's first retryable failure is given neither
+        the V2 daytime retry nor a wait for a retry that no longer exists."""
         from verigence.di.workers.processor import _handle_failure
 
         factory = self._make_session_factory()
@@ -588,6 +591,8 @@ class TestHandleFailure:
 
         with (
             patch("verigence.di.workers.processor.retry_job", new_callable=AsyncMock) as mock_retry,
+            patch("verigence.di.workers.processor.fail_job", new_callable=AsyncMock) as mock_fail,
+            patch("verigence.di.workers.processor.insert_backout_job", new_callable=AsyncMock),
             patch(
                 "verigence.di.workers.processor.schedule_v2_fast_retry", new_callable=AsyncMock,
             ) as mock_fast_retry,
@@ -607,8 +612,9 @@ class TestHandleFailure:
                 job_log=job_log,
             )
 
-        mock_retry.assert_called_once()
+        mock_retry.assert_not_called()
         mock_fast_retry.assert_not_called()
+        mock_fail.assert_called_once()
 
 
 class TestExecuteClaimedJobDetectsCaptureV2:

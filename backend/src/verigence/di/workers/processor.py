@@ -795,30 +795,11 @@ async def _handle_failure(
             )
             return
 
-    if retryable and attempt_no == 1 and not is_capture_v2:
-        async with session_factory() as session, session.begin():
-            await retry_job(
-                session,
-                tenant_id=tenant_id,
-                processing_job_id=job_id,
-                error_code=safe_code,
-                error_detail=safe_detail,
-            )
-        # The legacy/V1 flow's next attempt is the once-daily EOD Retry
-        # Scheduler (scheduler/beat.py) -- an accepted design there. Capture
-        # V2's daytime retries are scheduled above.
-        job_log.warning(
-            "job_retry_pending",
-            error_class=error_class,
-            error_code=safe_code,
-            error_category=error_category,
-            attempt_no=attempt_no,
-            duration_ms=duration_ms,
-            is_capture_v2=False,
-            fast_retry_scheduled=False,
-        )
-        return
-
+    # A legacy (non-Capture-V2) document's failure is final at once. Its first
+    # retryable failure used to wait as RETRY_PENDING for the once-daily retry
+    # (scheduler/beat.py), which is gone (product owner, 20 Nov 2026); left
+    # waiting, the document would never be read and never be reported failed.
+    # Capture V2's daytime retries are scheduled above.
     settings = get_settings()
     ttl_hours: int = settings.backout_ttl_hours
 

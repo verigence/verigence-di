@@ -139,10 +139,6 @@ async def test_the_scheduler_queues_nothing_at_the_old_nightly_time(
     recorder = _Recorder()
     monkeypatch.setattr(beat, "logger", recorder)
 
-    async def no_tenants(_session: Any) -> list[dict[str, Any]]:
-        return []  # the EOD retry (legacy documents only) is another job, not under test
-
-    monkeypatch.setattr(beat, "_load_enabled_tenants", no_tenants)
     factory = _SharedSession(db_session)
     # The whole of the old trigger window: 17:00 UTC +/- 90 seconds, every tick.
     for hour, minute, second in [(16, 58, 31), (16, 59, 30), (17, 0, 0), (17, 0, 45), (17, 1, 30), (17, 1, 31)]:
@@ -178,12 +174,17 @@ def test_no_nightly_name_is_left_in_the_scheduler_the_job_queue_or_the_retry_pol
 
 
 @pytest.mark.no_docker
-def test_the_scheduler_tick_has_no_time_of_day_trigger_but_the_eod_retry() -> None:
+def test_the_scheduler_tick_has_no_time_of_day_trigger_at_all() -> None:
+    """Nothing in DI runs by the clock: the nightly reprocessing went on
+    2026-10-22 and the once-daily retry of legacy documents on 2026-11-20 (it
+    ran at 23:00 UTC, 4:30 am India time, inside the night's sleep)."""
     import inspect
 
     source = inspect.getsource(beat._run_scheduler_tick_in_context)
     assert "NIGHTLY" not in source.upper()
-    assert "_is_eod_window" in source  # the daytime EOD retry of legacy documents is a different job
+    assert "EOD" not in source.upper()
+    for gone in ("_is_eod_window", "_insert_eod_retry_jobs", "_load_enabled_tenants", "seconds_until_eod_retry"):
+        assert not hasattr(beat, gone), gone
 
 
 # ── the listing never announces a night attempt ───────────────────────────────

@@ -274,8 +274,10 @@ async def retry_job(
 ) -> None:
     """Mark a RUNNING job as FAILED and set the document to RETRY_PENDING.
 
-    Called by the worker after a RETRYABLE processing failure.
-    The EOD Retry Scheduler will later insert an EOD_RETRY job (attempt_no=2).
+    Called by the worker after a Capture V2 document's retryable failure,
+    together with schedule_v2_fast_retry(), which queues the next attempt.
+    Nothing else picks up a RETRY_PENDING document: the once-daily retry of
+    legacy documents is gone (20 Nov 2026).
     """
     now = datetime.now(UTC)
     safe_code = _cap(error_code, _MAX_ERROR_CODE)
@@ -333,20 +335,18 @@ async def schedule_v2_fast_retry(
     delay_seconds: int = V2_FAST_RETRY_DELAY_SECONDS,
 ) -> None:
     """Give a Capture V2 document's retryable extraction failure its next
-    daytime attempt (``attempt_no``, due in ``delay_seconds``) instead of the
-    legacy EOD Retry Scheduler.
+    daytime attempt (``attempt_no``, due in ``delay_seconds``).
 
-    retry_job() above already set the document to RETRY_PENDING -- correct
-    for the legacy/V1 flow, where the EOD Retry Scheduler inserting the
-    attempt_no=2 job once a day is an accepted design (see scheduler/beat.py).
-    But Document Capture V2's whole reason for a dedicated bounded worker
-    pool is a fast, PC-facing turnaround (see workers/processor.py's module
-    docstring) -- leaving its retry on the same once-daily schedule can
-    leave a document showing nothing more than "still processing" for up
-    to ~24h with no way for a PC to tell it already failed once.
+    retry_job() above already set the document to RETRY_PENDING; this queues
+    the attempt that takes it out of that state. Document Capture V2's whole
+    reason for a dedicated bounded worker pool is a fast, PC-facing turnaround
+    (see workers/processor.py's module docstring): a retry left for the end of
+    the day could leave a document showing nothing more than "still
+    processing" for up to ~24h with no way for a PC to tell it already failed
+    once.
 
     Idempotent via the same (tenant_id, document_id, job_type, attempt_no)
-    uniqueness EOD_RETRY also relies on -- a second
+    uniqueness -- a second
     failed attempt at the SAME job_type+attempt_no can't insert a
     duplicate, and by the time a genuinely new upload of the same
     document_id could exist, this row is long since resolved.
