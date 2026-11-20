@@ -34,14 +34,15 @@ concurrency:
 
 jobs:
   backup:
-    if: github.ref == 'refs/heads/dev'
+    # dev, or the branch this one-shot is rehearsed on before it lands in dev
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/ops/railway-postgres-final-backup'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
       RAILWAY_ENVIRONMENT: dev
-      RAILWAY_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      DB_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
       DB_SERVICE: Postgres
       DB_SERVICE_ID: 8a209a79-024c-4441-b13b-fab51ae9e247
       STORAGE_SERVICE: verigence-p2-worker
@@ -146,7 +147,7 @@ jobs:
             started=no
             if railway redeploy --service "$DB_SERVICE" --yes >/tmp/redeploy.log 2>&1; then
               started=cli
-            elif graphql "{\"query\":\"mutation(\$s:String!,\$e:String!){serviceInstanceDeployV2(serviceId:\$s,environmentId:\$e)}\",\"variables\":{\"s\":\"${DB_SERVICE_ID}\",\"e\":\"${RAILWAY_ENVIRONMENT_ID}\"}}" >/tmp/deploy.json 2>&1 \
+            elif graphql "{\"query\":\"mutation(\$s:String!,\$e:String!){serviceInstanceDeployV2(serviceId:\$s,environmentId:\$e)}\",\"variables\":{\"s\":\"${DB_SERVICE_ID}\",\"e\":\"${DB_ENVIRONMENT_ID}\"}}" >/tmp/deploy.json 2>&1 \
                  && ! grep -q '"errors"' /tmp/deploy.json; then
               started=api
             elif [[ -n "$deployment_id" ]] \
