@@ -13,7 +13,8 @@ name: One-shot Railway Postgres final backup to R2
 #      the row count of every table with the source;
 #   5. uploads the dumps to the archive bucket under BACKUP_PREFIX (outside
 #      "archive/", so the 12-month archive retention rule does not touch
-#      them), downloads them again and compares checksums.
+#      them) -- or, where the storage key may not write there, to the document
+#      storage bucket -- downloads them again and compares checksums.
 #
 # Nothing is deleted here. Credentials are read from Railway variables with the
 # existing RAILWAY_API_TOKEN secret and are never printed.
@@ -199,6 +200,7 @@ jobs:
           values={
               'SOURCE_URL': url,
               'R2_BUCKET': (st.get('AUDIT_CORE_ARCHIVE_BUCKET') or '').strip(),
+              'R2_FALLBACK_BUCKET': storage('BUCKET'),
               'R2_ENDPOINT': storage('ENDPOINT'),
               'AWS_ACCESS_KEY_ID': storage('ACCESS_KEY_ID'),
               'AWS_SECRET_ACCESS_KEY': storage('SECRET_ACCESS_KEY'),
@@ -317,6 +319,13 @@ jobs:
           rm -f out/*.size.txt
 
           # ── upload, then download again and compare ─────────────────────────
+          # The archive bucket first. Where this key may not write to it (the nightly
+          # data archive fails the same way), the copy goes to the document storage
+          # bucket, under the same prefix; the last lines say where it is.
+          if ! aws s3 cp out/SHA256SUMS "s3://${R2_BUCKET}/${BACKUP_PREFIX}/SHA256SUMS" --endpoint-url "$R2_ENDPOINT" --only-show-errors 2>/tmp/probe.log; then
+            echo "R2_ARCHIVE_BUCKET_NOT_WRITABLE|$(grep -oE '\((AccessDenied|NoSuchBucket|[A-Za-z]+)\)' /tmp/probe.log | head -n 1)"
+            R2_BUCKET="$R2_FALLBACK_BUCKET"
+          fi
           aws s3 cp out/ "s3://${R2_BUCKET}/${BACKUP_PREFIX}/" --recursive --endpoint-url "$R2_ENDPOINT" --only-show-errors
           mkdir -p back
           aws s3 cp "s3://${R2_BUCKET}/${BACKUP_PREFIX}/" back/ --recursive --endpoint-url "$R2_ENDPOINT" --only-show-errors
