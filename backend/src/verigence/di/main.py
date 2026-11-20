@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from verigence.di import night_rest
 from verigence.di.errors import (
     ErrorCode,
     ProblemException,
@@ -246,7 +247,10 @@ def create_app() -> FastAPI:
 
         heartbeat_stop = asyncio.Event()
         heartbeat_task = asyncio.create_task(
-            run_platform_heartbeat(str(settings.database_url), "di-api", heartbeat_stop),
+            # Asleep by the clock (verigence.di.night_rest): no beat in the window.
+            run_platform_heartbeat(
+                str(settings.database_url), "di-api", heartbeat_stop, asleep=night_rest.in_window,
+            ),
             name="di-platform-heartbeat",
         )
         try:
@@ -400,6 +404,29 @@ def create_app() -> FastAPI:
             cause=exc.__cause__,
         )
         return _problem_json(exc.error.http_status, body, correlation_id)
+
+    @app.get("/health/night-signal", include_in_schema=False)
+    async def night_signal() -> dict[str, str | int]:
+        """Read by a resting worker every ten seconds (verigence.di.night_rest).
+        Answered from memory: it never touches the database, and it holds
+        nothing but this process's boot id and a count of requests."""
+        return night_rest.signal()
+
+    @app.middleware("http")
+    async def night_signal_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        # Every request that can queue work moves the counter a resting worker
+        # watches: when it arrives, and again once it is answered -- by then
+        # what it queued is committed, however long the upload took.
+        if not night_rest.may_queue_work(request.method):
+            return await call_next(request)
+        night_rest.note_request()
+        try:
+            return await call_next(request)
+        finally:
+            night_rest.note_request()
 
     @app.middleware("http")
     async def correlation_middleware(

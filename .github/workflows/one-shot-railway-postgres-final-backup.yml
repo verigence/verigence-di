@@ -1,0 +1,329 @@
+name: One-shot Railway Postgres final backup to R2
+
+# The old Railway Postgres (service "Postgres") held DI's database until it was
+# moved to Neon on 13 Nov 2026, and has been offline since. Before the service
+# and its volume are removed (product owner, 20 Nov 2026: "go ahead ... with
+# final copy to R2") this takes one last full copy:
+#
+#   1. lists every Railway variable that still points at this database
+#      (names only), so nothing is removed that something still uses;
+#   2. starts the database if it is not running;
+#   3. dumps every database (pg_dump custom format) and the roles;
+#   4. restores each dump into a scratch Postgres on the runner and compares
+#      the row count of every table with the source;
+#   5. uploads the dumps to the archive bucket under BACKUP_PREFIX (outside
+#      "archive/", so the 12-month archive retention rule does not touch
+#      them), downloads them again and compares checksums.
+#
+# Nothing is deleted here. Credentials are read from Railway variables with the
+# existing RAILWAY_API_TOKEN secret and are never printed.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/one-shot-railway-postgres-final-backup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-postgres-final-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      RAILWAY_ENVIRONMENT_ID: 398c3cfb-d7c7-4aaf-b5a4-3b44d3087451
+      DB_SERVICE: Postgres
+      DB_SERVICE_ID: 8a209a79-024c-4441-b13b-fab51ae9e247
+      STORAGE_SERVICE: verigence-p2-worker
+      BACKUP_PREFIX: database-backups/railway-postgres-final-2026-11-20
+      PG_IMAGE: postgres:18
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Link the Railway DEV project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_API_TOKEN:-}" ]]; then
+            echo '::error::RAILWAY_API_TOKEN is required.'
+            exit 1
+          fi
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/dev/null
+          railway service list --json >/tmp/services.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          names={row.get('name') for row in json.loads(Path('/tmp/services.json').read_text())}
+          for wanted in (os.environ['DB_SERVICE'], os.environ['STORAGE_SERVICE']):
+              if wanted not in names:
+                  raise SystemExit(f'Railway service not found: {wanted}')
+          Path('/tmp/service-names.txt').write_text('\n'.join(sorted(n for n in names if n)))
+          print('BACKUP_RAILWAY_TARGET=PASS')
+          PY
+
+      - name: List what still points at the Railway Postgres (names only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$DB_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/db-vars.json
+          while IFS= read -r service; do
+            [[ -z "$service" || "$service" == "$DB_SERVICE" ]] && continue
+            railway variable list --service "$service" --environment "$RAILWAY_ENVIRONMENT" --json \
+              >"/tmp/vars-$(printf '%s' "$service" | tr -c 'A-Za-z0-9_.-' '_').json" 2>/dev/null || true
+          done </tmp/service-names.txt
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          db=json.loads(Path('/tmp/db-vars.json').read_text())
+          needles=set()
+          for key in ('DATABASE_URL','DATABASE_PUBLIC_URL'):
+              value=db.get(key) or ''
+              if value:
+                  parts=urlsplit(value)
+                  if parts.hostname:
+                      needles.add(parts.hostname if not parts.port else f'{parts.hostname}:{parts.port}')
+                  if parts.password:
+                      needles.add(parts.password)
+          for key in ('PGPASSWORD','POSTGRES_PASSWORD','RAILWAY_PRIVATE_DOMAIN','RAILWAY_TCP_PROXY_DOMAIN'):
+              if db.get(key):
+                  needles.add(db[key])
+          needles={n for n in needles if len(n) >= 8}
+          found=0
+          for path in sorted(Path('/tmp').glob('vars-*.json')):
+              try:
+                  data=json.loads(path.read_text() or '{}')
+              except json.JSONDecodeError:
+                  continue
+              service=path.stem[len('vars-'):]
+              for name, value in sorted(data.items()):
+                  if isinstance(value, str) and any(n in value for n in needles):
+                      found+=1
+                      print(f'RAILWAY_POSTGRES_REFERENCE|{service}|{name}')
+          print(f'RAILWAY_POSTGRES_REFERENCES={found}')
+          PY
+
+      - name: Start the Railway Postgres if it is not running
+        shell: bash
+        run: |
+          set -euo pipefail
+          status() {
+            railway deployment list --service "$DB_SERVICE" --limit 1 --json \
+              >/tmp/db-deployment.json 2>/dev/null || echo '[]' >/tmp/db-deployment.json
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          try:
+              rows=json.loads(Path('/tmp/db-deployment.json').read_text() or '[]')
+          except json.JSONDecodeError:
+              rows=[]
+          row=rows[0] if isinstance(rows, list) and rows else {}
+          print(f"{row.get('status') or 'NONE'} {row.get('id') or ''}")
+          PY
+          }
+          graphql() {
+            curl --silent --show-error --fail-with-body https://backboard.railway.com/graphql/v2 \
+              -H "Authorization: Bearer ${RAILWAY_API_TOKEN}" -H 'Content-Type: application/json' \
+              --data "$1"
+          }
+          read -r state deployment_id < <(status)
+          echo "RAILWAY_POSTGRES_STATE=$state"
+          if [[ "$state" != "SUCCESS" && "$state" != "SLEEPING" ]]; then
+            started=no
+            if railway redeploy --service "$DB_SERVICE" --yes >/tmp/redeploy.log 2>&1; then
+              started=cli
+            elif graphql "{\"query\":\"mutation(\$s:String!,\$e:String!){serviceInstanceDeployV2(serviceId:\$s,environmentId:\$e)}\",\"variables\":{\"s\":\"${DB_SERVICE_ID}\",\"e\":\"${RAILWAY_ENVIRONMENT_ID}\"}}" >/tmp/deploy.json 2>&1 \
+                 && ! grep -q '"errors"' /tmp/deploy.json; then
+              started=api
+            elif [[ -n "$deployment_id" ]] \
+                 && graphql "{\"query\":\"mutation(\$id:String!){deploymentRedeploy(id:\$id){id}}\",\"variables\":{\"id\":\"${deployment_id}\"}}" >/tmp/deploy.json 2>&1 \
+                 && ! grep -q '"errors"' /tmp/deploy.json; then
+              started=api-redeploy
+            fi
+            if [[ "$started" == "no" ]]; then
+              echo '::error::The Railway Postgres could not be started; nothing was backed up.'
+              sed 's/^/redeploy: /' /tmp/redeploy.log | tail -n 5 || true
+              python -c "import json,sys;d=json.load(open('/tmp/deploy.json'));print([e.get('message') for e in d.get('errors',[])])" 2>/dev/null || true
+              exit 1
+            fi
+            echo "RAILWAY_POSTGRES_START=$started"
+            for attempt in $(seq 1 60); do
+              read -r state deployment_id < <(status)
+              [[ "$state" == "SUCCESS" ]] && break
+              if [[ "$state" == "FAILED" || "$state" == "CRASHED" ]]; then
+                echo "::error::The Railway Postgres deployment ended $state."
+                exit 1
+              fi
+              echo "Waiting for the Railway Postgres to start: $state (attempt $attempt/60)"
+              sleep 10
+            done
+            [[ "$state" == "SUCCESS" ]] || { echo '::error::The Railway Postgres did not start in ten minutes.'; exit 1; }
+          fi
+          echo 'RAILWAY_POSTGRES_RUNNING=PASS'
+
+      - name: Dump, verify by restore, upload to R2 and verify the upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          railway variable list --service "$DB_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/db-vars.json
+          railway variable list --service "$STORAGE_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json >/tmp/storage-vars.json
+          python - <<'PY'
+          import json, shlex
+          from pathlib import Path
+          db=json.loads(Path('/tmp/db-vars.json').read_text())
+          st=json.loads(Path('/tmp/storage-vars.json').read_text())
+          url=(db.get('DATABASE_PUBLIC_URL') or '').strip()
+          if not url:
+              raise SystemExit('The Railway Postgres has no DATABASE_PUBLIC_URL (TCP proxy).')
+          def storage(suffix, default=''):
+              for prefix in ('AUDIT_CORE_ARCHIVE_STORAGE','AUDIT_CORE_P2_STORAGE','AUDIT_CORE_PHOTO_STORAGE'):
+                  value=(st.get(f'{prefix}_{suffix}') or '').strip()
+                  if value:
+                      return value
+              return default
+          values={
+              'SOURCE_URL': url,
+              'R2_BUCKET': (st.get('AUDIT_CORE_ARCHIVE_BUCKET') or '').strip(),
+              'R2_ENDPOINT': storage('ENDPOINT'),
+              'AWS_ACCESS_KEY_ID': storage('ACCESS_KEY_ID'),
+              'AWS_SECRET_ACCESS_KEY': storage('SECRET_ACCESS_KEY'),
+              'AWS_DEFAULT_REGION': storage('REGION', 'auto') or 'auto',
+          }
+          missing=[k for k, v in values.items() if not v]
+          if missing:
+              raise SystemExit('Missing configuration: '+','.join(missing))
+          target=Path('/tmp/backup.env')
+          target.write_text(''.join(f'export {k}={shlex.quote(v)}\n' for k, v in values.items()))
+          target.chmod(0o600)
+          PY
+          # shellcheck disable=SC1091
+          source /tmp/backup.env
+          for secret in "$SOURCE_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"; do
+            echo "::add-mask::$secret"
+          done
+          source_password="$(python -c "import os;from urllib.parse import urlsplit,unquote;print(unquote(urlsplit(os.environ['SOURCE_URL']).password or ''))")"
+          [[ -n "$source_password" ]] && echo "::add-mask::$source_password"
+
+          docker pull --quiet "$PG_IMAGE" >/dev/null
+          pg() { docker run --rm --network host -v "$PWD/out:/out" "$PG_IMAGE" "$@"; }
+          with_db() {  # the source or scratch URL with another database name
+            python -c "import sys;from urllib.parse import urlsplit,urlunsplit,quote;p=urlsplit(sys.argv[1]);print(urlunsplit((p.scheme,p.netloc,'/'+quote(sys.argv[2]),p.query,'')))" "$1" "$2"
+          }
+          mkdir -p out && chmod 777 out
+
+          for attempt in $(seq 1 40); do
+            if pg pg_isready --quiet --dbname "$SOURCE_URL"; then break; fi
+            echo "Waiting for the Railway Postgres to accept connections (attempt $attempt/40)"
+            sleep 6
+          done
+          pg pg_isready --quiet --dbname "$SOURCE_URL" || { echo '::error::The Railway Postgres does not accept connections.'; exit 1; }
+
+          version="$(pg psql "$SOURCE_URL" -XAtc 'show server_version')"
+          mapfile -t databases < <(pg psql "$SOURCE_URL" -XAtc "select datname from pg_database where not datistemplate and datallowconn order by 1")
+          echo "SOURCE_SERVER_VERSION=$version"
+          echo "SOURCE_DATABASES=${databases[*]}"
+
+          counts_sql="select coalesce(string_agg(format('select %L as t, count(*) as n from %I.%I', schemaname||'.'||tablename, schemaname, tablename), ' union all ' order by schemaname, tablename), 'select null::text as t, 0::bigint as n where false') from pg_tables where schemaname not in ('pg_catalog','information_schema')"
+          row_counts() {  # url -> "schema.table|rows", one line per table
+            local query
+            query="$(pg psql "$1" -XAtc "$counts_sql")"
+            pg psql "$1" -XAt -F '|' -c "select t, n from ($query) c order by 1"
+          }
+
+          # ── dump ────────────────────────────────────────────────────────────
+          for db in "${databases[@]}"; do
+            pg pg_dump --dbname "$(with_db "$SOURCE_URL" "$db")" --format=custom --compress=6 --file "/out/${db}.dump"
+            row_counts "$(with_db "$SOURCE_URL" "$db")" >"out/${db}.rowcounts.txt"
+            pg psql "$(with_db "$SOURCE_URL" "$db")" -XAtc "select pg_size_pretty(pg_database_size(current_database()))" >"out/${db}.size.txt"
+            echo "DUMPED|$db|tables=$(wc -l <"out/${db}.rowcounts.txt")|rows=$(awk -F'|' '{s+=$2} END {print s+0}' "out/${db}.rowcounts.txt")|database_size=$(cat "out/${db}.size.txt")"
+          done
+          pg pg_dumpall --dbname "$SOURCE_URL" --globals-only --file /out/globals.sql
+          sudo chown -R "$(id -u):$(id -g)" out
+
+          # ── verify: restore every dump into a scratch Postgres and compare ──
+          docker run --detach --name scratch --publish 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD=scratch "$PG_IMAGE" >/dev/null
+          SCRATCH_URL='postgresql://postgres:scratch@127.0.0.1:55432/postgres'
+          for attempt in $(seq 1 30); do
+            if pg pg_isready --quiet --dbname "$SCRATCH_URL"; then break; fi
+            sleep 2
+          done
+          failed=0
+          for db in "${databases[@]}"; do
+            scratch_db="restore_${db//[^A-Za-z0-9_]/_}"
+            pg psql "$SCRATCH_URL" -XAtqc "create database \"$scratch_db\""
+            restore_status=0
+            pg pg_restore --dbname "$(with_db "$SCRATCH_URL" "$scratch_db")" --no-owner --no-privileges "/out/${db}.dump" \
+              >"/tmp/restore-${db}.log" 2>&1 || restore_status=$?
+            row_counts "$(with_db "$SCRATCH_URL" "$scratch_db")" >"/tmp/${db}.restored.txt"
+            if diff -q "out/${db}.rowcounts.txt" "/tmp/${db}.restored.txt" >/dev/null; then
+              echo "RESTORE_VERIFIED|$db|every table has the same row count|pg_restore_exit=$restore_status"
+            else
+              failed=1
+              echo "::error::Restored row counts differ from the source for database $db."
+              diff "out/${db}.rowcounts.txt" "/tmp/${db}.restored.txt" | head -n 40 || true
+              grep -i 'error' "/tmp/restore-${db}.log" | head -n 20 || true
+            fi
+          done
+          docker rm --force scratch >/dev/null
+          [[ "$failed" == "0" ]] || exit 1
+
+          # ── manifest ────────────────────────────────────────────────────────
+          ( cd out && sha256sum -- *.dump globals.sql >SHA256SUMS )
+          SOURCE_VERSION="$version" python - <<'PY'
+          import json, os
+          from datetime import UTC, datetime
+          from pathlib import Path
+          out=Path('out')
+          sums=dict(reversed(line.split(maxsplit=1)) for line in (out/'SHA256SUMS').read_text().splitlines())
+          databases=[]
+          for dump in sorted(out.glob('*.dump')):
+              name=dump.stem
+              counts=[line.split('|') for line in (out/f'{name}.rowcounts.txt').read_text().splitlines() if line]
+              databases.append({
+                  'database': name, 'file': dump.name, 'bytes': dump.stat().st_size, 'sha256': sums[dump.name],
+                  'databaseSize': (out/f'{name}.size.txt').read_text().strip(),
+                  'tables': len(counts), 'rows': sum(int(n) for _, n in counts),
+              })
+          manifest={
+              'what': 'Final copy of the Railway Postgres (service "Postgres", project verigence-audit-core, DEV) '
+                      'before the service and its volume were removed. DI moved to Neon on 13 Nov 2026.',
+              'takenAtUtc': datetime.now(UTC).isoformat(timespec='seconds'),
+              'serverVersion': os.environ['SOURCE_VERSION'],
+              'format': 'pg_dump custom format; restore with pg_restore (PostgreSQL 18)',
+              'verified': 'each dump restored into a scratch PostgreSQL 18; every table row count equals the source',
+              'databases': databases,
+              'globals': {'file': 'globals.sql', 'bytes': (out/'globals.sql').stat().st_size, 'sha256': sums['globals.sql']},
+              'workflowRun': f"{os.environ.get('GITHUB_SERVER_URL','')}/{os.environ.get('GITHUB_REPOSITORY','')}/actions/runs/{os.environ.get('GITHUB_RUN_ID','')}",
+          }
+          (out/'MANIFEST.json').write_text(json.dumps(manifest, indent=2)+'\n')
+          for d in databases:
+              print(f"MANIFEST|{d['database']}|{d['file']}|bytes={d['bytes']}|sha256={d['sha256']}|tables={d['tables']}|rows={d['rows']}")
+          PY
+          rm -f out/*.size.txt
+
+          # ── upload, then download again and compare ─────────────────────────
+          aws s3 cp out/ "s3://${R2_BUCKET}/${BACKUP_PREFIX}/" --recursive --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          mkdir -p back
+          aws s3 cp "s3://${R2_BUCKET}/${BACKUP_PREFIX}/" back/ --recursive --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          ( cd back && sha256sum --check --quiet SHA256SUMS )
+          for file in out/*; do
+            cmp --silent "$file" "back/$(basename "$file")" || { echo "::error::Uploaded copy differs: $(basename "$file")"; exit 1; }
+          done
+          echo "R2_LOCATION=s3://${R2_BUCKET}/${BACKUP_PREFIX}/"
+          aws s3 ls "s3://${R2_BUCKET}/${BACKUP_PREFIX}/" --endpoint-url "$R2_ENDPOINT" | awk '{print "R2_OBJECT|"$4"|bytes="$3}'
+          rm -f /tmp/backup.env
+          echo 'RAILWAY_POSTGRES_FINAL_BACKUP=PASS'

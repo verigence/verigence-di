@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from verigence.di import night_rest
 from verigence.di.document_ai.adapter import DocumentAIAdapter, get_document_ai_adapter
 from verigence.di.document_ai.gemini_cost import GEMINI_TIER, first_attempt_tier
 from verigence.di.document_ai.v2_preclassified_adapter import V2PreclassifiedAdapter
@@ -70,6 +71,7 @@ logger = structlog.get_logger(__name__)
 _NOTIFY_CHANNEL = "di_processing_jobs"
 _V2_PROCESSING_CONCURRENCY = 4
 _V2_FALLBACK_POLL_SECONDS = 0.5
+_NOTIFY_REOPEN_SECONDS = 60.0  # a lost LISTEN connection is opened again at most this often
 # Capture V2 jobs whose failure may be followed by a daytime retry: the first
 # attempt and the retries themselves.
 _V2_DAYTIME_JOB_TYPES = frozenset({"INITIAL", "V2_FAST_RETRY"})
@@ -101,6 +103,7 @@ class _NotifyWorker:
         self._stop_event = asyncio.Event()
         self._notify_event = asyncio.Event()
         self._notify_conn: Any | None = None
+        self._notify_retry_at = 0.0
         self._runtime_correlation_id = correlation_id_or_new()
         self.stats = WorkerStats()
 
@@ -180,6 +183,39 @@ class _NotifyWorker:
             )
             return False
 
+    async def _close_notify_conn(self) -> None:
+        if self._notify_conn is not None:
+            with contextlib.suppress(Exception):
+                await self._notify_conn.close()
+            self._notify_conn = None
+
+    async def _keep_listening(self, notify_db_url: str, notify_active: bool) -> bool:
+        """Called at the top of every turn of a lane. Returns whether job
+        notifications work for the turn ahead.
+
+        The night's rest (verigence.di.night_rest): a resting worker closes its
+        LISTEN connection -- the database drops it anyway when it stops -- and
+        waits here, asking the database nothing, until it is woken; then it
+        listens again. By day a LISTEN connection found closed is opened again,
+        at most once a minute: without that a lane whose connection was lost
+        went on with its six-second timer for good and was never woken at once
+        again."""
+        if night_rest.resting():
+            await self._close_notify_conn()
+            await night_rest.wait_until_awake(self._stop_event)
+            self._notify_retry_at = 0.0
+            if self._stop_event.is_set():
+                return False
+        elif self._notify_conn is not None and not self._notify_conn.is_closed():
+            return notify_active
+        elif notify_active and self._notify_conn is None:
+            return notify_active  # a listener this class did not open (tests)
+        if not notify_db_url.strip() or time.monotonic() < self._notify_retry_at:
+            return False
+        self._notify_retry_at = time.monotonic() + _NOTIFY_REOPEN_SECONDS
+        self._notify_conn = None
+        return await self._open_notify_conn(notify_db_url)
+
     async def _run(self) -> None:  # pragma: no cover - abstract runtime loop
         raise NotImplementedError
 
@@ -223,6 +259,9 @@ class ProcessingWorker(_NotifyWorker):
 
         try:
             while not self._stop_event.is_set():
+                notify_active = await self._keep_listening(notify_db_url, notify_active)
+                if self._stop_event.is_set():
+                    break
                 self.stats.cycles += 1
                 try:
                     # Link delivery remains independent of extraction. One pending
@@ -383,6 +422,9 @@ class V2ProcessingWorker(_NotifyWorker):
         )
         try:
             while not self._stop_event.is_set():
+                notify_active = await self._keep_listening(notify_db_url, notify_active)
+                if self._stop_event.is_set():
+                    break
                 self.stats.cycles += 1
                 try:
                     did_work = await self._process_one(
