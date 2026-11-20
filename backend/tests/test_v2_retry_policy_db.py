@@ -1,8 +1,8 @@
 """Product owner's retry rule (2026-10-21, no night attempt since 2026-10-22)
 against the real schema: a Capture V2 page whose AI reading failed gets a
-second daytime retry (attempt 3) and then fails; the EOD scheduler never
-stacks a retry on a V2 page; the status listing says what failed and what
-happens next, and never announces a night attempt.
+second daytime retry (attempt 3) and then fails; the status listing says what
+failed and what happens next, and never announces a night attempt. (The
+once-daily retry, which never stacked on a V2 page, is gone: 20 Nov 2026.)
 
 Every test runs inside the db_session transaction, which is rolled back.
 """
@@ -83,18 +83,6 @@ async def test_the_second_daytime_retry_is_attempt_three(db_session: AsyncSessio
         {"t": tenant_id, "d": document_id},
     )).scalar_one()
     assert due == timedelta(seconds=1200)
-
-
-@pytest.mark.asyncio
-async def test_eod_retry_never_stacks_on_a_v2_page(db_session: AsyncSession) -> None:
-    tenant_id = f"v2-eod-{uuid.uuid4().hex[:8]}"
-    document_id = await _classified_unqueued_upload(db_session, tenant_id)
-    await db_session.execute(
-        text("UPDATE docintel.documents SET processing_status='RETRY_PENDING', confirmation_status='PENDING' "
-             "WHERE tenant_id=:t AND document_id=:d"),
-        {"t": tenant_id, "d": document_id},
-    )
-    assert await beat._insert_eod_retry_jobs(db_session, tenant_id, datetime.now(UTC)) == 0
 
 
 # ── status listing: what failed and what happens next ──────────────────────────

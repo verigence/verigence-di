@@ -738,21 +738,7 @@ def test_capture_v2_unknown_is_info_and_missing_type_is_configuration() -> None:
     assert (failure.code, failure.retryable, failure.category) == ("DOCUMENT_TYPE_NOT_FOUND", False, CONFIGURATION)
 
 
-# ── Scheduler: correlation reuse, safe errors ─────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_eod_retry_reuses_the_original_correlation_id() -> None:
-    session = AsyncMock()
-    select_result = MagicMock()
-    select_result.all.return_value = [(uuid.uuid4(), "audit-core-corr"), (uuid.uuid4(), None)]
-    session.execute = AsyncMock(side_effect=[select_result, MagicMock(), MagicMock()])
-
-    await beat._insert_eod_retry_jobs(session, "t1", beat.datetime.now(beat.UTC))
-
-    first, second = (call.args[1]["corr"] for call in session.execute.call_args_list[1:])
-    assert first == "audit-core-corr"
-    assert second.startswith("eod.")
-
+# ── Scheduler: safe errors ────────────────────────────────────────────────────
 
 def test_scheduler_failure_events_use_safe_exception_context() -> None:
     source = inspect.getsource(beat)

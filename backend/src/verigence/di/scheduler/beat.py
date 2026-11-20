@@ -1,16 +1,23 @@
 """scheduler/beat.py — background job scheduler.
 
-Runs three independent things in-process alongside FastAPI, every 60 seconds:
+Runs two independent things in-process alongside the legacy worker, every 60
+seconds:
 
   0. Reclaim stale RUNNING jobs (lease timeout exceeded).
   1. Sweep expired backout_jobs rows (D24).
-  2. EOD Retry: at each Tenant's configured local EOD time, give every
-     RETRY_PENDING legacy (non-Capture-V2) document its once-daily second
-     attempt. Still live -- this is the only retry mechanism for any
-     document intake path that doesn't go through Capture V2 (insurance/
-     trade-in evidence, feedback attachments, etc.), independent of the
-     one legacy Booking evidence-upload screen retired alongside this
-     change; retiring that one UI path does not retire this mechanism.
+
+Nothing here runs by the time of day.
+
+  There is no once-daily retry (product owner, 20 Nov 2026: "remove" it). It
+  gave a legacy (non-Capture-V2) document that failed once a second attempt at
+  the Tenant's end-of-day time -- 23:00 UTC for every Tenant, 4:30 am India
+  time, inside the night's sleep. Every document in DI is Capture V2, whose
+  retries are scheduled by day (repositories.processing_jobs.
+  schedule_v2_fast_retry); the last once-daily retry ran on 5 Sep 2026. A
+  legacy document's failure is now final at once (workers.processor.
+  _handle_failure). tenant_settings.eod_retry_local_time and
+  eod_retry_enabled are still stored and returned by the Tenant configuration
+  API, and are read by nothing.
 
   There is no nightly reprocessing (product owner, 2026-10-22): nothing is
   processed at night. The run that gave every FAILED document more tries at
@@ -20,26 +27,18 @@ Runs three independent things in-process alongside FastAPI, every 60 seconds:
   the PC's "Document to resubmit" task and the PC uploads it again.
 
 Design:
-- APScheduler AsyncIOScheduler runs in-process alongside FastAPI
-- Runs every 60 seconds; (2) uses per-Tenant timezone + eod_retry_local_time
-  to decide whether EOD has just passed
-- Idempotent: UNIQUE (tenant_id, document_id, job_type, attempt_no) on
-  processing_jobs prevents duplicate EOD retries
-
-Configuration (from tenant_settings, EOD retry only):
-  timezone_name          — e.g. "Africa/Johannesburg"
-  eod_retry_local_time   — e.g. 18:00:00
-  eod_retry_enabled      — boolean, must be true
+- APScheduler AsyncIOScheduler runs in-process, every 60 seconds
+- It does nothing while the worker rests at night (verigence.di.night_rest)
 
 Lifecycle:
-  start(app) — called from FastAPI lifespan
-  stop()     — called from FastAPI lifespan shutdown
+  start() — called by the legacy worker process (and FastAPI lifespan when
+            the API runs its own worker)
+  stop()  — called on shutdown
 """
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from datetime import time as dtime
 from typing import Any
 
 import structlog
@@ -56,10 +55,6 @@ from verigence.di.runtime_errors import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# How many seconds around the EOD window we consider "just passed"
-# (scheduler fires every 60s; ±90s window prevents both double-fire and misses)
-_EOD_WINDOW_SECONDS = 90
 
 # An expired RUNNING processing job is put back to PENDING at most this many
 # times; the next expiry fails it, so a document that kills the worker every
@@ -109,12 +104,10 @@ class EODRetryScheduler:
 
 
 async def _run_scheduler_tick(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Periodic check (every 60 s) -- see module docstring for the three
+    """Periodic check (every 60 s) -- see module docstring for the two
     independent things this does."""
     # The night's sleep (verigence.di.night_rest): a resting worker asks the
-    # database nothing. Nothing is running that could go stale, and a document
-    # waiting for its once-daily retry wakes the worker in time
-    # (seconds_until_eod_retry).
+    # database nothing. Nothing is running that could go stale.
     if worker_resting():
         return
     now_utc = datetime.now(UTC)
@@ -151,214 +144,6 @@ async def _run_scheduler_tick_in_context(
     except Exception as exc:
         log.warning("backout_sweep_failed", **safe_exception_context(exc))
 
-    # ── 2. EOD retry job injection — only when Tenant EOD window matches ──────
-    try:
-        async with session_factory() as session:
-            tenants = await _load_enabled_tenants(session)
-
-        for tenant in tenants:
-            tenant_id: str = tenant["tenant_id"]
-            tz_name: str = tenant["timezone_name"]
-            eod_time: dtime = tenant["eod_retry_local_time"]
-
-            if not _is_eod_window(now_utc, tz_name, eod_time):
-                continue
-
-            log.debug("eod_window_matched", tenant_id=tenant_id, timezone=tz_name)
-            async with session_factory() as session, session.begin():
-                count = await _insert_eod_retry_jobs(session, tenant_id, now_utc)
-            if count:
-                log.info("eod_retry_jobs_inserted",
-                         tenant_id=tenant_id,
-                         jobs_inserted=count)
-    except Exception as exc:
-        log.warning("eod_retry_check_failed", **safe_exception_context(exc))
-
-
-async def _load_enabled_tenants(session: AsyncSession) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            text("""
-                SELECT tenant_id, timezone_name, eod_retry_local_time
-                FROM docintel.tenant_settings
-                WHERE status = 'ACTIVE'
-                  AND eod_retry_enabled = true
-            """),
-        )
-    ).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def _is_eod_window(now_utc: datetime, tz_name: str, eod_time: dtime) -> bool:
-    """Return True when local EOD time falls within the ±_EOD_WINDOW_SECONDS window."""
-    try:
-        import zoneinfo
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except (ImportError, Exception):
-        try:
-            from dateutil import tz as dateutil_tz
-            tz_obj = dateutil_tz.gettz(tz_name)
-            if tz_obj is None:
-                logger.warning("unknown_timezone", tz_name=tz_name)
-                return False
-            local_now = now_utc.astimezone(tz_obj)
-        except Exception:
-            logger.warning("timezone_conversion_failed", tz_name=tz_name)
-            return False
-    else:
-        local_now = now_utc.astimezone(tz)
-
-    # Convert both times to seconds since midnight for comparison
-    local_seconds = (
-        local_now.hour * 3600 + local_now.minute * 60 + local_now.second
-    )
-    eod_seconds = eod_time.hour * 3600 + eod_time.minute * 60 + eod_time.second
-
-    return abs(local_seconds - eod_seconds) <= _EOD_WINDOW_SECONDS
-
-
-_EOD_ELIGIBLE_SQL = """
-    d.upload_status = 'FIT'
-    AND d.processing_status = 'RETRY_PENDING'
-    AND NOT EXISTS (
-        SELECT 1 FROM docintel.processing_jobs pj
-        WHERE pj.tenant_id = d.tenant_id
-          AND pj.document_id = d.document_id
-          AND pj.job_type = 'EOD_RETRY'
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM docintel.document_capture_v2_uploads v2
-        WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
-    )
-"""
-
-
-def _seconds_until_local_time(now_utc: datetime, tz_name: str, at: dtime) -> float | None:
-    """Seconds from now to the next time the Tenant's clock reads ``at``."""
-    try:
-        import zoneinfo
-
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001 - an unknown zone has no next time
-        return None
-    local_now = now_utc.astimezone(tz)
-    target = local_now.replace(hour=at.hour, minute=at.minute, second=at.second, microsecond=0)
-    if target <= local_now:
-        target += timedelta(days=1)
-    return (target - local_now).total_seconds()
-
-
-async def seconds_until_eod_retry(session: AsyncSession, now_utc: datetime) -> float | None:
-    """Seconds until the next once-daily retry that has a document to retry;
-    None when no Tenant has one waiting. A minute early, so the worker is up
-    when the time comes."""
-    rows = (
-        await session.execute(
-            text(f"""
-                SELECT ts.timezone_name, ts.eod_retry_local_time
-                FROM docintel.tenant_settings ts
-                WHERE ts.status = 'ACTIVE'
-                  AND ts.eod_retry_enabled = true
-                  AND EXISTS (
-                      SELECT 1 FROM docintel.documents d
-                      WHERE d.tenant_id = ts.tenant_id AND {_EOD_ELIGIBLE_SQL}
-                  )
-            """),  # noqa: S608 - a constant fragment, no input
-        )
-    ).all()
-    waits = [
-        wait
-        for tz_name, eod_time in rows
-        if (wait := _seconds_until_local_time(now_utc, tz_name, eod_time)) is not None
-    ]
-    return max(0.0, min(waits) - 60.0) if waits else None
-
-
-async def _insert_eod_retry_jobs(
-    session: AsyncSession,
-    tenant_id: str,
-    now_utc: datetime,
-) -> int:
-    """Insert one EOD_RETRY job for each eligible RETRY_PENDING document.
-
-    Eligible = upload_status='FIT', processing_status='RETRY_PENDING',
-               no existing EOD_RETRY job.
-
-    The job keeps the INITIAL job's correlation id (Audit Core's request) so
-    the retry stays linked to it.
-
-    Returns the number of jobs inserted.
-    """
-    # Find eligible documents (no EOD_RETRY job already exists)
-    eligible_rows = (
-        await session.execute(
-            text("""
-                SELECT d.document_id,
-                       COALESCE(
-                           (SELECT pj2.correlation_id
-                            FROM docintel.processing_jobs pj2
-                            WHERE pj2.tenant_id = d.tenant_id
-                              AND pj2.document_id = d.document_id
-                              AND pj2.job_type = 'INITIAL'
-                            ORDER BY pj2.created_at_utc DESC
-                            LIMIT 1),
-                           d.correlation_id
-                       ) AS original_correlation_id
-                FROM docintel.documents d
-                WHERE d.tenant_id = :tid
-                  AND d.upload_status = 'FIT'
-                  AND d.processing_status = 'RETRY_PENDING'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM docintel.processing_jobs pj
-                      WHERE pj.tenant_id = d.tenant_id
-                        AND pj.document_id = d.document_id
-                        AND pj.job_type = 'EOD_RETRY'
-                  )
-                  -- legacy documents only: a Capture V2 document waiting on
-                  -- its own daytime retry must not get a second one stacked
-                  -- on it (product owner's rule 2026-10-20)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM docintel.document_capture_v2_uploads v2
-                      WHERE v2.tenant_id = d.tenant_id AND v2.document_id = d.document_id
-                  )
-            """),
-            {"tid": tenant_id},
-        )
-    ).all()
-
-    count = 0
-    for row in eligible_rows:
-        doc_id = row[0]
-        correlation_id = row[1] or f"eod.{uuid.uuid4()}"
-
-        try:
-            await session.execute(
-                text("""
-                    INSERT INTO docintel.processing_jobs
-                        (tenant_id, processing_job_id, document_id, correlation_id,
-                         job_type, job_status, due_at_utc, attempt_no, created_at_utc)
-                    VALUES
-                        (:tid, :job_id, :doc_id, :corr,
-                         'EOD_RETRY', 'PENDING', :now, 2, :now)
-                    ON CONFLICT (tenant_id, document_id, job_type, attempt_no) DO NOTHING
-                """),
-                {
-                    "tid": tenant_id,
-                    "job_id": uuid.uuid4(),
-                    "doc_id": doc_id,
-                    "corr": correlation_id,
-                    "now": now_utc,
-                },
-            )
-            count += 1
-        except Exception as exc:
-            logger.warning("eod_retry_job_insert_failed",
-                           tenant_id=tenant_id,
-                           document_id=str(doc_id),
-                           job_correlation_id=correlation_id,
-                           **safe_exception_context(exc))
-
-    return count
 
 
 async def _reclaim_stale_jobs(
