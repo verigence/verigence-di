@@ -24,7 +24,6 @@ jobs:
       DI_API_SERVICE: di-api
       DI_WORKER_SERVICE: di-worker
       DI_V2_WORKER_SERVICE: di-worker-v2
-      DB_SERVICE: Postgres
       DEPLOY_SHA: ${{ github.sha }}
 
     steps:
@@ -55,7 +54,9 @@ jobs:
           if project.get('id') != os.environ['PLATFORM_PROJECT_ID']:
               raise SystemExit('Railway API token does not target the approved shared DEV project')
           names={row.get('name') for row in services}
-          required={os.environ['DI_API_SERVICE'], os.environ['DI_WORKER_SERVICE'], os.environ['DB_SERVICE']}
+          # DI's database is Neon since 13 Nov 2026; the old Railway Postgres service is
+          # no longer part of the target (it is being removed, 20 Nov 2026).
+          required={os.environ['DI_API_SERVICE'], os.environ['DI_WORKER_SERVICE']}
           missing=required-names
           if missing:
               raise SystemExit('DI Railway target is missing services: '+','.join(sorted(missing)))
