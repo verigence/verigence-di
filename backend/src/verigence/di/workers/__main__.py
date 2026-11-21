@@ -139,6 +139,9 @@ async def _main() -> None:
         name=f"di-worker-{mode.value}",
     )
     night_rest.install(rest)
+    # Whether Verigence is shut is Security's to say (the System shutdown tab), once a minute.
+    following = night_rest.start_following(night_rest.status_url(settings.security_jwks_url))
+    print("DI_SHUTDOWN_SWITCH=" + ("FOLLOWED" if following is not None else "OWN_SETTING"), flush=True)
     night_task = asyncio.create_task(rest.run(stop_event), name="di-night-rest")
     print(
         "DI_NIGHT_REST=" + ("ON" if settings.night_signal_url.strip() else "OFF|no_signal_url"),
