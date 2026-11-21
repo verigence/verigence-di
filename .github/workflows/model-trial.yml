@@ -1,0 +1,106 @@
+name: DI model trial
+
+# Product owner, 21 Nov 2026: bring the AI cost down while quality improves; which model can read
+# PAN, Aadhaar, money receipts, RTO and insurance. This reads a chosen sample of documents already
+# in Verigence once per model (verigence.di.trials.model_trial) and keeps what each model said in
+# the private table di_trials.result. It changes nothing a person sees.
+#
+# It runs when the trial request changes on dev. This repository is public, so its log is public:
+# the step below lets through only the tool's own counting lines (MODEL_TRIAL...), which carry
+# model names and counts and never a value read from a page, a name, a number or a setting.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'backend/trials/request.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: di-model-trial
+  cancel-in-progress: false
+
+jobs:
+  trial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: di-dev
+    env:
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
+      RAILWAY_ENVIRONMENT: dev
+      DI_V2_WORKER_SERVICE: di-worker-v2
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the backend and the Railway CLI
+        run: |
+          pip install uv >/dev/null
+          uv pip install --system -e . >/dev/null
+          npm install --global @railway/cli >/dev/null
+
+      - name: Take the worker's own configuration (never printed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_API_TOKEN:-}" ]]; then
+            echo '::error::RAILWAY_API_TOKEN is required.'
+            exit 1
+          fi
+          railway link --project "$PLATFORM_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json >/dev/null
+          umask 077
+          railway variable list --service "$DI_V2_WORKER_SERVICE" --environment "$RAILWAY_ENVIRONMENT" --json >"$RUNNER_TEMP/worker-vars.json"
+          echo 'MODEL_TRIAL_CONFIG=TAKEN'
+
+      - name: Read the sample with each model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          source = json.loads((Path(os.environ["RUNNER_TEMP"]) / "worker-vars.json").read_text())
+          env = dict(os.environ)
+          # The worker's DI_ settings (database, document store, provider key), minus the ones
+          # that make a process a worker. The trial is one process that reads and writes a table.
+          skip = {"DI_WORKER_MODE", "DI_V2_CLASSIFICATION_CONCURRENCY", "DI_V2_EXTRACTION_CONCURRENCY"}
+          env.update({k: str(v) for k, v in source.items() if k.startswith("DI_") and k not in skip and v is not None})
+          env["DI_DOCAI_MOCK"] = "false"
+          env["PYTHONUNBUFFERED"] = "1"
+          errors = Path(os.environ["RUNNER_TEMP"]) / "trial-stderr.txt"
+          with errors.open("w") as err:
+              proc = subprocess.Popen(
+                  [sys.executable, "-m", "verigence.di.trials.model_trial", "trials/request.json"],
+                  env=env, stdout=subprocess.PIPE, stderr=err, text=True,
+              )
+              assert proc.stdout is not None
+              for line in proc.stdout:
+                  # Only the tool's own counting lines reach this public log.
+                  if line.startswith("MODEL_TRIAL"):
+                      print(line.rstrip()[:300], flush=True)
+              code = proc.wait()
+          if code:
+              # Of a failure, only the kind of error is shown (its name), never its message.
+              import re
+              last = [ln for ln in errors.read_text(errors="replace").splitlines() if ln.strip()][-1:]
+              kind = re.match(r"[A-Za-z_][A-Za-z0-9_.]*", last[0].strip()) if last else None
+              print(f"MODEL_TRIAL_FAILED_WITH={kind.group(0)[:120] if kind else 'UNKNOWN'}", flush=True)
+          errors.unlink(missing_ok=True)
+          print(f"MODEL_TRIAL_EXIT={code}", flush=True)
+          sys.exit(code)
+          PY
+
+      - name: Remove the configuration copy
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/worker-vars.json"
