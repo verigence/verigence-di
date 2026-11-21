@@ -110,6 +110,15 @@ def usage_params(tenant_id: str, job_id: uuid.UUID, usage: dict[str, Any]) -> di
     }
 _NOTIFY_CHANNEL = "di_capture_v2_jobs"
 _NOTIFY_REOPEN_SECONDS = 60.0  # a lost LISTEN connection is opened again at most this often
+# Opening a LISTEN connection is given this long, and never the lane's time: it is
+# opened beside the lane (2026-11-21). On 20 Nov the lanes reopened it in their own
+# turn with no limit, and that evening 40 pages waited up to 2.6 minutes while five
+# of the eight lanes took nothing.
+_NOTIFY_CONNECT_SECONDS = 5.0
+# A page that waited this long although the lane that took it was free is reported
+# with where the lane's time went (capture_v2_lane_free_while_page_waited).
+_REPORT_WAIT_SECONDS = 15.0
+_REPORT_FREE_SECONDS = 3.0
 
 # How often a failed classification is tried again (product owner's rule
 # 2026-10-21, see retry_policy.py): a Gemini failure (quota, outage, timeout,
@@ -194,6 +203,47 @@ def extraction_skip_reason(
     return None
 
 
+class _FreeTime:
+    """What a lane did between two pages: seconds in its listener's upkeep, in
+    looking for work, in waiting to be woken; how many looks found nothing."""
+
+    def __init__(self) -> None:
+        self.since = time.monotonic()
+        self.listen = 0.0
+        self.claim = 0.0
+        self.waiting = 0.0
+        self.looks = 0
+        self.errors = 0
+
+    def report(self, job: dict[str, Any], *, worker_id: str, notify_active: bool) -> None:
+        """Say so when the page just taken was due long before, and this lane was
+        free for part of that time: with eight lanes free a page starts at once."""
+        due = job.get("due_at_utc")
+        if not isinstance(due, datetime):
+            return
+        waited = (datetime.now(UTC) - due).total_seconds()
+        free_for = time.monotonic() - self.since
+        if waited < _REPORT_WAIT_SECONDS or free_for < _REPORT_FREE_SECONDS:
+            return
+        steps = {"listener": self.listen, "looking": self.claim, "waiting_to_be_woken": self.waiting}
+        logger.warning(
+            "capture_v2_lane_free_while_page_waited",
+            document_id=str(job.get("document_id")),
+            classification_job_id=str(job.get("classification_job_id")),
+            correlation_id=job.get("correlation_id"),
+            worker_id=worker_id,
+            page_waited_seconds=round(waited, 1),
+            lane_free_seconds=round(free_for, 1),
+            listener_seconds=round(self.listen, 1),
+            looking_seconds=round(self.claim, 1),
+            waiting_to_be_woken_seconds=round(self.waiting, 1),
+            looks_that_found_nothing=self.looks,
+            loop_errors=self.errors,
+            most_time_in=max(steps, key=lambda key: steps[key]),
+            notify_active=notify_active,
+        )
+
+
 class CaptureV2ClassificationWorker:
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
@@ -201,6 +251,7 @@ class CaptureV2ClassificationWorker:
         self._wake = asyncio.Event()
         self._notify_conn: Any | None = None
         self._notify_retry_at = 0.0
+        self._reopening: asyncio.Task[bool] | None = None
         self._runtime_correlation_id = correlation_id_or_new()
         self.stats = WorkerStats()
 
@@ -221,29 +272,32 @@ class CaptureV2ClassificationWorker:
                 await asyncio.wait_for(self._task, timeout=15)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-        if self._notify_conn is not None:
-            with contextlib.suppress(Exception):
-                await self._notify_conn.close()
-            self._notify_conn = None
+        await self._drop_listener()
         logger.info(
             "capture_v2_classifier_stopped",
             correlation_id=self._runtime_correlation_id,
         )
 
     async def _open_notify(self, database_url: str) -> bool:
+        conn: Any | None = None
         try:
             import asyncpg
 
-            conn = await asyncpg.connect(_asyncpg_url(database_url))
+            conn = await asyncpg.connect(_asyncpg_url(database_url), timeout=_NOTIFY_CONNECT_SECONDS)
 
             def _on_notify(connection: object, pid: int, channel: str, payload: str) -> None:
                 del connection, pid, channel, payload
                 self._wake.set()
 
-            await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
+            await asyncio.wait_for(
+                conn.add_listener(_NOTIFY_CHANNEL, _on_notify), timeout=_NOTIFY_CONNECT_SECONDS
+            )
             self._notify_conn = conn
             return True
         except Exception as exc:  # noqa: BLE001
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.terminate()
             logger.warning(
                 "capture_v2_notify_unavailable",
                 error_code="NOTIFY_LISTENER_UNAVAILABLE",
@@ -252,29 +306,46 @@ class CaptureV2ClassificationWorker:
             )
             return False
 
+    async def _drop_listener(self) -> None:
+        if self._reopening is not None:
+            self._reopening.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reopening
+            self._reopening = None
+        if self._notify_conn is not None:
+            with contextlib.suppress(Exception):
+                await self._notify_conn.close()
+            self._notify_conn = None
+
     async def _keep_listening(self, notify_url: str, notify_active: bool) -> bool:
         """The same rule as the processing lanes
         (workers.processor._NotifyWorker._keep_listening): resting at night the
         lane closes its LISTEN connection and waits without the database; a
-        connection found closed is opened again, at most once a minute."""
+        connection found closed is opened again, at most once a minute -- beside
+        the lane, never in its turn (2026-11-21): until it is open the lane
+        looks for work on its short timer and takes pages as before."""
         if night_rest.resting():
-            if self._notify_conn is not None:
-                with contextlib.suppress(Exception):
-                    await self._notify_conn.close()
-                self._notify_conn = None
+            await self._drop_listener()
             await night_rest.wait_until_awake(self._stop)
             self._notify_retry_at = 0.0
             if self._stop.is_set():
                 return False
         elif self._notify_conn is not None and not self._notify_conn.is_closed():
-            return notify_active
-        elif notify_active and self._notify_conn is None:
+            return True
+        elif notify_active and self._notify_conn is None and self._reopening is None:
             return notify_active  # a listener this class did not open (tests)
+        if self._reopening is not None:
+            if not self._reopening.done():
+                return False
+            reopened, self._reopening = self._reopening, None
+            if not reopened.cancelled() and reopened.exception() is None and reopened.result():
+                return True
         if time.monotonic() < self._notify_retry_at:
             return False
         self._notify_retry_at = time.monotonic() + _NOTIFY_REOPEN_SECONDS
         self._notify_conn = None
-        return await self._open_notify(notify_url)
+        self._reopening = asyncio.create_task(self._open_notify(notify_url), name="capture-v2-listen")
+        return False
 
     async def _run(self) -> None:
         settings = get_settings()
@@ -284,19 +355,31 @@ class CaptureV2ClassificationWorker:
         notify_url = getattr(settings, "worker_notify_db_url", "") or database_url
         notify_active = await self._open_notify(str(notify_url))
         worker_id = _worker_id()
+        # Where the lane's time went since its last page: read when a page it takes
+        # has been waiting although the lane was free (2026-11-21).
+        free = _FreeTime()
         try:
             while not self._stop.is_set():
+                mark = time.monotonic()
                 notify_active = await self._keep_listening(str(notify_url), notify_active)
+                free.listen += time.monotonic() - mark
                 if self._stop.is_set():
                     break
                 self.stats.cycles += 1
                 did_work = False
                 try:
+                    mark = time.monotonic()
                     job = await self._claim(factory, worker_id)
+                    free.claim += time.monotonic() - mark
                     if job is not None:
                         did_work = True
+                        free.report(job, worker_id=worker_id, notify_active=notify_active)
                         self.stats.record(await self._process(job))
+                        free = _FreeTime()
+                    else:
+                        free.looks += 1
                 except Exception as exc:  # noqa: BLE001
+                    free.errors += 1
                     failure = technical_failure(exc, operation="worker")
                     logger.error(
                         "capture_v2_worker_error",
@@ -308,7 +391,9 @@ class CaptureV2ClassificationWorker:
                     )
                 if not did_work:
                     self._wake.clear()
+                    mark = time.monotonic()
                     await idle_wait(self._wake, NOTIFY_BACKSTOP_SECONDS if notify_active else 0.25)
+                    free.waiting += time.monotonic() - mark
         finally:
             await engine.dispose()
 
@@ -324,7 +409,7 @@ class CaptureV2ClassificationWorker:
                     text(
                         """
                         SELECT j.tenant_id, j.classification_job_id, j.document_id,
-                               j.attempt_no, d.correlation_id
+                               j.attempt_no, d.correlation_id, j.due_at_utc
                         FROM docintel.document_capture_v2_classification_jobs j
                         JOIN docintel.documents d
                           ON d.tenant_id=j.tenant_id AND d.document_id=j.document_id
