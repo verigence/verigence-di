@@ -311,7 +311,12 @@ async def test_a_resting_processing_lane_closes_its_listener_and_listens_again_w
     world.signal = ("boot-1", 1)
     world.pass_time(10)
     await rest.step()
-    assert await asyncio.wait_for(turn, timeout=1) is True
+    # Woken: the lane goes straight to its work; the listener opens beside it.
+    assert await asyncio.wait_for(turn, timeout=1) is False
+    await asyncio.sleep(0.01)
+    assert opened == ["postgresql://direct"]
+    assert await lane._keep_listening("postgresql://direct", False) is True  # noqa: SLF001
+    assert await lane._keep_listening("postgresql://direct", True) is True  # noqa: SLF001
     assert opened == ["postgresql://direct"]
 
 
@@ -339,8 +344,110 @@ async def test_by_day_a_lost_listener_is_opened_again_at_most_once_a_minute(
         assert attempts == []  # the connection is open: nothing to do
         conn.closed = True  # the database dropped it
         assert await lane._keep_listening("postgresql://direct", True) is False  # noqa: SLF001
+        await asyncio.sleep(0.01)
+        assert await lane._keep_listening("postgresql://direct", False) is False  # noqa: SLF001
+        await asyncio.sleep(0.01)
         assert await lane._keep_listening("postgresql://direct", False) is False  # noqa: SLF001
         assert attempts == ["postgresql://direct"]  # one try now, the next a minute later
+
+
+@pytest.mark.no_docker
+async def test_opening_a_lost_listener_never_takes_the_lanes_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """20 Nov 2026: the lanes reopened their LISTEN connection in their own turn,
+    with no time limit, and pages waited while most lanes took nothing. However
+    long the database takes to answer, the lane's turn returns at once; it works
+    on its short timer meanwhile and finds the listener open on a later turn."""
+    from verigence.di.workers import capture_v2_classifier as classifier
+    from verigence.di.workers import processor
+
+    for lane, opener in (
+        (processor.V2ProcessingWorker(1), "_open_notify_conn"),
+        (classifier.CaptureV2ClassificationWorker(), "_open_notify"),
+    ):
+        lost = _Conn()
+        lost.closed = True
+        lane._notify_conn = lost  # noqa: SLF001
+        answered = asyncio.Event()
+        attempts: list[str] = []
+
+        async def slow(
+            url: str, lane: object = lane, answered: asyncio.Event = answered, attempts: list[str] = attempts,
+        ) -> bool:
+            attempts.append(url)
+            await answered.wait()  # the database takes its time
+            lane._notify_conn = _Conn()  # type: ignore[attr-defined]  # noqa: SLF001
+            return True
+
+        monkeypatch.setattr(lane, opener, slow)
+        for _ in range(3):  # three turns of the lane while the database has not answered
+            assert await asyncio.wait_for(
+                lane._keep_listening("postgresql://direct", True), timeout=0.2  # noqa: SLF001
+            ) is False
+            await asyncio.sleep(0.01)
+        assert attempts == ["postgresql://direct"]
+        answered.set()
+        await asyncio.sleep(0.01)
+        assert await lane._keep_listening("postgresql://direct", False) is True  # noqa: SLF001
+        assert attempts == ["postgresql://direct"]
+
+
+@pytest.mark.no_docker
+async def test_stopping_a_lane_ends_a_listener_still_being_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from verigence.di.workers import capture_v2_classifier as classifier
+    from verigence.di.workers import processor
+
+    for lane, opener in (
+        (processor.V2ProcessingWorker(1), "_open_notify_conn"),
+        (classifier.CaptureV2ClassificationWorker(), "_open_notify"),
+    ):
+        async def never(url: str) -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        monkeypatch.setattr(lane, opener, never)
+        assert await lane._keep_listening("postgresql://direct", False) is False  # noqa: SLF001
+        opening = lane._reopening  # noqa: SLF001
+        assert opening is not None and not opening.done()
+        await asyncio.wait_for(lane.stop(), timeout=1)
+        assert opening.cancelled() and lane._reopening is None  # noqa: SLF001
+
+
+@pytest.mark.no_docker
+def test_a_page_that_waited_while_its_lane_was_free_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from verigence.di.workers import capture_v2_classifier as classifier
+
+    said: list[dict[str, object]] = []
+
+    class _Log:
+        def warning(self, event: str, **fields: object) -> None:
+            said.append({"event": event, **fields})
+
+    monkeypatch.setattr(classifier, "logger", _Log())
+    now = datetime.now(UTC)
+
+    def taken(due: datetime, *, free_for: float, listen: float = 0.0, looking: float = 0.0,
+              waiting: float = 0.0, looks: int = 0) -> None:
+        free = classifier._FreeTime()  # noqa: SLF001
+        free.since -= free_for
+        free.listen, free.claim, free.waiting, free.looks = listen, looking, waiting, looks
+        free.report({"document_id": "d", "classification_job_id": "j", "due_at_utc": due},
+                    worker_id="w", notify_active=True)
+
+    taken(now, free_for=30)  # taken the moment it was due
+    taken(now - timedelta(seconds=90), free_for=0.2)  # waited, but this lane was busy until now
+    taken(None, free_for=30)  # type: ignore[arg-type]
+    assert said == []
+    taken(now - timedelta(seconds=90), free_for=40, listen=31, looking=1, waiting=8, looks=4)
+    [line] = said
+    assert line["event"] == "capture_v2_lane_free_while_page_waited"
+    assert line["most_time_in"] == "listener" and line["looks_that_found_nothing"] == 4
+    assert 89 <= float(line["page_waited_seconds"]) <= 92 and float(line["lane_free_seconds"]) >= 40  # type: ignore[arg-type]
 
 
 # ── heartbeats and the scheduler ────────────────────────────────────────────

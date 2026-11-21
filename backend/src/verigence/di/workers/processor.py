@@ -72,6 +72,9 @@ _NOTIFY_CHANNEL = "di_processing_jobs"
 _V2_PROCESSING_CONCURRENCY = 4
 _V2_FALLBACK_POLL_SECONDS = 0.5
 _NOTIFY_REOPEN_SECONDS = 60.0  # a lost LISTEN connection is opened again at most this often
+# Opening it is given this long and is done beside the lane, never in its turn
+# (2026-11-21, see workers.capture_v2_classifier).
+_NOTIFY_CONNECT_SECONDS = 5.0
 # Capture V2 jobs whose failure may be followed by a daytime retry: the first
 # attempt and the retries themselves.
 _V2_DAYTIME_JOB_TYPES = frozenset({"INITIAL", "V2_FAST_RETRY"})
@@ -104,6 +107,7 @@ class _NotifyWorker:
         self._notify_event = asyncio.Event()
         self._notify_conn: Any | None = None
         self._notify_retry_at = 0.0
+        self._reopening: asyncio.Task[bool] | None = None
         self._runtime_correlation_id = correlation_id_or_new()
         self.stats = WorkerStats()
 
@@ -124,10 +128,7 @@ class _NotifyWorker:
                 await asyncio.wait_for(self._task, timeout=30.0)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-        if self._notify_conn is not None:
-            with contextlib.suppress(Exception):
-                await self._notify_conn.close()
-            self._notify_conn = None
+        await self._close_notify_conn()
         logger.info(
             f"{self._task_name}_stopped",
             correlation_id=self._runtime_correlation_id,
@@ -161,9 +162,12 @@ class _NotifyWorker:
             )
             self._notify_event.set()
 
+        conn: Any | None = None
         try:
-            conn = await asyncpg.connect(_asyncpg_url(notify_db_url))
-            await conn.add_listener(_NOTIFY_CHANNEL, _on_notify)
+            conn = await asyncpg.connect(_asyncpg_url(notify_db_url), timeout=_NOTIFY_CONNECT_SECONDS)
+            await asyncio.wait_for(
+                conn.add_listener(_NOTIFY_CHANNEL, _on_notify), timeout=_NOTIFY_CONNECT_SECONDS
+            )
             self._notify_conn = conn
             logger.info(
                 "notify_listener_started",
@@ -173,6 +177,9 @@ class _NotifyWorker:
             )
             return True
         except Exception as exc:  # noqa: BLE001
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.terminate()
             logger.warning(
                 "notify_listener_failed",
                 error_code="NOTIFY_LISTENER_UNAVAILABLE",
@@ -184,6 +191,11 @@ class _NotifyWorker:
             return False
 
     async def _close_notify_conn(self) -> None:
+        if self._reopening is not None:
+            self._reopening.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reopening
+            self._reopening = None
         if self._notify_conn is not None:
             with contextlib.suppress(Exception):
                 await self._notify_conn.close()
@@ -199,7 +211,11 @@ class _NotifyWorker:
         listens again. By day a LISTEN connection found closed is opened again,
         at most once a minute: without that a lane whose connection was lost
         went on with its six-second timer for good and was never woken at once
-        again."""
+        again.
+
+        It is opened beside the lane, never in its turn (2026-11-21): this
+        returns at once, the lane looks for work on its short timer and takes
+        documents as before, and a later turn finds the connection open."""
         if night_rest.resting():
             await self._close_notify_conn()
             await night_rest.wait_until_awake(self._stop_event)
@@ -207,14 +223,23 @@ class _NotifyWorker:
             if self._stop_event.is_set():
                 return False
         elif self._notify_conn is not None and not self._notify_conn.is_closed():
-            return notify_active
-        elif notify_active and self._notify_conn is None:
+            return True
+        elif notify_active and self._notify_conn is None and self._reopening is None:
             return notify_active  # a listener this class did not open (tests)
+        if self._reopening is not None:
+            if not self._reopening.done():
+                return False
+            reopened, self._reopening = self._reopening, None
+            if not reopened.cancelled() and reopened.exception() is None and reopened.result():
+                return True
         if not notify_db_url.strip() or time.monotonic() < self._notify_retry_at:
             return False
         self._notify_retry_at = time.monotonic() + _NOTIFY_REOPEN_SECONDS
         self._notify_conn = None
-        return await self._open_notify_conn(notify_db_url)
+        self._reopening = asyncio.create_task(
+            self._open_notify_conn(notify_db_url), name=f"{self._task_name}-listen"
+        )
+        return False
 
     async def _run(self) -> None:  # pragma: no cover - abstract runtime loop
         raise NotImplementedError
