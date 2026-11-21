@@ -606,3 +606,117 @@ async def test_a_known_actor_is_read_not_rewritten(db_session) -> None:  # type:
         {"t": tenant_id})
     await provision_actor(db_session, tenant_id, "audit-core", "SERVICE")
     assert (await row())[3] == "ACTIVE"
+
+
+# ── The shutdown switch (product owner, 21 Nov 2026) ───────────────────────────────────────────
+# Whether Verigence is shut is state held by Security (daily hours, Shut down now, Start now); DI
+# rests and runs by it, not by a clock of its own.
+
+
+def _status(**over: object) -> dict[str, object]:
+    return {"closed": False, "opensAtUtc": None, "message": None, "resting": False, "restUntilUtc": None,
+            "hoursFromIst": "00:30", "hoursToIst": "08:00", "manual": None, "manualSinceUtc": None,
+            "manualUntilUtc": None, **over}
+
+
+def _ist_on(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 11, day, hour, minute, tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(UTC)
+
+
+def _z(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+@pytest.fixture
+def switch(monkeypatch):
+    monkeypatch.setattr(nr, "WINDOW", NIGHT)
+    nr.unfollow()
+    yield
+    nr.unfollow()
+
+
+def test_until_security_answers_dis_own_setting_stands(switch):
+    assert nr.followed() is None
+    assert nr.in_window(_ist_on(22, 3)) and not nr.in_window(_ist_on(22, 14))
+    assert nr.seconds_until_wake(_ist_on(22, 7)) == 3600
+
+
+def test_the_daily_hours_are_the_ones_security_says(switch):
+    assert nr.follow(_status(hoursFromIst="22:00", hoursToIst="07:30"))
+    assert nr.in_window(_ist_on(21, 23)) and nr.in_window(_ist_on(22, 7, 29))
+    assert not nr.in_window(_ist_on(22, 7, 30)) and not nr.in_window(_ist_on(22, 21, 59))
+    assert nr.seconds_until_wake(_ist_on(22, 7)) == 1800
+    assert nr.follow(_status(hoursFromIst=None, hoursToIst=None))
+    assert not nr.in_window(_ist_on(22, 3))
+
+
+def test_a_shut_down_by_hand_is_rested_through_like_the_night_and_start_now_ends_a_rest(switch):
+    six_pm, next_morning = _ist_on(21, 18), _ist_on(22, 8)
+    assert nr.follow(_status(resting=True, manual="SHUT", manualSinceUtc=_z(six_pm), manualUntilUtc=_z(next_morning)))
+    for at in (six_pm, _ist_on(21, 23, 59), _ist_on(22, 7, 59)):
+        assert nr.in_window(at)
+    assert not nr.in_window(next_morning)
+    assert nr.seconds_until_wake(_ist_on(21, 20)) == 12 * 3600
+    # One that runs out inside the daily hours goes on to the morning.
+    assert nr.follow(_status(manual="SHUT", manualUntilUtc=_z(_ist_on(22, 2))))
+    assert nr.seconds_until_wake(_ist_on(22, 1)) == 7 * 3600
+    # Start now at three at night: up until the morning, and the next night is shut as every night.
+    assert nr.follow(_status(manual="OPEN", manualUntilUtc=_z(_ist_on(22, 8))))
+    assert not nr.in_window(_ist_on(22, 3)) and nr.seconds_until_wake(_ist_on(22, 3)) == 0
+    assert nr.in_window(_ist_on(23, 0, 30))
+
+
+def test_an_answer_that_is_not_one_changes_nothing(switch):
+    assert nr.follow(_status(hoursFromIst="22:00", hoursToIst="07:30"))
+    before = nr.followed()
+    for bad in (None, "ok", [], {}, {"status": "live"}, _status(hoursFromIst="ten", hoursToIst="07:30"),
+                _status(hoursFromIst="08:00", hoursToIst="08:00")):
+        assert not nr.follow(bad)
+        assert nr.followed() == before
+    assert nr.follow(_status(manual="SHUT", manualUntilUtc=None))
+    assert nr.followed().manual is None
+
+
+def test_where_security_is_asked_and_when_a_process_keeps_its_own_setting(switch, monkeypatch):
+    monkeypatch.delenv("VERIGENCE_SHUTDOWN_STATUS_URL", raising=False)
+    monkeypatch.delenv("VERIGENCE_SHUTDOWN_SWITCH", raising=False)
+    assert nr.status_url("https://security.example/.well-known/jwks.json") == \
+        "https://security.example/security/v1/system/status"
+    for nowhere in ("", "not a url", "https://mock-security/.well-known/jwks.json"):
+        assert nr.status_url(nowhere) == ""
+    monkeypatch.setenv("VERIGENCE_SHUTDOWN_STATUS_URL", "http://verigence-security.railway.internal:8001/security/v1/system/status")
+    assert nr.status_url("").startswith("http://verigence-security.railway.internal:8001/")
+    # Nowhere to ask, switched off, or told never to sleep: no thread, DI's own setting.
+    assert nr.start_following("") is None
+    monkeypatch.setenv("VERIGENCE_SHUTDOWN_SWITCH", "off")
+    assert nr.start_following("https://security.example/security/v1/system/status") is None
+    monkeypatch.delenv("VERIGENCE_SHUTDOWN_SWITCH")
+    monkeypatch.setattr(nr, "WINDOW", None)
+    assert nr.start_following("https://security.example/security/v1/system/status") is None
+
+
+def test_asking_takes_the_answer_and_a_failure_leaves_the_state_as_it_was(switch, monkeypatch):
+    import httpx
+
+    answers = iter([
+        httpx.Response(200, json=_status(hoursFromIst="22:00", hoursToIst="07:30")),
+        httpx.Response(503),
+        httpx.Response(200, text="<html>"),
+        httpx.Response(200, json={"status": "live"}),
+    ])
+    asked: list[str] = []
+
+    def get(url: str, **_: object) -> httpx.Response:
+        asked.append(url)
+        response = next(answers, None)
+        if response is None:
+            raise httpx.ConnectError("no route")
+        return response
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert nr.ask("https://security.example/security/v1/system/status")
+    assert nr.followed().hours == (clock_time(22, 0), clock_time(7, 30))
+    for _ in range(4):
+        assert not nr.ask("https://security.example/security/v1/system/status")
+        assert nr.followed().hours == (clock_time(22, 0), clock_time(7, 30))
+    assert len(asked) == 5

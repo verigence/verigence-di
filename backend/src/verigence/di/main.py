@@ -245,9 +245,11 @@ def create_app() -> FastAPI:
         # page (2026-10-27); a clean stop is stamped on shutdown.
         from verigence.di.platform_heartbeat import run_platform_heartbeat  # noqa: PLC0415
 
+        # Whether Verigence is shut is Security's to say (the System shutdown tab), once a minute.
+        night_rest.start_following(night_rest.status_url(settings.security_jwks_url))
         heartbeat_stop = asyncio.Event()
         heartbeat_task = asyncio.create_task(
-            # Asleep by the clock (verigence.di.night_rest): no beat in the window.
+            # Asleep while Verigence is shut (verigence.di.night_rest): no beat then.
             run_platform_heartbeat(
                 str(settings.database_url), "di-api", heartbeat_stop, asleep=night_rest.in_window,
             ),

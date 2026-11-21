@@ -29,15 +29,30 @@ and Security read) a DI process asks the database nothing on its own clock:
 
 Not knowing is a reason to stay up, never to sleep: with no signal address set,
 or the API not answering, a worker polls as it always did.
+
+The shutdown switch (product owner, 21 Nov 2026: "lets have a tab in the
+verigence to have a full shutdown of DB"). The window was a setting of each
+service. It is now state held by Verigence Security, changed by a Super Admin or
+Executive from the System shutdown tab: the daily hours, a "Shut down now" (shut
+to the next daily opening) and a "Start now". Each DI process asks Security for
+it once a minute (``start_following``; Security answers from memory, no
+database) and ``follow`` takes the answer. From then on "the window" here is
+that state: a shutdown by hand in the evening is rested through exactly as the
+night is, work in hand first, and a Start at night ends the rest within the
+minute. The answer carries the schedule, so a process keeps time by itself
+between answers and while Security cannot be reached; before the first answer
+the setting above stands.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import os
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from datetime import time as clock_time
 from zoneinfo import ZoneInfo
@@ -74,25 +89,187 @@ def parse_window(value: str | None) -> Window | None:
 WINDOW: Window | None = parse_window(os.environ.get("VERIGENCE_SLEEP_WINDOW_IST", DEFAULT_WINDOW))
 
 
-def in_window(now: datetime | None = None) -> bool:
-    """Whether the clock is inside the sleep window."""
-    if WINDOW is None:
+SHUT = "SHUT"
+OPEN = "OPEN"
+
+
+@dataclass(frozen=True)
+class Followed:
+    """Security's shutdown switch as last heard: the daily hours (None: no daily
+    shutdown) and a Shut down or Start by hand, in force until ``until``."""
+
+    hours: Window | None
+    manual: str | None = None
+    until: datetime | None = None
+
+
+_followed: Followed | None = None
+_followed_lock = threading.Lock()
+
+
+def _when(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value)).astimezone(UTC) if value else None
+    except ValueError:
+        return None
+
+
+def follow(status: object) -> bool:
+    """Take Security's answer (GET /security/v1/system/status) as the state to go
+    by. False, and nothing changes, for an answer that is not one."""
+    global _followed  # noqa: PLW0603 - one state per process is the design
+    if not isinstance(status, dict) or "resting" not in status:
         return False
-    start, end = WINDOW
-    local = (now or datetime.now(UTC)).astimezone(IST).time()
+    hours: Window | None = None
+    start_text, end_text = status.get("hoursFromIst"), status.get("hoursToIst")
+    if start_text or end_text:
+        try:
+            start, end = clock_time.fromisoformat(str(start_text)), clock_time.fromisoformat(str(end_text))
+        except ValueError:
+            return False
+        if start == end:
+            return False
+        hours = (start, end)
+    manual = status.get("manual")
+    until = _when(status.get("manualUntilUtc"))
+    if manual not in {SHUT, OPEN} or until is None:
+        manual, until = None, None
+    with _followed_lock:
+        _followed = Followed(hours=hours, manual=manual, until=until)
+    return True
+
+
+def unfollow() -> None:
+    """Back to the setting alone (tests)."""
+    global _followed  # noqa: PLW0603
+    with _followed_lock:
+        _followed = None
+
+
+def followed() -> Followed | None:
+    with _followed_lock:
+        return _followed
+
+
+def _hours() -> Window | None:
+    state = followed()
+    return state.hours if state is not None else WINDOW
+
+
+def _manual(moment: datetime) -> Followed | None:
+    state = followed()
+    if state is None or state.manual is None or state.until is None:
+        return None
+    return state if moment < state.until else None
+
+
+def _in_hours(moment: datetime) -> bool:
+    hours = _hours()
+    if hours is None:
+        return False
+    start, end = hours
+    local = moment.astimezone(IST).time()
     return start <= local < end if start < end else (local >= start or local < end)
 
 
-def seconds_until_wake(now: datetime | None = None) -> float:
-    """Seconds left of the window; 0 outside it."""
-    if WINDOW is None or not in_window(now):
-        return 0.0
-    local = (now or datetime.now(UTC)).astimezone(IST)
-    end = WINDOW[1]
-    wake = local.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+def _next_opening(moment: datetime) -> datetime | None:
+    hours = _hours()
+    if hours is None:
+        return None
+    local = moment.astimezone(IST)
+    wake = local.replace(hour=hours[1].hour, minute=hours[1].minute, second=0, microsecond=0)
     if wake <= local:
         wake += timedelta(days=1)
-    return (wake - local).total_seconds()
+    return wake
+
+
+def in_window(now: datetime | None = None) -> bool:
+    """Whether Verigence is shut at this moment: a Shut down or Start by hand
+    while it lasts, else the daily hours."""
+    moment = now or datetime.now(UTC)
+    manual = _manual(moment)
+    return manual.manual == SHUT if manual is not None else _in_hours(moment)
+
+
+def seconds_until_wake(now: datetime | None = None) -> float:
+    """Seconds left of the shutdown; 0 outside one."""
+    moment = now or datetime.now(UTC)
+    if not in_window(moment):
+        return 0.0
+    manual = _manual(moment)
+    wake = manual.until if manual is not None else _next_opening(moment)
+    if manual is not None and wake is not None and _in_hours(wake):
+        # A shutdown by hand that runs out inside the daily hours goes on to that day's opening.
+        wake = _next_opening(wake)
+    return max(0.0, (wake - moment).total_seconds()) if wake is not None else 0.0
+
+
+# ── Asking Security ────────────────────────────────────────────────────────
+FOLLOW_EVERY_SECONDS = 60.0
+_follower: threading.Thread | None = None
+_follower_lock = threading.Lock()
+
+
+def status_url(security_jwks_url: str) -> str:
+    """Where Security says whether Verigence is shut: VERIGENCE_SHUTDOWN_STATUS_URL
+    if set, else the same host DI already checks tokens against."""
+    explicit = os.environ.get("VERIGENCE_SHUTDOWN_STATUS_URL", "").strip()
+    if explicit:
+        return explicit
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    parts = urlsplit(security_jwks_url.strip())
+    if parts.scheme not in {"http", "https"} or not parts.netloc or "mock" in parts.netloc.lower():
+        return ""
+    return f"{parts.scheme}://{parts.netloc}/security/v1/system/status"
+
+
+def ask(url: str, *, timeout: float = 5.0) -> bool:
+    """One question. True when Security's answer was taken; False otherwise, with
+    the state left as it was: a failure is never a reason to sleep or to wake."""
+    import httpx  # noqa: PLC0415
+
+    try:
+        response = httpx.get(url, timeout=timeout)
+        if response.status_code != 200:
+            return False
+        return follow(response.json())
+    except Exception:  # noqa: BLE001 - any failure is "not known"
+        return False
+
+
+def start_following(url: str, stop: threading.Event | None = None) -> threading.Thread | None:
+    """Ask once a minute, in a thread of its own, once per process. None when
+    there is nowhere to ask, when VERIGENCE_SHUTDOWN_SWITCH=off, or when this
+    process was told never to sleep (VERIGENCE_SLEEP_WINDOW_IST=off)."""
+    global _follower  # noqa: PLW0603
+    off = os.environ.get("VERIGENCE_SHUTDOWN_SWITCH", "on").strip().lower() in {"off", "false", "0", "no"}
+    if off or not url or WINDOW is None:
+        return None
+    halt = stop or threading.Event()
+
+    def run() -> None:
+        heard: bool | None = None
+        was_shut: bool | None = None
+        while True:
+            answered = ask(url)
+            if answered != heard:
+                heard = answered
+                logger.info("di_shutdown_switch_heard" if answered else "di_shutdown_switch_not_heard")
+            shut = in_window()
+            if shut != was_shut:
+                was_shut = shut
+                state = followed()
+                logger.info("di_shutdown_switch_state", shut=shut, by_hand=state.manual if state else None,
+                            wakes_in_seconds=round(seconds_until_wake()))
+            if halt.wait(FOLLOW_EVERY_SECONDS):
+                return
+
+    with _follower_lock:
+        if _follower is None or not _follower.is_alive():
+            _follower = threading.Thread(target=run, name="shutdown-switch", daemon=True)
+            _follower.start()
+        return _follower
 
 
 # ── The API's side: the signal ─────────────────────────────────────────────
