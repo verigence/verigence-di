@@ -31,12 +31,13 @@ def test_anything_else_after_the_answer_is_still_refused(tail: str) -> None:
 
 
 def test_multi_item_answer_logs_its_shape_without_values() -> None:
-    # Two objects citing the same page are not one-per-page: still refused.
+    # Two objects citing the same page are not one-per-page: still refused -- since
+    # 22 Nov 2026 as several documents on one page (test_several_documents_on_a_page.py).
     raw = json.dumps([
         {"customer_name": {"value": "SECRET ONE", "confidence": "high", "pageNo": 1}},
         {"customer_name": {"value": "SECRET TWO", "confidence": "high", "pageNo": 1}, "extra": 1},
     ])
-    with capture_logs() as logs, pytest.raises(GeminiResponseInvalidError):
+    with capture_logs() as logs, pytest.raises(ValueError):
         _parse_response(raw, get_schema("booking_form"), _FIELDS)
     shape = next(e for e in logs if e["event"] == "gemini_multi_item_answer_shape")
     assert shape["items"] == 2

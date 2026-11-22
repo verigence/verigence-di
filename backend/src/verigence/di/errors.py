@@ -134,6 +134,7 @@ class ErrorCode:
     # observability-pipeline
     DOCUMENT_AI_REQUEST_REJECTED     = _ErrorDef("DOCUMENT_AI_REQUEST_REJECTED",     502, False, "DEPENDENCY",       "Document AI provider rejected the request.")
     DOCUMENT_AI_CONTENT_BLOCKED      = _ErrorDef("DOCUMENT_AI_CONTENT_BLOCKED",      422, False, "CLASSIFICATION",   "Document AI provider declined to process the document content.")
+    PAGE_HAS_SEVERAL_DOCUMENTS       = _ErrorDef("PAGE_HAS_SEVERAL_DOCUMENTS",       422, False, "CLASSIFICATION",   "More than one document was read on a page sent as one document.")
     WORKER_LEASE_EXHAUSTED           = _ErrorDef("WORKER_LEASE_EXHAUSTED",           500, False, "INTERNAL",         "Processing repeatedly stopped before completing and was abandoned.")
 
 

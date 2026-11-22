@@ -96,6 +96,31 @@ class GeminiResponseInvalidError(ValueError):
     retryable = True
 
 
+class GeminiSeveralDocumentsError(ValueError):
+    """Gemini read more than one document where one was sent: two or more
+    objects that share a page (22 Nov 2026).
+
+    Live that day: 27 pages PCs had typed as a receipt or an accessory invoice
+    were answered with several objects -- 25 of them with exactly two -- and
+    refused as DOCUMENT_AI_RESPONSE_INVALID, three attempts each, every time
+    the page was sent. The PC read "AI reading failed. Please upload this page
+    again", and the same page uploaded again got the same answer. The product
+    owner's rule (17 Nov): a page that carries two receipts is not accepted
+    and is not split. So it is refused for what it is, once: the PC is told to
+    upload each document as its own page (Audit Core words it).
+
+    A ValueError so schema authoring keeps answering 422 for such a sample;
+    extract() handles it before its generic parse-failure handling."""
+
+    technical_code = "PAGE_HAS_SEVERAL_DOCUMENTS"
+    retryable = False
+
+    def __init__(self, *, items: int, shared_pages: list[int]) -> None:
+        self.items = items
+        self.shared_pages = shared_pages
+        super().__init__(f"{items} documents answered for one, sharing page(s) {shared_pages}")
+
+
 class GeminiContentBlockedError(ValueError):
     """Gemini refused the content (prompt blocked or a safety finish reason).
 
@@ -236,6 +261,19 @@ class GeminiDocumentAIAdapter(DocumentAIAdapter):
                 field_results = _parse_response(raw_response, schema, fields)
                 attempt_ms = _elapsed_ms(attempt_start)
                 break
+            except GeminiSeveralDocumentsError as exc:
+                # What is on the page does not change with another call.
+                log.warning(
+                    "gemini_several_documents",
+                    document_type_key=document_type_key,
+                    gemini_model=_GEMINI_MODEL,
+                    attempt=attempt_no,
+                    error_code=exc.technical_code,
+                    items=exc.items,
+                    shared_pages=exc.shared_pages,
+                    duration_ms=_elapsed_ms(attempt_start),
+                )
+                raise
             except GeminiContentBlockedError as exc:
                 # Deterministic at temperature 0: a second call is refused again.
                 log.warning(
@@ -763,6 +801,26 @@ def _item_pages(item: dict[str, Any]) -> set[int]:
     }
 
 
+def _pages_several_documents_share(data: list[Any]) -> list[int]:
+    """The pages two or more of the answered objects both cite: more than one
+    document on a page (two receipts photographed together, say). Empty when
+    the answer is anything else -- an item that is not an object, or objects
+    that cite no page in common -- which stays an answer we cannot use."""
+    if len(data) < 2 or not all(isinstance(item, dict) for item in data):
+        return []
+    seen: set[int] = set()
+    shared: set[int] = set()
+    for item in data:
+        pages = {
+            page for value in item.values()
+            if isinstance(value, dict) and value.get("value") is not None
+            and (page := _parse_page_no(value)) is not None
+        }
+        shared |= pages & seen
+        seen |= pages
+    return sorted(shared)
+
+
 def _merge_one_object_per_page(data: list[Any]) -> dict[str, Any] | None:
     """One document spread over several pages, answered as one object per
     page (2026-10-21: every two-page accessory invoice came back as two
@@ -875,6 +933,9 @@ def _parse_response(
             data = data[0]
         elif (merged := _merge_one_object_per_page(data)) is not None:
             data = merged
+        elif shared := _pages_several_documents_share(data):
+            _log_answer_shape(data, db_fields)
+            raise GeminiSeveralDocumentsError(items=len(data), shared_pages=shared)
         else:
             _log_answer_shape(data, db_fields)
             raise GeminiResponseInvalidError(
