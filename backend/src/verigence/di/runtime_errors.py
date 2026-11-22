@@ -48,6 +48,8 @@ BUSINESS_FAILURE_CODES = frozenset(
         "INVALID_FILE_CONTENT",
         "MIME_TYPE_NOT_ALLOWED",
         "ORIGINAL_ARTIFACT_MISSING",
+        # the AI read more than one document on a page sent as one (22 Nov 2026)
+        "PAGE_HAS_SEVERAL_DOCUMENTS",
         "UPLOAD_NOT_FIT",
     }
 )
@@ -347,6 +349,7 @@ def _detail_for_code(code: str) -> str:
         "DOCUMENT_AI_RESPONSE_INVALID": "The Document AI provider returned an unusable response. Processing may be retried automatically.",
         "DOCUMENT_AI_REQUEST_REJECTED": "The Document AI provider rejected the request. It will not be retried automatically.",
         "DOCUMENT_AI_CONTENT_BLOCKED": "The Document AI provider declined to process this document's content.",
+        "PAGE_HAS_SEVERAL_DOCUMENTS": "More than one document was read on a page sent as one document. Each document must be sent as its own page.",
         "DOCUMENT_AI_NOT_CONFIGURED": "The Document AI provider refused our credentials or model; an administrator must fix the configuration.",
         "WORKER_LEASE_EXHAUSTED": "Processing repeatedly stopped before completing and was abandoned.",
         "STORAGE_READ_ERROR": "The stored document could not be read. Processing may be retried automatically.",
