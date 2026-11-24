@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from verigence.di.auth.service_integration import (
     ServiceIntegrationPrincipal,
@@ -691,6 +692,137 @@ async def reprocess_capture_document(
         documentId=documentId, outcome=str(result["outcome"]),
         processingJobId=UUID(str(job_id)) if job_id else None,
     )
+
+
+class V2CaptureMoveCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    targetExternalContextRef: str = Field(min_length=1, max_length=500)
+
+
+class V2CaptureMoveResponse(BaseModel):
+    documentId: UUID
+    externalContextRef: str
+    # moved | already_there
+    outcome: str
+
+
+async def move_document_to_context(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    document_id: UUID,
+    source_ref: str,
+    target_ref: str,
+) -> str:
+    """Re-home one document DI already holds -- its classification, reading and
+    corrections -- from one Audit Core storage context to another, without
+    reading it again. Returns moved, already_there, not_found or
+    target_missing. The stored file stays where it is (keys are by document)."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT u.external_context_ref
+                FROM docintel.document_capture_v2_uploads u
+                JOIN docintel.documents d ON d.tenant_id=u.tenant_id AND d.document_id=u.document_id
+                WHERE u.tenant_id=:tenant_id AND u.document_id=:document_id
+                FOR UPDATE OF u, d
+                """
+            ),
+            {"tenant_id": tenant_id, "document_id": document_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        return "not_found"
+    if row["external_context_ref"] == target_ref:
+        return "already_there"  # a retry after the move went through
+    if row["external_context_ref"] != source_ref:
+        return "not_found"
+    target = await get_audit_storage_context_by_ref(
+        session, tenant_id=tenant_id, external_context_ref=target_ref
+    )
+    if target is None:
+        return "target_missing"
+    params = {
+        "tenant_id": tenant_id,
+        "document_id": document_id,
+        "context_id": target["storage_context_id"],
+        "ref": target_ref,
+        "subject_id": target["subject_id"],
+    }
+    await session.execute(
+        text(
+            """
+            UPDATE docintel.document_capture_v2_uploads
+            SET audit_storage_context_id=:context_id, external_context_ref=:ref, updated_at_utc=now()
+            WHERE tenant_id=:tenant_id AND document_id=:document_id
+            """
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            """
+            UPDATE docintel.documents
+            SET subject_id=:subject_id, audit_storage_context_id=:context_id
+            WHERE tenant_id=:tenant_id AND document_id=:document_id
+            """
+        ),
+        params,
+    )
+    await session.execute(
+        text(
+            "UPDATE docintel.document_search_index SET subject_id=:subject_id, updated_at_utc=now() "
+            "WHERE tenant_id=:tenant_id AND document_id=:document_id"
+        ),
+        params,
+    )
+    return "moved"
+
+
+@router.post(
+    "/audit-storage-contexts/{externalContextRef}/capture-documents/{documentId}:move",
+    response_model=V2CaptureMoveResponse,
+)
+async def move_capture_document(
+    tenantId: str,
+    externalContextRef: str,
+    documentId: UUID,
+    command: V2CaptureMoveCommand,
+    principal: Annotated[ServiceIntegrationPrincipal, Depends(require_service_integration)],
+) -> V2CaptureMoveResponse:
+    """Move a document already read to another Journey's context (product owner
+    2026-11-24: "no double reading"). Audit Core joins a file read on a Journey
+    of its own to the customer's earlier booking; its documents were copied
+    there and read by the AI a second time. Now they move: one reading, the
+    earlier booking lists the document and copies its values. Idempotent."""
+    target_ref = command.targetExternalContextRef.strip()
+    if not target_ref:
+        raise http_exception(ErrorCode.INVALID_REQUEST, detail="targetExternalContextRef is required.")
+    async with tenant_session(tenantId) as session:
+        outcome = await move_document_to_context(
+            session, tenant_id=tenantId, document_id=documentId,
+            source_ref=externalContextRef.strip(), target_ref=target_ref,
+        )
+    if outcome == "not_found":
+        raise http_exception(ErrorCode.DOCUMENT_NOT_FOUND)
+    if outcome == "target_missing":
+        raise http_exception(
+            ErrorCode.INVALID_CONFIGURATION,
+            detail="The target audit storage context must be established first.",
+        )
+    logger.info(
+        "capture_v2_document_moved",
+        tenant_id=tenantId,
+        document_id=str(documentId),
+        source_context_ref=externalContextRef,
+        target_context_ref=target_ref,
+        outcome=outcome,
+        actor_id=principal.service_id,
+        actor_type="SERVICE",
+    )
+    return V2CaptureMoveResponse(documentId=documentId, externalContextRef=target_ref, outcome=outcome)
 
 
 async def _status_rows(
